@@ -1,0 +1,28 @@
+[package]
+name = "forge-rtp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+
+tokio = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Crypto for SRTP
+aes = { workspace = true }
+aes-gcm = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+
+# Optional DTLS support
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+
+[features]
+dtls = ["openssl"]

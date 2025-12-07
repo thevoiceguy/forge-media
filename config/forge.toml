@@ -1,0 +1,38 @@
+# Forge Media Engine Configuration
+# Part of the Ferrous Communications Platform
+
+[engine]
+# RTP/RTCP port range
+port_range = { start = 30000, end = 40000 }
+
+# TOS/DSCP value for QoS (0xB8 = EF for voice)
+tos = 0xB8
+
+# Session timeout in seconds
+session_timeout = "5m"
+
+# IP version configuration: "V4Only", "V6Only", "DualStack", "Bridge4to6", "Bridge6to4"
+ip_version = "DualStack"
+
+# Network interfaces
+[[engine.interfaces]]
+name = "eth0"
+address = "0.0.0.0"
+# advertised_address = "203.0.113.50"  # Uncomment for NAT scenarios
+
+[api]
+# HTTP API bind address
+http_bind = "0.0.0.0:8080"
+
+# Enable HTTPS (requires tls_cert and tls_key)
+enable_https = false
+# https_bind = "0.0.0.0:8443"
+# tls_cert = "/etc/forge/cert.pem"
+# tls_key = "/etc/forge/key.pem"
+
+# WebSocket bind address (optional)
+# ws_bind = "0.0.0.0:8081"
+
+# CORS settings
+enable_cors = true
+cors_origins = ["*"]

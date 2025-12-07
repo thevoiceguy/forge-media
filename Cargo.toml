@@ -1,0 +1,158 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/forge-core",
+    "crates/forge-rtp",
+    "crates/forge-engine",
+    "crates/forge-transcoding",
+    "crates/forge-kernel",
+    "crates/forge-conference",
+    "crates/forge-recording",
+    "crates/forge-dtmf",
+    "crates/forge-transcription",
+    "crates/forge-injection",
+    "crates/forge-webrtc",
+    "crates/forge-sdp",
+    "crates/forge-sbc",
+    "crates/forge-siprec",
+    "crates/forge-ai-stream",
+    "crates/forge-ha",
+    "crates/forge-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Ferrous Communications"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ferrous-comms/forge-media"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Networking
+socket2 = { version = "0.5", features = ["all"] }
+
+# Concurrency
+parking_lot = "0.12"
+dashmap = "5.5"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# HTTP/API
+axum = { version = "0.7", features = ["ws", "multipart"] }
+tower = { version = "0.4", features = ["timeout", "limit", "buffer"] }
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
+tokio-tungstenite = "0.21"
+
+# Crypto
+aes = "0.8"
+aes-gcm = "0.10"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+rand = "0.8"
+
+# Utilities
+uuid = { version = "1.6", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1.5"
+bitflags = "2.4"
+
+# Audio processing
+symphonia = { version = "0.5", features = ["all"] }
+rubato = "0.15"
+
+# Codecs
+opus = "0.3"
+
+# Crypto/TLS
+openssl = { version = "0.10", features = ["vendored"] }
+
+[package]
+name = "forge-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+forge-core = { path = "crates/forge-core" }
+forge-rtp = { path = "crates/forge-rtp" }
+forge-engine = { path = "crates/forge-engine" }
+forge-api = { path = "crates/forge-api" }
+forge-transcoding = { path = "crates/forge-transcoding", optional = true }
+forge-conference = { path = "crates/forge-conference", optional = true }
+forge-recording = { path = "crates/forge-recording", optional = true }
+forge-dtmf = { path = "crates/forge-dtmf", optional = true }
+forge-transcription = { path = "crates/forge-transcription", optional = true }
+forge-injection = { path = "crates/forge-injection", optional = true }
+forge-webrtc = { path = "crates/forge-webrtc", optional = true }
+forge-sbc = { path = "crates/forge-sbc", optional = true }
+forge-siprec = { path = "crates/forge-siprec", optional = true }
+forge-ai-stream = { path = "crates/forge-ai-stream", optional = true }
+forge-ha = { path = "crates/forge-ha", optional = true }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+toml = { workspace = true }
+
+[features]
+default = ["transcoding", "conference", "recording", "dtmf"]
+full = [
+    "transcoding",
+    "conference",
+    "recording",
+    "dtmf",
+    "transcription",
+    "injection",
+    "webrtc",
+    "sbc",
+    "siprec",
+    "ai-stream",
+    "ha",
+]
+transcoding = ["dep:forge-transcoding"]
+conference = ["dep:forge-conference"]
+recording = ["dep:forge-recording"]
+dtmf = ["dep:forge-dtmf"]
+transcription = ["dep:forge-transcription"]
+injection = ["dep:forge-injection"]
+webrtc = ["dep:forge-webrtc"]
+sbc = ["dep:forge-sbc"]
+siprec = ["dep:forge-siprec"]
+ai-stream = ["dep:forge-ai-stream"]
+ha = ["dep:forge-ha"]
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = false

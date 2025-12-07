@@ -95,7 +95,7 @@ license.workspace = true
 forge-core = { path = "crates/forge-core" }
 forge-rtp = { path = "crates/forge-rtp" }
 forge-engine = { path = "crates/forge-engine" }
-forge-api = { path = "crates/forge-api" }
+forge-api = { path = "crates/forge-api", optional = false }
 forge-transcoding = { path = "crates/forge-transcoding", optional = true }
 forge-conference = { path = "crates/forge-conference", optional = true }
 forge-recording = { path = "crates/forge-recording", optional = true }

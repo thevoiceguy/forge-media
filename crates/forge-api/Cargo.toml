@@ -8,6 +8,28 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
+
+# Async runtime
 tokio = { workspace = true }
+
+# Web framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["trace", "cors"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
 tracing = { workspace = true }
+
+# Error handling
 thiserror = { workspace = true }
+
+# Utilities
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
+tower = { workspace = true, features = ["util"] }

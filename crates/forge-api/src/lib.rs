@@ -1,7 +1,14 @@
-//! forge-api - Implementation placeholder
+//! Forge API - HTTP/WebSocket API for Forge Media Engine
 //!
-//! This crate will contain the implementation for api.
+//! This crate provides the REST API and WebSocket interface for controlling
+//! and monitoring the Forge media engine.
 
-#![allow(dead_code, unused_variables)]
+pub mod server;
+pub mod routes;
+pub mod error;
+pub mod middleware;
+pub mod response;
 
-pub struct Placeholder;
+pub use server::ApiServer;
+pub use error::{ApiError, ApiResult, ApiErrorResponse};
+pub use response::{ApiResponse, ApiSuccess};

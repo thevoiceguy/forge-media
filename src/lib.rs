@@ -59,6 +59,20 @@ pub use forge_core::{
     // Errors
     ForgeError,
     Result,
+
+    // Traits
+    Encoder,
+    Decoder,
+    Codec,
+    AudioProcessor,
+    AudioMixer,
+    Resampler,
+    AudioSample,
+    AudioFrame,
+
+    // Events
+    ForgeEvent,
+    EventBus,
 };
 
 // Re-export RTP types

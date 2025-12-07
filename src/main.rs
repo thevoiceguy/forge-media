@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use forge_media::{ForgeConfig, ForgeEngine};
+use forge_api::{ApiServer, server::ApiServerConfig};
 use tracing::{info, error};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -27,16 +28,31 @@ async fn main() -> Result<()> {
     info!("Configuration loaded successfully");
 
     // Initialize engine
-    let _engine = ForgeEngine::new(config).await?;
+    let _engine = ForgeEngine::new(config.clone()).await?;
     info!("✓ Forge engine initialized");
 
-    // TODO: Start API server
-    info!("API server placeholder - will bind to configured address");
+    // Start API server
+    let api_config = ApiServerConfig {
+        bind_addr: config.api.http_bind.parse()?,
+        enable_cors: config.api.enable_cors,
+    };
 
-    // Keep running
+    let api_server = ApiServer::new(api_config);
+
     info!("Forge Media Engine is running...");
-    tokio::signal::ctrl_c().await?;
-    info!("Shutting down gracefully...");
+    info!("Press Ctrl+C to shutdown gracefully");
+
+    // Run server with graceful shutdown
+    api_server
+        .serve_with_shutdown(async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to listen for Ctrl+C");
+            info!("Shutdown signal received, stopping gracefully...");
+        })
+        .await?;
+
+    info!("✓ Forge Media Engine stopped");
 
     Ok(())
 }

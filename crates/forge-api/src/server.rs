@@ -3,6 +3,8 @@
 use crate::middleware;
 use crate::routes::{self, sessions::AppState};
 use axum::Router;
+use forge_engine::{SessionManager, SessionManagerConfig};
+use forge_rtp::PortPoolConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -14,6 +16,8 @@ use tracing::{info, error};
 pub struct ApiServerConfig {
     pub bind_addr: SocketAddr,
     pub enable_cors: bool,
+    pub port_range_min: u16,
+    pub port_range_max: u16,
 }
 
 impl Default for ApiServerConfig {
@@ -21,6 +25,8 @@ impl Default for ApiServerConfig {
         Self {
             bind_addr: "0.0.0.0:8080".parse().unwrap(),
             enable_cors: true,
+            port_range_min: 10000,
+            port_range_max: 20000,
         }
     }
 }
@@ -34,7 +40,17 @@ pub struct ApiServer {
 impl ApiServer {
     /// Create a new API server with the given configuration
     pub fn new(config: ApiServerConfig) -> Self {
-        let state = Arc::new(AppState::new());
+        // Create session manager with port pool
+        let port_pool_config = PortPoolConfig::new(config.port_range_min, config.port_range_max)
+            .expect("Invalid port range configuration");
+
+        let session_manager_config = SessionManagerConfig {
+            port_pool_config,
+            ..Default::default()
+        };
+
+        let session_manager = Arc::new(SessionManager::new(session_manager_config, None));
+        let state = Arc::new(AppState::new(session_manager));
 
         Self { config, state }
     }

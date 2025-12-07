@@ -8,6 +8,8 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
+forge-engine = { path = "../forge-engine" }
+forge-rtp = { path = "../forge-rtp" }
 
 # Async runtime
 tokio = { workspace = true }

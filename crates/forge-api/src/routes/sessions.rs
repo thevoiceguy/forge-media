@@ -3,7 +3,8 @@
 use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use forge_core::CallId;
+use forge_core::{CallId, ParticipantId};
+use forge_engine::{SessionManager, SessionState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -14,6 +15,8 @@ use crate::response::{created, no_content, success, ApiSuccess};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     pub call_id: Option<String>,
+    pub participant_a: Option<String>,
+    pub participant_b: Option<String>,
     pub sdp: Option<String>,
     pub from_tag: Option<String>,
     pub to_tag: Option<String>,
@@ -24,9 +27,20 @@ pub struct CreateSessionRequest {
 pub struct SessionResponse {
     pub call_id: String,
     pub state: String,
-    pub created_at: String,
-    pub local_addr: Option<String>,
-    pub remote_addr: Option<String>,
+    pub rtp_port: u16,
+    pub rtcp_port: u16,
+    pub participant_a: Option<ParticipantStats>,
+    pub participant_b: Option<ParticipantStats>,
+}
+
+/// Participant statistics in response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ParticipantStats {
+    pub id: String,
+    pub packets_received: u64,
+    pub bytes_received: u64,
+    pub packets_sent: u64,
+    pub bytes_sent: u64,
 }
 
 /// List of sessions response
@@ -36,15 +50,15 @@ pub struct SessionListResponse {
     pub count: usize,
 }
 
-/// Application state (placeholder - will be replaced with actual engine)
+/// Application state with session manager
 #[derive(Clone)]
 pub struct AppState {
-    // TODO: Add ForgeEngine reference
+    session_manager: Arc<SessionManager>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(session_manager: Arc<SessionManager>) -> Self {
+        Self { session_manager }
     }
 }
 
@@ -52,25 +66,50 @@ impl AppState {
 ///
 /// POST /v1/sessions
 async fn create_session(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(request): Json<CreateSessionRequest>,
 ) -> ApiResult<axum::response::Response> {
     tracing::info!("Creating session: {:?}", request);
 
-    // TODO: Implement actual session creation with ForgeEngine
-    let call_id = request
-        .call_id
-        .unwrap_or_else(|| CallId::generate().to_string());
-
-    let response = SessionResponse {
-        call_id: call_id.clone(),
-        state: "creating".to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        local_addr: Some("0.0.0.0:30000".to_string()),
-        remote_addr: None,
+    // Parse or generate IDs
+    let call_id = if let Some(id) = request.call_id {
+        CallId(id)
+    } else {
+        CallId::generate()
     };
 
-    tracing::info!("Session created: {}", call_id);
+    let participant_a = if let Some(id) = request.participant_a {
+        ParticipantId(id)
+    } else {
+        ParticipantId::generate()
+    };
+
+    let participant_b = if let Some(id) = request.participant_b {
+        ParticipantId(id)
+    } else {
+        ParticipantId::generate()
+    };
+
+    // Create session
+    let session = state
+        .session_manager
+        .create_session(call_id.clone(), participant_a, participant_b)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to create session: {}", e)))?;
+
+    let ports = session.ports();
+    let session_state = session.state().await;
+
+    let response = SessionResponse {
+        call_id: call_id.0,
+        state: format!("{:?}", session_state),
+        rtp_port: ports.rtp_port,
+        rtcp_port: ports.rtcp_port,
+        participant_a: None,
+        participant_b: None,
+    };
+
+    tracing::info!("Session created: {} on ports {}/{}", response.call_id, ports.rtp_port, ports.rtcp_port);
 
     Ok(created(response))
 }
@@ -79,19 +118,41 @@ async fn create_session(
 ///
 /// GET /v1/sessions/:id
 async fn get_session(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<ApiSuccess<SessionResponse>> {
     tracing::info!("Getting session: {}", call_id);
 
-    // TODO: Implement actual session lookup
-    // For now, return a stub response
+    let call_id = CallId(call_id);
+    let session = state
+        .session_manager
+        .get_session(&call_id)
+        .ok_or_else(|| ApiError::SessionNotFound(call_id.0.clone()))?;
+
+    let ports = session.ports();
+    let session_state = session.state().await;
+    let stats_a = session.participant_a_stats().await;
+    let stats_b = session.participant_b_stats().await;
+
     let response = SessionResponse {
-        call_id: call_id.clone(),
-        state: "active".to_string(),
-        created_at: chrono::Utc::now().to_rfc3339(),
-        local_addr: Some("0.0.0.0:30000".to_string()),
-        remote_addr: Some("192.168.1.100:5060".to_string()),
+        call_id: call_id.0,
+        state: format!("{:?}", session_state),
+        rtp_port: ports.rtp_port,
+        rtcp_port: ports.rtcp_port,
+        participant_a: Some(ParticipantStats {
+            id: "A".to_string(),
+            packets_received: stats_a.packets_received,
+            bytes_received: stats_a.bytes_received,
+            packets_sent: stats_a.packets_sent,
+            bytes_sent: stats_a.bytes_sent,
+        }),
+        participant_b: Some(ParticipantStats {
+            id: "B".to_string(),
+            packets_received: stats_b.packets_received,
+            bytes_received: stats_b.bytes_received,
+            packets_sent: stats_b.packets_sent,
+            bytes_sent: stats_b.bytes_sent,
+        }),
     };
 
     Ok(success(response))
@@ -101,15 +162,19 @@ async fn get_session(
 ///
 /// DELETE /v1/sessions/:id
 async fn delete_session(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
     tracing::info!("Deleting session: {}", call_id);
 
-    // TODO: Implement actual session deletion
-    // For now, just return success
+    let call_id = CallId(call_id.clone());
+    state
+        .session_manager
+        .stop_session(&call_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to stop session: {}", e)))?;
 
-    tracing::info!("Session deleted: {}", call_id);
+    tracing::info!("Session deleted: {}", call_id.0);
 
     Ok(no_content())
 }
@@ -118,15 +183,71 @@ async fn delete_session(
 ///
 /// GET /v1/sessions
 async fn list_sessions(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> ApiResult<ApiSuccess<SessionListResponse>> {
     tracing::info!("Listing sessions");
 
-    // TODO: Implement actual session listing
+    let sessions = state.session_manager.list_sessions();
+    let mut session_responses = Vec::new();
+
+    for session in sessions {
+        let ports = session.ports();
+        let session_state = session.state().await;
+
+        session_responses.push(SessionResponse {
+            call_id: session.call_id().0.clone(),
+            state: format!("{:?}", session_state),
+            rtp_port: ports.rtp_port,
+            rtcp_port: ports.rtcp_port,
+            participant_a: None,
+            participant_b: None,
+        });
+    }
+
+    let count = session_responses.len();
     let response = SessionListResponse {
-        sessions: vec![],
-        count: 0,
+        sessions: session_responses,
+        count,
     };
+
+    Ok(success(response))
+}
+
+/// Start/activate a session (begin forwarding)
+///
+/// POST /v1/sessions/:id/start
+async fn start_session(
+    State(state): State<Arc<AppState>>,
+    Path(call_id): Path<String>,
+) -> ApiResult<ApiSuccess<SessionResponse>> {
+    tracing::info!("Starting session: {}", call_id);
+
+    let call_id = CallId(call_id);
+    state
+        .session_manager
+        .start_session(&call_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to start session: {}", e)))?;
+
+    // Get updated session info
+    let session = state
+        .session_manager
+        .get_session(&call_id)
+        .ok_or_else(|| ApiError::SessionNotFound(call_id.0.clone()))?;
+
+    let ports = session.ports();
+    let session_state = session.state().await;
+
+    let response = SessionResponse {
+        call_id: call_id.0,
+        state: format!("{:?}", session_state),
+        rtp_port: ports.rtp_port,
+        rtcp_port: ports.rtcp_port,
+        participant_a: None,
+        participant_b: None,
+    };
+
+    tracing::info!("Session started: {}", response.call_id);
 
     Ok(success(response))
 }
@@ -138,6 +259,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/sessions", get(list_sessions))
         .route("/v1/sessions/:id", get(get_session))
         .route("/v1/sessions/:id", delete(delete_session))
+        .route("/v1/sessions/:id/start", post(start_session))
 }
 
 #[cfg(test)]
@@ -147,13 +269,25 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::util::ServiceExt as _;
 
+    fn test_state_with_ports(min_port: u16, max_port: u16) -> Arc<AppState> {
+        let port_pool_config = forge_rtp::PortPoolConfig::new(min_port, max_port).unwrap();
+        let session_manager_config = forge_engine::SessionManagerConfig {
+            port_pool_config,
+            ..Default::default()
+        };
+        let session_manager = Arc::new(SessionManager::new(session_manager_config, None));
+        Arc::new(AppState::new(session_manager))
+    }
+
     fn test_state() -> Arc<AppState> {
-        Arc::new(AppState::new())
+        // Use a random port range to avoid conflicts
+        let base = 20000 + (std::process::id() % 10000) as u16;
+        test_state_with_ports(base, base + 1000)
     }
 
     #[tokio::test]
     async fn test_create_session() {
-        let app = routes().with_state(test_state());
+        let app = routes().with_state(test_state_with_ports(40000, 41000));
 
         let request_body = serde_json::json!({
             "call_id": "test-123"
@@ -176,7 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_sessions() {
-        let app = routes().with_state(test_state());
+        let app = routes().with_state(test_state_with_ports(41000, 42000));
 
         let response = app
             .oneshot(
@@ -193,12 +327,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_session() {
-        let app = routes().with_state(test_state());
+        let state = test_state_with_ports(42000, 43000);
+
+        // First create a session
+        let call_id = CallId("test-get-123".to_string());
+        state.session_manager.create_session(
+            call_id.clone(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+        ).await.unwrap();
+
+        let app = routes().with_state(state);
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/v1/sessions/test-123")
+                    .uri("/v1/sessions/test-get-123")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -210,13 +354,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_session() {
-        let app = routes().with_state(test_state());
+        let state = test_state_with_ports(43000, 44000);
+
+        // First create a session
+        let call_id = CallId("test-delete-123".to_string());
+        state.session_manager.create_session(
+            call_id.clone(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+        ).await.unwrap();
+
+        let app = routes().with_state(state);
 
         let response = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/v1/sessions/test-123")
+                    .uri("/v1/sessions/test-delete-123")
                     .body(Body::empty())
                     .unwrap(),
             )

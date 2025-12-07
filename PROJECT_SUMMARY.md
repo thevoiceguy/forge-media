@@ -9,6 +9,10 @@
 
 ### 1. Project Structure ✅
 
+**Forge is both a library and a binary:**
+- **Library** (`src/lib.rs`): Use in FCP and other Rust projects
+- **Binary** (`src/main.rs`): Run as standalone media server
+
 The complete Rust workspace has been established with 17 specialized crates:
 
 ```
@@ -94,6 +98,7 @@ Complete documentation suite:
 | Document | Purpose | Status |
 |----------|---------|--------|
 | **README.md** | Project overview, quick start, features | ✅ Complete |
+| **LIBRARY_USAGE.md** | Using Forge as a library | ✅ Complete |
 | **DEVELOPMENT_PLAN.md** | Phased development strategy (6 months) | ✅ Complete |
 | **CONTRIBUTING.md** | Contribution guidelines, code style | ✅ Complete |
 | **CLAUDE.MD** | Developer quick reference (existing) | ✅ Complete |

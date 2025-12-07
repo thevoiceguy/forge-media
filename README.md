@@ -17,6 +17,10 @@
 
 Forge is a carrier-grade media server built in Rust that handles all media processing for real-time communications. It works alongside the [Siphon](https://github.com/ferrous-comms/siphon) SIP stack to provide comprehensive VoIP capabilities.
 
+**Forge is both:**
+- **📚 A Library**: Use in your Rust projects (FCP, custom applications)
+- **🚀 A Binary**: Run as a standalone media server
+
 ### Key Features
 
 - **🎵 Audio Processing**: G.711, G.722, G.729, Opus codec support with transcoding
@@ -86,7 +90,7 @@ cargo build --features full
 cargo build --release
 ```
 
-### Run
+### Run as Binary
 
 ```bash
 # Run with default configuration
@@ -97,6 +101,38 @@ cargo run -- --config /path/to/config.toml
 
 # Run with debug logging
 RUST_LOG=forge=debug cargo run
+```
+
+### Use as Library
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+forge-media = { path = "../forge-media" }
+# Or from git:
+# forge-media = { git = "https://github.com/ferrous-comms/forge-media" }
+
+# Optional: Choose features
+forge-media = { path = "../forge-media", features = ["full"] }
+```
+
+Then in your code:
+
+```rust
+use forge_media::{ForgeEngine, ForgeConfig, CallId};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create engine with default config
+    let config = ForgeConfig::default();
+    let engine = ForgeEngine::new(config).await?;
+
+    // Use the engine in your application
+    // let session = engine.create_session(...).await?;
+
+    Ok(())
+}
 ```
 
 ### Configuration

@@ -1,9 +1,10 @@
-//! Forge Media Engine
+//! Forge Media Engine - Binary Entry Point
 //!
-//! A high-performance RTP and WebRTC media engine for real-time communications.
+//! This binary runs Forge as a standalone media server.
+//! To use Forge as a library in your project, see the crate documentation.
 
 use anyhow::Result;
-use forge_core::{ForgeConfig};
+use forge_media::{ForgeConfig, ForgeEngine};
 use tracing::{info, error};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -25,11 +26,12 @@ async fn main() -> Result<()> {
     let config = load_config()?;
     info!("Configuration loaded successfully");
 
-    // TODO: Initialize engine components
-    info!("Engine initialization placeholder");
+    // Initialize engine
+    let _engine = ForgeEngine::new(config).await?;
+    info!("✓ Forge engine initialized");
 
     // TODO: Start API server
-    info!("API server placeholder");
+    info!("API server placeholder - will bind to configured address");
 
     // Keep running
     info!("Forge Media Engine is running...");

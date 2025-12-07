@@ -6,7 +6,7 @@
 use anyhow::Result;
 use forge_media::{ForgeConfig, ForgeEngine};
 use forge_api::{ApiServer, server::ApiServerConfig};
-use tracing::{info, error};
+use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -35,6 +35,8 @@ async fn main() -> Result<()> {
     let api_config = ApiServerConfig {
         bind_addr: config.api.http_bind.parse()?,
         enable_cors: config.api.enable_cors,
+        port_range_min: config.engine.port_range.start,
+        port_range_max: config.engine.port_range.end,
     };
 
     let api_server = ApiServer::new(api_config);

@@ -1,0 +1,38 @@
+[package]
+name = "forge-sip-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# Siphon SIP stack
+sip-core = { path = "../../external/siphon-rs/crates/sip-core" }
+sip-parse = { path = "../../external/siphon-rs/crates/sip-parse" }
+sip-transport = { path = "../../external/siphon-rs/crates/sip-transport" }
+sip-uas = { path = "../../external/siphon-rs/crates/sip-uas" }
+sip-sdp = { path = "../../external/siphon-rs/crates/sip-sdp" }
+
+# Forge test daemon (for ForgeClient)
+forge-test-daemon = { path = "../forge-test-daemon" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+dashmap = { workspace = true }
+chrono = { workspace = true }

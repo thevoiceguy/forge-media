@@ -1,7 +1,13 @@
-//! forge-engine - Implementation placeholder
+//! forge-engine - Core media session management
 //!
-//! This crate will contain the implementation for engine.
+//! This crate provides the main media session management and RTP forwarding engine.
 
-#![allow(dead_code, unused_variables)]
+pub mod session;
+pub mod forwarding;
+pub mod manager;
 
-pub struct Placeholder;
+pub use session::{
+    MediaSession, MediaSessionConfig, Participant, ParticipantStats, SessionState,
+};
+pub use forwarding::ForwardingEngine;
+pub use manager::{SessionManager, SessionManagerConfig};

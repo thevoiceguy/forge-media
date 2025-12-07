@@ -7,6 +7,8 @@ pub mod rtp;
 pub mod rtcp;
 pub mod srtp;
 pub mod jitter;
+pub mod port_pool;
+pub mod socket;
 
 #[cfg(feature = "dtls")]
 pub mod dtls_srtp;
@@ -15,3 +17,5 @@ pub use rtp::*;
 pub use rtcp::*;
 pub use srtp::*;
 pub use jitter::*;
+pub use port_pool::*;
+pub use socket::*;

@@ -159,11 +159,6 @@ impl RtpPacket {
         payload: Bytes,
         marker: bool,
     ) -> Self {
-        let mut version_flags = 0x80; // Version 2
-        if marker {
-            version_flags |= 0x80;
-        }
-
         let header = RtpHeader {
             version_flags: 0x80, // Version 2, no padding, no extension, no CSRC
             marker_payload_type: if marker { 0x80 | payload_type } else { payload_type },
@@ -267,8 +262,12 @@ mod tests {
         let header = RtpHeader::parse(&data).unwrap();
         assert_eq!(header.version(), 2);
         assert_eq!(header.payload_type(), 0);
-        assert_eq!(header.sequence_number, 0x1234);
-        assert_eq!(header.timestamp, 1);
-        assert_eq!(header.ssrc, 0xABCDEF12);
+        // Copy fields to avoid unaligned reference to packed struct
+        let seq = header.sequence_number;
+        let ts = header.timestamp;
+        let ssrc = header.ssrc;
+        assert_eq!(seq, 0x1234);
+        assert_eq!(ts, 1);
+        assert_eq!(ssrc, 0xABCDEF12);
     }
 }

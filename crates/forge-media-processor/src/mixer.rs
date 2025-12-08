@@ -2,24 +2,26 @@
 //!
 //! Combines multiple audio streams into a single mixed output
 
-use crate::{AudioFormat, MediaError, Result};
+use crate::{recorder::AudioRecorder, AudioFormat, MediaError, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Unique identifier for a participant in the mixer
 pub type ParticipantId = String;
 
 /// Audio buffer for a single participant
-#[derive(Debug, Clone)]
 struct ParticipantBuffer {
     /// Buffered audio samples (16-bit PCM)
     samples: VecDeque<i16>,
     /// Gain level (0.0 to 1.0)
     gain: f32,
+    /// Optional recorder for this participant
+    recorder: Arc<Mutex<Option<AudioRecorder>>>,
 }
 
 impl ParticipantBuffer {
@@ -27,11 +29,21 @@ impl ParticipantBuffer {
         Self {
             samples: VecDeque::new(),
             gain: gain.clamp(0.0, 1.0),
+            recorder: Arc::new(Mutex::new(None)),
         }
     }
 
     fn push_samples(&mut self, samples: &[i16]) {
         self.samples.extend(samples);
+
+        // Write to recorder if recording
+        if let Some(recorder) = self.recorder.lock().as_ref() {
+            if recorder.is_recording() {
+                if let Err(e) = recorder.write_samples(samples) {
+                    warn!("Failed to write samples to participant recorder: {}", e);
+                }
+            }
+        }
     }
 
     fn drain_samples(&mut self, count: usize) -> Vec<i16> {
@@ -40,6 +52,27 @@ impl ParticipantBuffer {
 
     fn available_samples(&self) -> usize {
         self.samples.len()
+    }
+
+    async fn start_recording<P: AsRef<Path>>(&self, path: P, format: AudioFormat) -> Result<()> {
+        let recorder = AudioRecorder::new(path, format).await?;
+        recorder.start()?;
+        *self.recorder.lock() = Some(recorder);
+        Ok(())
+    }
+
+    fn stop_recording(&self) -> Result<()> {
+        let mut recorder_guard = self.recorder.lock();
+        if let Some(recorder) = recorder_guard.take() {
+            recorder.stop()?;
+            Ok(())
+        } else {
+            Err(MediaError::RecordingNotFound("No active recording for participant".to_string()))
+        }
+    }
+
+    fn is_recording(&self) -> bool {
+        self.recorder.lock().as_ref().map(|r| r.is_recording()).unwrap_or(false)
     }
 }
 
@@ -282,6 +315,36 @@ impl AudioMixer {
     /// Get the current audio format
     pub fn format(&self) -> AudioFormat {
         *self.format.read()
+    }
+
+    /// Start recording for a specific participant
+    ///
+    /// # Arguments
+    /// * `id` - Participant identifier
+    /// * `path` - Output file path for the recording
+    pub async fn start_participant_recording<P: AsRef<Path>>(&self, id: &str, path: P) -> Result<()> {
+        let participant = self.participants.get(id)
+            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+
+        info!("Starting recording for participant {} to {:?}", id, path.as_ref());
+        participant.start_recording(path, *self.format.read()).await
+    }
+
+    /// Stop recording for a specific participant
+    pub fn stop_participant_recording(&self, id: &str) -> Result<()> {
+        let participant = self.participants.get(id)
+            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+
+        info!("Stopping recording for participant {}", id);
+        participant.stop_recording()
+    }
+
+    /// Check if a participant is currently recording
+    pub fn is_participant_recording(&self, id: &str) -> Result<bool> {
+        let participant = self.participants.get(id)
+            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+
+        Ok(participant.is_recording())
     }
 }
 

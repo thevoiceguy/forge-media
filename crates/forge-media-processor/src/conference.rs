@@ -160,6 +160,34 @@ impl ConferenceRoom {
     pub fn format(&self) -> AudioFormat {
         self.format
     }
+
+    /// Start recording for a specific participant
+    ///
+    /// # Arguments
+    /// * `participant_id` - Participant identifier
+    /// * `output_path` - Path where the recording will be saved
+    pub async fn start_participant_recording<P: AsRef<Path>>(
+        &self,
+        participant_id: &str,
+        output_path: P,
+    ) -> Result<()> {
+        let path = output_path.as_ref();
+        info!("Starting recording for participant {} in room {} to {:?}",
+              participant_id, self.id, path);
+
+        self.mixer.start_participant_recording(participant_id, path).await
+    }
+
+    /// Stop recording for a specific participant
+    pub fn stop_participant_recording(&self, participant_id: &str) -> Result<()> {
+        info!("Stopping recording for participant {} in room {}", participant_id, self.id);
+        self.mixer.stop_participant_recording(participant_id)
+    }
+
+    /// Check if a participant is currently recording
+    pub fn is_participant_recording(&self, participant_id: &str) -> Result<bool> {
+        self.mixer.is_participant_recording(participant_id)
+    }
 }
 
 /// Conference bridge for managing multiple conference rooms

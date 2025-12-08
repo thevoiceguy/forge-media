@@ -4,7 +4,7 @@ use crate::{Error, Result};
 use aya::{
     maps::{HashMap as BpfHashMap, RingBuf as BpfRingBuf},
     programs::{Xdp, XdpFlags},
-    Bpf,
+    Ebpf,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -56,7 +56,7 @@ pub struct ForwardValue {
 pub struct XdpManager {
     interface: String,
     mode: XdpMode,
-    bpf: Arc<RwLock<Option<Bpf>>>,
+    bpf: Arc<RwLock<Option<Ebpf>>>,
     loaded: bool,
 }
 
@@ -87,19 +87,25 @@ impl XdpManager {
             // The build script compiles the eBPF program and embeds it
             // If bpf-linker wasn't available during build, this will be None
             match option_env!("EBPF_OBJECT_PATH") {
-                Some(path) => {
-                    // Embed the compiled eBPF object file
-                    let bytecode = include_bytes!(env!("EBPF_OBJECT_PATH"));
-                    info!("Loading embedded eBPF program ({} bytes)", bytecode.len());
+                Some(_path) => {
+                    // Try loading from file first (may have better ELF parsing)
+                    let ebpf_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("ebpf/rtp_forward.o");
 
-                    match manager.load_from_bytecode(bytecode).await {
-                        Ok(()) => {
-                            info!("✓ XDP program loaded successfully");
+                    if ebpf_path.exists() {
+                        info!("Loading eBPF program from file: {:?}", ebpf_path);
+                        match manager.load_from_file(&ebpf_path).await {
+                            Ok(()) => {
+                                info!("✓ XDP program loaded successfully");
+                            }
+                            Err(e) => {
+                                warn!("Failed to load XDP program from file: {}", e);
+                                warn!("XDP manager will run in stub mode");
+                            }
                         }
-                        Err(e) => {
-                            warn!("Failed to load XDP program: {}", e);
-                            warn!("XDP manager will run in stub mode");
-                        }
+                    } else {
+                        warn!("XDP program file not found - creating stub manager");
+                        warn!("XDP will be configurable but won't load into kernel");
                     }
                 }
                 None => {
@@ -113,6 +119,41 @@ impl XdpManager {
         Ok(manager)
     }
 
+    /// Load XDP program from file
+    ///
+    /// # Arguments
+    /// * `path` - Path to compiled eBPF object file
+    pub async fn load_from_file(&mut self, path: &std::path::Path) -> Result<()> {
+        info!("Loading XDP program from file: {:?}", path);
+
+        // Load BPF program from file
+        let mut bpf = Ebpf::load_file(path)
+            .map_err(|e| Error::XdpLoadFailed(format!("Failed to load BPF from file: {}", e)))?;
+
+        // Get the XDP program
+        let program: &mut Xdp = bpf
+            .program_mut("rtp_forward")
+            .ok_or_else(|| Error::XdpLoadFailed("Program 'rtp_forward' not found".to_string()))?
+            .try_into()
+            .map_err(|e| Error::XdpLoadFailed(format!("Not an XDP program: {}", e)))?;
+
+        // Attach to interface
+        program
+            .load()
+            .map_err(|e| Error::XdpLoadFailed(format!("Failed to load program: {}", e)))?;
+
+        program
+            .attach(&self.interface, self.mode.to_flags())
+            .map_err(|e| Error::XdpAttachFailed(format!("Failed to attach: {}", e)))?;
+
+        info!("XDP program attached to interface {} successfully", self.interface);
+
+        *self.bpf.write().await = Some(bpf);
+        self.loaded = true;
+
+        Ok(())
+    }
+
     /// Load XDP program from bytecode
     ///
     /// # Arguments
@@ -121,7 +162,7 @@ impl XdpManager {
         info!("Loading XDP program ({} bytes)", bytecode.len());
 
         // Load BPF program
-        let mut bpf = Bpf::load(bytecode)
+        let mut bpf = Ebpf::load(bytecode)
             .map_err(|e| Error::XdpLoadFailed(format!("Failed to load BPF: {}", e)))?;
 
         // Get the XDP program

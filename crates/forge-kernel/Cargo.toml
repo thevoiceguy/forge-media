@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 # Aya - Pure Rust eBPF library
-aya = { version = "0.12", features = ["async_tokio"] }
+aya = { version = "0.13", features = ["async_tokio"] }
 aya-log = "0.2"
 
 # Async runtime

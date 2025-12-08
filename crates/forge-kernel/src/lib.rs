@@ -10,7 +10,7 @@ pub mod xdp;
 pub use error::{Error, Result};
 
 #[cfg(target_os = "linux")]
-pub use xdp::{XdpManager, XdpMode};
+pub use xdp::{XdpManager, XdpMode, ForwardKey, ForwardValue};
 
 // Re-export commonly used types
 pub use aya;

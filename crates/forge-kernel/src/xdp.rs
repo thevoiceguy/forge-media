@@ -74,18 +74,41 @@ impl XdpManager {
     pub async fn new(interface: &str, mode: XdpMode) -> Result<Self> {
         info!("Initializing XDP on interface {} with mode {:?}", interface, mode);
 
-        let manager = Self {
+        let mut manager = Self {
             interface: interface.to_string(),
             mode,
             bpf: Arc::new(RwLock::new(None)),
             loaded: false,
         };
 
-        // Try to load the XDP program
-        // In production, the BPF bytecode would be embedded via include_bytes!()
-        // or loaded from a file. For now, we'll create a stub.
-        warn!("XDP program bytecode not yet compiled - creating stub manager");
-        warn!("Run with bpf-linker to compile forge-kernel-ebpf for full functionality");
+        // Try to load the embedded eBPF bytecode if it was compiled during build
+        #[cfg(target_os = "linux")]
+        {
+            // The build script compiles the eBPF program and embeds it
+            // If bpf-linker wasn't available during build, this will be None
+            match option_env!("EBPF_OBJECT_PATH") {
+                Some(path) => {
+                    // Embed the compiled eBPF object file
+                    let bytecode = include_bytes!(env!("EBPF_OBJECT_PATH"));
+                    info!("Loading embedded eBPF program ({} bytes)", bytecode.len());
+
+                    match manager.load_from_bytecode(bytecode).await {
+                        Ok(()) => {
+                            info!("✓ XDP program loaded successfully");
+                        }
+                        Err(e) => {
+                            warn!("Failed to load XDP program: {}", e);
+                            warn!("XDP manager will run in stub mode");
+                        }
+                    }
+                }
+                None => {
+                    warn!("XDP program bytecode not available - creating stub manager");
+                    warn!("eBPF was not compiled during build (bpf-linker not found)");
+                    warn!("XDP will be configurable but won't load into kernel");
+                }
+            }
+        }
 
         Ok(manager)
     }

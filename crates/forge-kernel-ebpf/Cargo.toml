@@ -10,5 +10,5 @@ license.workspace = true
 aya-ebpf = "0.1"
 
 [lib]
-crate-type = ["cdylib"]
-path = "src/main.rs"
+crate-type = ["cdylib", "staticlib"]
+path = "src/lib.rs"

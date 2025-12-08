@@ -54,7 +54,17 @@ impl ApiServer {
         };
 
         let session_manager = SessionManager::new(session_manager_config, None);
-        let state = Arc::new(AppState::new(session_manager, metrics_handle));
+
+        // Create conference bridge for media processing
+        let conference_bridge = Arc::new(
+            forge_media_processor::conference::ConferenceBridge::new(
+                forge_media_processor::AudioFormat::pcm_mono(),
+                480, // 10ms frame at 48kHz
+            ).expect("Failed to create conference bridge")
+        );
+        info!("✓ Conference bridge initialized");
+
+        let state = Arc::new(AppState::new(session_manager, metrics_handle, conference_bridge));
 
         Self { config, state }
     }

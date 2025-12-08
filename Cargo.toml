@@ -19,7 +19,7 @@ members = [
     "crates/forge-ha",
     "crates/forge-api",
     "bins/forge-test-daemon",
-    "bins/forge-sip-server",
+    "bins/forge-sip-server", "crates/forge-media-processor",
 ]
 
 [workspace.package]

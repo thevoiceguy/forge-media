@@ -1,0 +1,36 @@
+[package]
+name = "forge-media-processor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+forge-rtp = { path = "../forge-rtp" }
+
+# Async runtime
+tokio = { workspace = true, features = ["fs", "io-util"] }
+
+# Audio processing
+symphonia = { workspace = true, features = ["all"] }
+rubato = { workspace = true }
+# opus = "0.3"  # TODO: Add back when implementing Opus encoding (requires cmake)
+hound = "3.5"  # WAV file I/O
+
+# Utilities
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
+tempfile = "3.8"

@@ -10,6 +10,7 @@ license.workspace = true
 forge-core = { path = "../forge-core" }
 forge-engine = { path = "../forge-engine" }
 forge-rtp = { path = "../forge-rtp" }
+forge-media-processor = { path = "../forge-media-processor" }
 
 # Async runtime
 tokio = { workspace = true }

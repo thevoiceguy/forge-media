@@ -62,11 +62,20 @@ pub struct SessionListResponse {
 pub struct AppState {
     pub session_manager: Arc<SessionManager>,
     pub metrics_handle: Arc<super::prometheus::MetricsHandle>,
+    pub conference_bridge: Arc<forge_media_processor::conference::ConferenceBridge>,
 }
 
 impl AppState {
-    pub fn new(session_manager: Arc<SessionManager>, metrics_handle: Arc<super::prometheus::MetricsHandle>) -> Self {
-        Self { session_manager, metrics_handle }
+    pub fn new(
+        session_manager: Arc<SessionManager>,
+        metrics_handle: Arc<super::prometheus::MetricsHandle>,
+        conference_bridge: Arc<forge_media_processor::conference::ConferenceBridge>,
+    ) -> Self {
+        Self {
+            session_manager,
+            metrics_handle,
+            conference_bridge,
+        }
     }
 }
 

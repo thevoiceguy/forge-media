@@ -220,6 +220,14 @@ impl RtpSocketPair {
             .map_err(|e| ForgeError::Network(format!("Failed to send RTCP data: {}", e)))
     }
 
+    /// Send RTCP data to a specific address (bypassing remote endpoint)
+    pub async fn send_rtcp_to(&self, data: &[u8], addr: SocketAddr) -> Result<usize> {
+        self.rtcp_socket
+            .send_to(data, addr)
+            .await
+            .map_err(|e| ForgeError::Network(format!("Failed to send RTCP data: {}", e)))
+    }
+
     /// Get a clone of the RTP socket for external use
     pub fn rtp_socket(&self) -> Arc<UdpSocket> {
         Arc::clone(&self.rtp_socket)

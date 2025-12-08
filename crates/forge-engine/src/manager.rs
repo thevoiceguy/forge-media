@@ -4,6 +4,7 @@ use crate::session::{MediaSession, MediaSessionConfig};
 use dashmap::DashMap;
 use forge_core::{CallId, ParticipantId, ForgeError, Result, EventBus};
 use forge_rtp::{PortPool, PortPoolConfig};
+use metrics::gauge;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,12 +66,15 @@ impl SessionManager {
     }
 
     /// Create a new media session
+    #[tracing::instrument(skip(self), fields(call_id = %call_id.0))]
     pub async fn create_session(
         &self,
         call_id: CallId,
         participant_a: ParticipantId,
         participant_b: ParticipantId,
     ) -> Result<Arc<MediaSession>> {
+        tracing::debug!("Creating new media session");
+
         // Check if session already exists
         if self.sessions.contains_key(&call_id) {
             return Err(ForgeError::Internal(format!(
@@ -95,11 +99,16 @@ impl SessionManager {
         // Store session
         self.sessions.insert(call_id.clone(), Arc::clone(&session));
 
+        let session_count = self.sessions.len();
+
         tracing::info!(
             "Created session {} with {} active sessions total",
             call_id.0,
-            self.sessions.len()
+            session_count
         );
+
+        // Update metrics
+        gauge!("forge_active_sessions", session_count as f64);
 
         Ok(session)
     }
@@ -118,17 +127,24 @@ impl SessionManager {
     }
 
     /// Start forwarding for a session
+    #[tracing::instrument(skip(self), fields(call_id = %call_id.0))]
     pub async fn start_session(&self, call_id: &CallId) -> Result<()> {
+        tracing::debug!("Starting session forwarding");
+
         let session = self
             .get_session(call_id)
             .ok_or_else(|| ForgeError::SessionNotFound(call_id.0.clone()))?;
 
         session.start_forwarding().await?;
+        tracing::info!("Session forwarding started successfully");
         Ok(())
     }
 
     /// Stop a session and deallocate resources
+    #[tracing::instrument(skip(self), fields(call_id = %call_id.0))]
     pub async fn stop_session(&self, call_id: &CallId) -> Result<()> {
+        tracing::debug!("Stopping session");
+
         let session = self
             .sessions
             .remove(call_id)
@@ -139,11 +155,16 @@ impl SessionManager {
         // Stop forwarding (this will also deallocate ports automatically)
         session.stop_forwarding().await?;
 
+        let session_count = self.sessions.len();
+
         tracing::info!(
             "Stopped session {} with {} active sessions remaining",
             call_id.0,
-            self.sessions.len()
+            session_count
         );
+
+        // Update metrics
+        gauge!("forge_active_sessions", session_count as f64);
 
         Ok(())
     }

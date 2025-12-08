@@ -1,7 +1,7 @@
 //! API server implementation
 
 use crate::middleware;
-use crate::routes::{self, sessions::AppState};
+use crate::routes::{self, sessions::AppState, prometheus::MetricsHandle};
 use axum::Router;
 use forge_engine::{SessionManager, SessionManagerConfig};
 use forge_rtp::PortPoolConfig;
@@ -40,6 +40,10 @@ pub struct ApiServer {
 impl ApiServer {
     /// Create a new API server with the given configuration
     pub fn new(config: ApiServerConfig) -> Self {
+        // Initialize Prometheus metrics exporter
+        let metrics_handle = Arc::new(MetricsHandle::init());
+        info!("✓ Prometheus metrics initialized");
+
         // Create session manager with port pool
         let port_pool_config = PortPoolConfig::new(config.port_range_min, config.port_range_max)
             .expect("Invalid port range configuration");
@@ -50,14 +54,16 @@ impl ApiServer {
         };
 
         let session_manager = SessionManager::new(session_manager_config, None);
-        let state = Arc::new(AppState::new(session_manager));
+        let state = Arc::new(AppState::new(session_manager, metrics_handle));
 
         Self { config, state }
     }
 
     /// Build the router with all middleware and routes
     fn build_router(&self) -> Router {
-        let mut router = routes::create_router().with_state(self.state.clone());
+        let mut router = routes::create_router()
+            .with_state(self.state.clone())
+            .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)); // 10 MB limit
 
         // Add middleware
         let middleware_stack = ServiceBuilder::new()
@@ -87,6 +93,8 @@ impl ApiServer {
         info!("✓ API server listening on {}", self.config.bind_addr);
         info!("  Health check: http://{}/health", self.config.bind_addr);
         info!("  Sessions API: http://{}/v1/sessions", self.config.bind_addr);
+        info!("  Metrics (JSON): http://{}/v1/metrics", self.config.bind_addr);
+        info!("  Metrics (Prometheus): http://{}/metrics", self.config.bind_addr);
 
         axum::serve(listener, router)
             .await
@@ -115,6 +123,8 @@ impl ApiServer {
         info!("✓ API server listening on {}", self.config.bind_addr);
         info!("  Health check: http://{}/health", self.config.bind_addr);
         info!("  Sessions API: http://{}/v1/sessions", self.config.bind_addr);
+        info!("  Metrics (JSON): http://{}/v1/metrics", self.config.bind_addr);
+        info!("  Metrics (Prometheus): http://{}/metrics", self.config.bind_addr);
 
         let result = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_signal)

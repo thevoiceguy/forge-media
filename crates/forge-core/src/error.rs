@@ -38,6 +38,9 @@ pub enum ForgeError {
     #[error("SRTP error: {0}")]
     Srtp(String),
 
+    #[error("RTCP error: {0}")]
+    Rtcp(String),
+
     #[error("SDP error: {0}")]
     Sdp(String),
 

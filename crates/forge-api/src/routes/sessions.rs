@@ -7,18 +7,25 @@ use forge_core::{CallId, ParticipantId};
 use forge_engine::{SessionManager, SessionState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use validator::Validate;
 
 use crate::error::{ApiError, ApiResult};
 use crate::response::{created, no_content, success, ApiSuccess};
 
 /// Request to create a new session
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct CreateSessionRequest {
+    #[validate(length(min = 1, max = 256))]
     pub call_id: Option<String>,
+    #[validate(length(min = 1, max = 256))]
     pub participant_a: Option<String>,
+    #[validate(length(min = 1, max = 256))]
     pub participant_b: Option<String>,
+    #[validate(length(max = 65536))]
     pub sdp: Option<String>,
+    #[validate(length(min = 1, max = 256))]
     pub from_tag: Option<String>,
+    #[validate(length(min = 1, max = 256))]
     pub to_tag: Option<String>,
 }
 
@@ -54,22 +61,28 @@ pub struct SessionListResponse {
 #[derive(Clone)]
 pub struct AppState {
     pub session_manager: Arc<SessionManager>,
+    pub metrics_handle: Arc<super::prometheus::MetricsHandle>,
 }
 
 impl AppState {
-    pub fn new(session_manager: Arc<SessionManager>) -> Self {
-        Self { session_manager }
+    pub fn new(session_manager: Arc<SessionManager>, metrics_handle: Arc<super::prometheus::MetricsHandle>) -> Self {
+        Self { session_manager, metrics_handle }
     }
 }
 
 /// Create a new session
 ///
 /// POST /v1/sessions
+#[tracing::instrument(skip(state, request), fields(call_id = ?request.call_id))]
 async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateSessionRequest>,
 ) -> ApiResult<axum::response::Response> {
-    tracing::info!("Creating session: {:?}", request);
+    tracing::info!("API request to create session");
+
+    // Validate request
+    request.validate()
+        .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
 
     // Parse or generate IDs
     let call_id = if let Some(id) = request.call_id {
@@ -117,11 +130,12 @@ async fn create_session(
 /// Get session information
 ///
 /// GET /v1/sessions/:id
+#[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<ApiSuccess<SessionResponse>> {
-    tracing::info!("Getting session: {}", call_id);
+    tracing::debug!("API request to get session info");
 
     let call_id = CallId(call_id);
     let session = state
@@ -161,11 +175,12 @@ async fn get_session(
 /// Delete a session
 ///
 /// DELETE /v1/sessions/:id
+#[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
-    tracing::info!("Deleting session: {}", call_id);
+    tracing::info!("API request to delete session");
 
     let call_id = CallId(call_id.clone());
     state
@@ -216,11 +231,12 @@ async fn list_sessions(
 /// Start/activate a session (begin forwarding)
 ///
 /// POST /v1/sessions/:id/start
+#[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn start_session(
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<ApiSuccess<SessionResponse>> {
-    tracing::info!("Starting session: {}", call_id);
+    tracing::info!("API request to start session forwarding");
 
     let call_id = CallId(call_id);
     state

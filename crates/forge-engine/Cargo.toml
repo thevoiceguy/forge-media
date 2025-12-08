@@ -11,6 +11,7 @@ forge-core = { path = "../forge-core" }
 forge-rtp = { path = "../forge-rtp" }
 tokio = { workspace = true }
 tracing = { workspace = true }
+metrics = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }

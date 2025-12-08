@@ -1,8 +1,12 @@
 //! API middleware
 
+pub mod rate_limit;
+
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
+
+pub use rate_limit::RateLimiter;
 
 /// Create CORS layer with default configuration
 ///

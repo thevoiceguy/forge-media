@@ -51,9 +51,11 @@ toml = "0.8"
 anyhow = "1.0"
 thiserror = "1.0"
 
-# Logging
+# Logging and Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.21"
+metrics-exporter-prometheus = "0.13"
 
 # HTTP/API
 axum = { version = "0.7", features = ["ws", "multipart"] }
@@ -79,6 +81,7 @@ smol_str = "0.3"
 async-trait = "0.1"
 once_cell = "1.19"
 httpdate = "1.0"
+validator = { version = "0.16", features = ["derive"] }
 
 # Audio processing
 symphonia = { version = "0.5", features = ["all"] }

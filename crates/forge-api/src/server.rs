@@ -33,6 +33,9 @@ pub struct ApiServerConfig {
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub recording_base_dir: PathBuf,
+    pub xdp_enabled: bool,
+    pub xdp_interface: String,
+    pub xdp_mode: String,
 }
 
 impl Default for ApiServerConfig {
@@ -51,6 +54,9 @@ impl Default for ApiServerConfig {
             tls_cert: None,
             tls_key: None,
             recording_base_dir: PathBuf::from("/var/lib/forge/recordings"),
+            xdp_enabled: false,
+            xdp_interface: "lo".to_string(),
+            xdp_mode: "generic".to_string(),
         }
     }
 }
@@ -65,7 +71,7 @@ pub struct ApiServer {
 
 impl ApiServer {
     /// Create a new API server with the given configuration
-    pub fn new(config: ApiServerConfig) -> Self {
+    pub async fn new(config: ApiServerConfig) -> Self {
         // Initialize Prometheus metrics exporter
         let metrics_handle = Arc::new(MetricsHandle::init());
         info!("✓ Prometheus metrics initialized");
@@ -79,7 +85,42 @@ impl ApiServer {
             ..Default::default()
         };
 
-        let session_manager = SessionManager::new(session_manager_config, None);
+        // Create session manager with XDP if enabled
+        let session_manager = {
+            #[cfg(all(target_os = "linux", feature = "xdp"))]
+            {
+                if config.xdp_enabled {
+                    use forge_core::config::{XdpConfig, XdpMode};
+
+                    let xdp_mode = match config.xdp_mode.to_lowercase().as_str() {
+                        "native" => XdpMode::Native,
+                        _ => XdpMode::Generic,
+                    };
+
+                    let xdp_config = XdpConfig {
+                        enabled: true,
+                        interface: config.xdp_interface.clone(),
+                        mode: xdp_mode,
+                        fallback: true,
+                    };
+
+                    info!("Initializing XDP on interface {} with mode {:?}",
+                          xdp_config.interface, xdp_config.mode);
+
+                    SessionManager::new_with_xdp(session_manager_config, xdp_config, None).await
+                } else {
+                    SessionManager::new(session_manager_config, None)
+                }
+            }
+
+            #[cfg(not(all(target_os = "linux", feature = "xdp")))]
+            {
+                if config.xdp_enabled {
+                    info!("XDP requested but not available on this platform or not compiled with 'xdp' feature");
+                }
+                SessionManager::new(session_manager_config, None)
+            }
+        };
 
         // Create conference bridge for media processing
         let conference_bridge = Arc::new(

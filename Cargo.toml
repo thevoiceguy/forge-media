@@ -157,7 +157,7 @@ sbc = ["dep:forge-sbc"]
 siprec = ["dep:forge-siprec"]
 ai-stream = ["dep:forge-ai-stream"]
 ha = ["dep:forge-ha"]
-xdp = ["forge-engine/xdp"]
+xdp = ["forge-engine/xdp", "forge-api/xdp"]
 
 [profile.dev]
 opt-level = 0

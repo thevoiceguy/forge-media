@@ -11,3 +11,6 @@ pub use session::{
 };
 pub use forwarding::ForwardingEngine;
 pub use manager::{SessionManager, SessionManagerConfig};
+
+#[cfg(feature = "xdp")]
+pub use forge_kernel::xdp::{XdpManager, XdpMode};

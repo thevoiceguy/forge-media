@@ -46,9 +46,12 @@ async fn main() -> Result<()> {
         tls_cert: config.api.tls_cert.clone(),
         tls_key: config.api.tls_key.clone(),
         recording_base_dir: config.api.recording_base_dir.clone(),
+        xdp_enabled: config.engine.xdp.enabled,
+        xdp_interface: config.engine.xdp.interface.clone(),
+        xdp_mode: format!("{:?}", config.engine.xdp.mode).to_lowercase(),
     };
 
-    let api_server = ApiServer::new(api_config);
+    let api_server = ApiServer::new(api_config).await;
 
     info!("Forge Media Engine is running...");
     info!("Press Ctrl+C to shutdown gracefully");

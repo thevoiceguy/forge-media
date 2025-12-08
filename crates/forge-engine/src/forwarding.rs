@@ -160,6 +160,27 @@ impl ForwardingEngine {
             }
         };
 
+        // Check if both endpoints are now learned and activate XDP fast path
+        #[cfg(all(target_os = "linux", feature = "xdp"))]
+        {
+            let (a_addr, b_addr) = {
+                let a = participant_a.read().await;
+                let b = participant_b.read().await;
+                (a.remote_addr, b.remote_addr)
+            };
+
+            if a_addr.is_some() && b_addr.is_some() {
+                // Both endpoints learned - activate XDP fast path
+                if let Err(e) = session.activate_xdp_fast_path().await {
+                    tracing::error!(
+                        "Failed to activate XDP fast path for session {}: {}",
+                        call_id.0,
+                        e
+                    );
+                }
+            }
+        }
+
         // Update sender statistics and session activity
         let packet_len = packet.payload.len() as u64;
         Self::update_stats(&sender, participant_a, participant_b, packet_len, true).await;

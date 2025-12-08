@@ -11,6 +11,9 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+#[cfg(all(target_os = "linux", feature = "xdp"))]
+use forge_kernel::XdpManager;
+
 /// Session manager configuration
 #[derive(Debug, Clone)]
 pub struct SessionManagerConfig {
@@ -46,6 +49,9 @@ pub struct SessionManager {
     monitoring_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// Shutdown flag for monitoring task
     shutdown: Arc<AtomicBool>,
+    /// XDP manager for kernel-level packet forwarding (Linux only)
+    #[cfg(all(target_os = "linux", feature = "xdp"))]
+    xdp_manager: Option<Arc<XdpManager>>,
 }
 
 impl SessionManager {
@@ -60,6 +66,64 @@ impl SessionManager {
             event_bus,
             monitoring_task: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(target_os = "linux", feature = "xdp"))]
+            xdp_manager: None,
+        });
+
+        manager
+    }
+
+    /// Create a new session manager with XDP support
+    #[cfg(all(target_os = "linux", feature = "xdp"))]
+    pub async fn new_with_xdp(
+        config: SessionManagerConfig,
+        xdp_config: forge_core::config::XdpConfig,
+        event_bus: Option<Arc<EventBus>>,
+    ) -> Arc<Self> {
+        let port_pool = Arc::new(PortPool::new(config.port_pool_config.clone()));
+
+        // Try to initialize XDP if enabled
+        let xdp_manager = if xdp_config.enabled {
+            tracing::info!(
+                "Initializing XDP on interface {} with mode {:?}",
+                xdp_config.interface,
+                xdp_config.mode
+            );
+
+            // Convert config XdpMode to kernel XdpMode
+            let xdp_mode = match xdp_config.mode {
+                forge_core::config::XdpMode::Native => forge_kernel::XdpMode::Native,
+                forge_core::config::XdpMode::Generic => forge_kernel::XdpMode::Generic,
+            };
+
+            match XdpManager::new(&xdp_config.interface, xdp_mode).await {
+                Ok(manager) => {
+                    tracing::info!("XDP manager initialized successfully");
+                    Some(Arc::new(manager))
+                }
+                Err(e) => {
+                    if xdp_config.fallback {
+                        tracing::warn!("Failed to initialize XDP, falling back to userspace: {}", e);
+                        None
+                    } else {
+                        tracing::error!("Failed to initialize XDP: {}", e);
+                        None
+                    }
+                }
+            }
+        } else {
+            tracing::info!("XDP disabled in configuration");
+            None
+        };
+
+        let manager = Arc::new(Self {
+            sessions: DashMap::new(),
+            port_pool,
+            config,
+            event_bus,
+            monitoring_task: Arc::new(Mutex::new(None)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            xdp_manager,
         });
 
         manager
@@ -84,17 +148,36 @@ impl SessionManager {
         }
 
         // Create session
-        let session = Arc::new(
-            MediaSession::new(
-                call_id.clone(),
-                participant_a,
-                participant_b,
-                &self.port_pool,
-                self.config.session_config.clone(),
-                self.event_bus.clone(),
+        #[cfg(all(target_os = "linux", feature = "xdp"))]
+        let session = {
+            Arc::new(
+                MediaSession::new_with_xdp(
+                    call_id.clone(),
+                    participant_a,
+                    participant_b,
+                    &self.port_pool,
+                    self.config.session_config.clone(),
+                    self.event_bus.clone(),
+                    self.xdp_manager.clone(),
+                )
+                .await?,
             )
-            .await?,
-        );
+        };
+
+        #[cfg(not(all(target_os = "linux", feature = "xdp")))]
+        let session = {
+            Arc::new(
+                MediaSession::new(
+                    call_id.clone(),
+                    participant_a,
+                    participant_b,
+                    &self.port_pool,
+                    self.config.session_config.clone(),
+                    self.event_bus.clone(),
+                )
+                .await?,
+            )
+        };
 
         // Store session
         self.sessions.insert(call_id.clone(), Arc::clone(&session));

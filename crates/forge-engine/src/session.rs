@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
+#[cfg(all(target_os = "linux", feature = "xdp"))]
+use forge_kernel::{XdpManager, ForwardKey, ForwardValue};
+
 /// Configuration for a media session
 #[derive(Debug, Clone)]
 pub struct MediaSessionConfig {
@@ -100,6 +103,12 @@ pub struct MediaSession {
     event_bus: Option<Arc<EventBus>>,
     /// Forwarding task handles
     forwarding_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// XDP manager for kernel-level packet forwarding (Linux only)
+    #[cfg(all(target_os = "linux", feature = "xdp"))]
+    xdp_manager: Option<Arc<XdpManager>>,
+    /// Track if XDP fast path is active
+    #[cfg(all(target_os = "linux", feature = "xdp"))]
+    xdp_active: Arc<AtomicBool>,
 }
 
 impl MediaSession {
@@ -154,6 +163,78 @@ impl MediaSession {
             config,
             event_bus: event_bus.clone(),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(all(target_os = "linux", feature = "xdp"))]
+            xdp_manager: None,
+            #[cfg(all(target_os = "linux", feature = "xdp"))]
+            xdp_active: Arc::new(AtomicBool::new(false)),
+        };
+
+        // Publish session created event
+        if let Some(bus) = &event_bus {
+            bus.publish(ForgeEvent::SessionCreated {
+                call_id,
+                timestamp: chrono::Utc::now(),
+            });
+        }
+
+        Ok(session)
+    }
+
+    /// Create a new media session with XDP support
+    #[cfg(all(target_os = "linux", feature = "xdp"))]
+    pub async fn new_with_xdp(
+        call_id: CallId,
+        participant_a_id: ParticipantId,
+        participant_b_id: ParticipantId,
+        port_pool: &Arc<PortPool>,
+        config: MediaSessionConfig,
+        event_bus: Option<Arc<EventBus>>,
+        xdp_manager: Option<Arc<XdpManager>>,
+    ) -> Result<Self> {
+        // Allocate ports
+        let ports = port_pool.allocate().await?;
+        tracing::info!(
+            "Allocated ports for session {}: RTP={}, RTCP={}",
+            call_id.0,
+            ports.rtp_port,
+            ports.rtcp_port
+        );
+
+        // Create socket pair
+        let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
+
+        let participant_a = Participant {
+            id: participant_a_id,
+            remote_addr: None,
+            payload_type: 0, // Default to PCMU
+            stats: ParticipantStats::default(),
+        };
+
+        let participant_b = Participant {
+            id: participant_b_id,
+            remote_addr: None,
+            payload_type: 0, // Default to PCMU
+            stats: ParticipantStats::default(),
+        };
+
+        let now = Instant::now();
+
+        let session = Self {
+            call_id: call_id.clone(),
+            state: Arc::new(RwLock::new(SessionState::Initializing)),
+            participant_a: Arc::new(RwLock::new(participant_a)),
+            participant_b: Arc::new(RwLock::new(participant_b)),
+            sockets: Arc::new(sockets),
+            ports,
+            port_pool: Arc::clone(port_pool),
+            ports_deallocated: Arc::new(AtomicBool::new(false)),
+            created_at: now,
+            last_activity: Arc::new(RwLock::new(now)),
+            config,
+            event_bus: event_bus.clone(),
+            forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
+            xdp_manager,
+            xdp_active: Arc::new(AtomicBool::new(false)),
         };
 
         // Publish session created event
@@ -207,6 +288,192 @@ impl MediaSession {
         self.idle_time().await > self.config.session_timeout
     }
 
+    /// Activate XDP fast path for this session
+    /// Should be called after both participants' endpoints are learned
+    #[cfg(all(target_os = "linux", feature = "xdp"))]
+    pub async fn activate_xdp_fast_path(&self) -> Result<()> {
+        // Check if XDP is available
+        let xdp_manager = match &self.xdp_manager {
+            Some(mgr) => mgr,
+            None => {
+                tracing::debug!("XDP not available for session {}", self.call_id.0);
+                return Ok(());
+            }
+        };
+
+        // Check if already active
+        if self.xdp_active.load(Ordering::Relaxed) {
+            tracing::debug!("XDP fast path already active for session {}", self.call_id.0);
+            return Ok(());
+        }
+
+        // Get participant addresses
+        let (a_addr, b_addr) = {
+            let a = self.participant_a.read().await;
+            let b = self.participant_b.read().await;
+
+            match (a.remote_addr, b.remote_addr) {
+                (Some(a_addr), Some(b_addr)) => (a_addr, b_addr),
+                _ => {
+                    tracing::warn!(
+                        "Cannot activate XDP fast path - not all endpoints learned for session {}",
+                        self.call_id.0
+                    );
+                    return Ok(());
+                }
+            }
+        };
+
+        tracing::info!(
+            "Activating XDP fast path for session {} (A: {} <-> B: {})",
+            self.call_id.0,
+            a_addr,
+            b_addr
+        );
+
+        // Helper to convert SocketAddr to network byte order
+        fn addr_to_network_bytes(addr: SocketAddr) -> (u32, u16) {
+            let ip_bytes = match addr.ip() {
+                std::net::IpAddr::V4(ipv4) => ipv4.octets(),
+                std::net::IpAddr::V6(_) => {
+                    // XDP currently only supports IPv4
+                    return (0, 0);
+                }
+            };
+            let ip_u32 = u32::from_ne_bytes(ip_bytes);
+            let port_be = addr.port().to_be();
+            (ip_u32, port_be)
+        }
+
+        let (a_ip, a_port) = addr_to_network_bytes(a_addr);
+        let (b_ip, b_port) = addr_to_network_bytes(b_addr);
+        let rtp_port_be = self.ports.rtp_port.to_be();
+
+        // Insert bidirectional forwarding rules
+        // Rule 1: A -> B (packets from A forwarded to B)
+        let key_a_to_b = ForwardKey {
+            src_ip: a_ip,
+            src_port: a_port,
+            dst_port: rtp_port_be,
+            dst_ip: 0, // Will be filled by XDP program (our local IP)
+            protocol: 17, // UDP
+            _padding: [0; 3],
+        };
+
+        let value_a_to_b = ForwardValue {
+            dest_ip: b_ip,
+            dest_port: b_port,
+            src_ip: 0, // Our IP for reply
+            src_port: rtp_port_be,
+            last_seen: 0,
+        };
+
+        xdp_manager.insert_forward_rule(key_a_to_b, value_a_to_b).await
+            .map_err(|e| ForgeError::Internal(format!("XDP insert forward rule failed: {}", e)))?;
+
+        // Rule 2: B -> A (packets from B forwarded to A)
+        let key_b_to_a = ForwardKey {
+            src_ip: b_ip,
+            src_port: b_port,
+            dst_port: rtp_port_be,
+            dst_ip: 0,
+            protocol: 17,
+            _padding: [0; 3],
+        };
+
+        let value_b_to_a = ForwardValue {
+            dest_ip: a_ip,
+            dest_port: a_port,
+            src_ip: 0,
+            src_port: rtp_port_be,
+            last_seen: 0,
+        };
+
+        xdp_manager.insert_forward_rule(key_b_to_a, value_b_to_a).await
+            .map_err(|e| ForgeError::Internal(format!("XDP insert forward rule failed: {}", e)))?;
+
+        self.xdp_active.store(true, Ordering::Relaxed);
+
+        tracing::info!("XDP fast path activated for session {}", self.call_id.0);
+
+        Ok(())
+    }
+
+    /// Deactivate XDP fast path for this session
+    #[cfg(all(target_os = "linux", feature = "xdp"))]
+    pub async fn deactivate_xdp_fast_path(&self) -> Result<()> {
+        // Check if XDP is available and active
+        let xdp_manager = match &self.xdp_manager {
+            Some(mgr) => mgr,
+            None => return Ok(()),
+        };
+
+        if !self.xdp_active.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        tracing::info!("Deactivating XDP fast path for session {}", self.call_id.0);
+
+        // Get participant addresses
+        let (a_addr, b_addr) = {
+            let a = self.participant_a.read().await;
+            let b = self.participant_b.read().await;
+
+            match (a.remote_addr, b.remote_addr) {
+                (Some(a_addr), Some(b_addr)) => (a_addr, b_addr),
+                _ => {
+                    self.xdp_active.store(false, Ordering::Relaxed);
+                    return Ok(());
+                }
+            }
+        };
+
+        // Helper to convert SocketAddr to network byte order
+        fn addr_to_network_bytes(addr: SocketAddr) -> (u32, u16) {
+            let ip_bytes = match addr.ip() {
+                std::net::IpAddr::V4(ipv4) => ipv4.octets(),
+                std::net::IpAddr::V6(_) => return (0, 0),
+            };
+            let ip_u32 = u32::from_ne_bytes(ip_bytes);
+            let port_be = addr.port().to_be();
+            (ip_u32, port_be)
+        }
+
+        let (a_ip, a_port) = addr_to_network_bytes(a_addr);
+        let (b_ip, b_port) = addr_to_network_bytes(b_addr);
+        let rtp_port_be = self.ports.rtp_port.to_be();
+
+        // Remove bidirectional forwarding rules
+        let key_a_to_b = ForwardKey {
+            src_ip: a_ip,
+            src_port: a_port,
+            dst_port: rtp_port_be,
+            dst_ip: 0,
+            protocol: 17,
+            _padding: [0; 3],
+        };
+
+        let key_b_to_a = ForwardKey {
+            src_ip: b_ip,
+            src_port: b_port,
+            dst_port: rtp_port_be,
+            dst_ip: 0,
+            protocol: 17,
+            _padding: [0; 3],
+        };
+
+        xdp_manager.remove_forward_rule(&key_a_to_b).await
+            .map_err(|e| ForgeError::Internal(format!("XDP remove forward rule failed: {}", e)))?;
+        xdp_manager.remove_forward_rule(&key_b_to_a).await
+            .map_err(|e| ForgeError::Internal(format!("XDP remove forward rule failed: {}", e)))?;
+
+        self.xdp_active.store(false, Ordering::Relaxed);
+
+        tracing::info!("XDP fast path deactivated for session {}", self.call_id.0);
+
+        Ok(())
+    }
+
     /// Start the RTP forwarding loop
     pub async fn start_forwarding(self: &Arc<Self>) -> Result<()> {
         let mut state = self.state.write().await;
@@ -247,6 +514,14 @@ impl MediaSession {
         drop(state);
 
         tracing::info!("Stopping RTP forwarding for session {}", self.call_id.0);
+
+        // Deactivate XDP fast path if active
+        #[cfg(all(target_os = "linux", feature = "xdp"))]
+        {
+            if let Err(e) = self.deactivate_xdp_fast_path().await {
+                tracing::error!("Failed to deactivate XDP fast path: {}", e);
+            }
+        }
 
         // Cancel all forwarding tasks
         let mut tasks = self.forwarding_tasks.lock().await;

@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
-use std::time::Duration;
 
 /// Main Forge configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +49,10 @@ pub struct EngineConfig {
     /// IP version configuration
     #[serde(default)]
     pub ip_version: IpVersionConfig,
+
+    /// XDP (eBPF) acceleration configuration
+    #[serde(default)]
+    pub xdp: XdpConfig,
 }
 
 impl Default for EngineConfig {
@@ -60,6 +63,7 @@ impl Default for EngineConfig {
             tos: default_tos(),
             session_timeout_secs: default_session_timeout_secs(),
             ip_version: IpVersionConfig::DualStack,
+            xdp: XdpConfig::default(),
         }
     }
 }
@@ -107,6 +111,57 @@ pub struct InterfaceConfig {
 
     /// Advertised address for NAT scenarios
     pub advertised_address: Option<IpAddr>,
+}
+
+/// XDP (eBPF) acceleration configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XdpConfig {
+    /// Enable XDP acceleration
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Network interface to attach XDP program
+    #[serde(default = "default_xdp_interface")]
+    pub interface: String,
+
+    /// XDP mode (native or generic)
+    #[serde(default)]
+    pub mode: XdpMode,
+
+    /// Fallback to userspace if XDP fails to load
+    #[serde(default = "default_true")]
+    pub fallback: bool,
+}
+
+impl Default for XdpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Disabled by default for compatibility
+            interface: default_xdp_interface(),
+            mode: XdpMode::Generic,
+            fallback: true,
+        }
+    }
+}
+
+fn default_xdp_interface() -> String {
+    "lo".to_string()
+}
+
+/// XDP operating mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum XdpMode {
+    /// Native XDP mode (XDP_DRV) - fastest, requires driver support
+    Native,
+    /// Generic XDP mode (XDP_SKB) - software fallback
+    Generic,
+}
+
+impl Default for XdpMode {
+    fn default() -> Self {
+        Self::Generic
+    }
 }
 
 /// API server configuration

@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
 
 /// Unique call identifier
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]

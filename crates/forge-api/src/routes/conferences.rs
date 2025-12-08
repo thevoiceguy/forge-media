@@ -1,11 +1,12 @@
 //! Conference and recording endpoints
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
+use std::path::{Path as FsPath, PathBuf};
 use validator::Validate;
 
 use crate::error::{ApiError, ApiResult};
@@ -271,7 +272,10 @@ async fn start_recording(
     };
 
     // Start recording
-    room.start_recording(&request.output_path, format)
+    let output_path = resolve_recording_path(&state.recording_base_dir, &request.output_path)
+        .map_err(|e| ApiError::InvalidRequest(e))?;
+
+    room.start_recording(&output_path, format)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to start recording: {}", e)))?;
 
@@ -411,6 +415,43 @@ fn recording_info_to_response(info: &forge_media_processor::storage::RecordingIn
     }
 }
 
+/// Resolve a user-supplied recording path against the configured base directory.
+/// Rejects absolute paths, parent-directory traversal, and overwriting existing files.
+fn resolve_recording_path(base_dir: &FsPath, requested: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+
+    if requested.trim().is_empty() {
+        return Err("output_path cannot be empty".to_string());
+    }
+
+    let mut sanitized = PathBuf::from(base_dir);
+    for comp in FsPath::new(requested).components() {
+        match comp {
+            Component::Normal(c) => sanitized.push(c),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err("output_path cannot traverse outside the recording base directory".to_string());
+            }
+            _ => {
+                return Err("absolute paths are not allowed for output_path".to_string());
+            }
+        }
+    }
+
+    // Prevent overwriting existing files
+    if sanitized.exists() {
+        return Err(format!("recording already exists at {:?}", sanitized));
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = sanitized.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create recording directory: {}", e))?;
+    }
+
+    Ok(sanitized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +471,7 @@ mod tests {
             session_manager,
             metrics_handle,
             bridge,
+            std::env::temp_dir().join("forge-test-recordings"),
         ))
     }
 

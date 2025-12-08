@@ -13,6 +13,7 @@ pub struct JitterBuffer {
     /// Maximum buffer delay before dropping
     max_delay: Duration,
     /// Minimum buffer delay
+    #[allow(dead_code)]
     min_delay: Duration,
     /// Next expected sequence number
     next_seq: Option<u16>,
@@ -23,7 +24,9 @@ pub struct JitterBuffer {
 }
 
 struct JitterPacket {
+    #[allow(dead_code)]
     sequence: u16,
+    #[allow(dead_code)]
     timestamp: u32,
     received_at: Instant,
     data: Vec<u8>,
@@ -120,7 +123,7 @@ impl JitterBuffer {
     /// - The packet has been in the buffer for at least `target_delay`
     pub fn pop(&mut self) -> Option<Vec<u8>> {
         let next_seq = self.next_seq?;
-        let base_time = self.base_time?;
+        let _base_time = self.base_time?;
         let now = Instant::now();
 
         // Check if we have the next expected packet

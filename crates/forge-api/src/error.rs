@@ -4,7 +4,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 /// API error response format
 #[derive(Debug, Serialize, Deserialize)]

@@ -444,6 +444,9 @@ mod tests {
                 &port_pool,
                 session_config,
                 None,
+                None,
+                None,
+                None,
             )
             .await
             .unwrap(),

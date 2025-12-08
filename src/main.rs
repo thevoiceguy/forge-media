@@ -37,6 +37,15 @@ async fn main() -> Result<()> {
         enable_cors: config.api.enable_cors,
         port_range_min: config.engine.port_range.start,
         port_range_max: config.engine.port_range.end,
+        allowed_origins: config.api.cors_origins.clone(),
+        auth_tokens: config.api.auth_tokens.clone(),
+        rate_limit_requests_per_window: config.api.rate_limit_requests_per_window,
+        rate_limit_window_secs: config.api.rate_limit_window_secs,
+        enable_https: config.api.enable_https,
+        https_bind: config.api.https_bind.as_ref().map(|s| s.parse()).transpose()?,
+        tls_cert: config.api.tls_cert.clone(),
+        tls_key: config.api.tls_key.clone(),
+        recording_base_dir: config.api.recording_base_dir.clone(),
     };
 
     let api_server = ApiServer::new(api_config);

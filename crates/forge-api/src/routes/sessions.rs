@@ -4,7 +4,7 @@ use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use forge_core::{CallId, ParticipantId};
-use forge_engine::{SessionManager, SessionState};
+use forge_engine::SessionManager;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use validator::Validate;
@@ -36,6 +36,9 @@ pub struct SessionResponse {
     pub state: String,
     pub rtp_port: u16,
     pub rtcp_port: u16,
+    pub sdp: Option<String>,
+    pub from_tag: Option<String>,
+    pub to_tag: Option<String>,
     pub participant_a: Option<ParticipantStats>,
     pub participant_b: Option<ParticipantStats>,
 }
@@ -64,6 +67,7 @@ pub struct AppState {
     pub metrics_handle: Arc<super::prometheus::MetricsHandle>,
     pub conference_bridge: Arc<forge_media_processor::conference::ConferenceBridge>,
     pub storage_manager: Arc<tokio::sync::Mutex<forge_media_processor::storage::StorageManager>>,
+    pub recording_base_dir: std::path::PathBuf,
 }
 
 impl AppState {
@@ -71,10 +75,15 @@ impl AppState {
         session_manager: Arc<SessionManager>,
         metrics_handle: Arc<super::prometheus::MetricsHandle>,
         conference_bridge: Arc<forge_media_processor::conference::ConferenceBridge>,
+        recording_base_dir: std::path::PathBuf,
     ) -> Self {
         // Create default storage manager
         let storage_manager = Arc::new(tokio::sync::Mutex::new(
-            forge_media_processor::storage::StorageManager::default()
+            forge_media_processor::storage::StorageManager::new(
+                &recording_base_dir,
+                std::time::Duration::from_secs(7 * 24 * 3600),
+                0,
+            )
         ));
 
         Self {
@@ -82,6 +91,7 @@ impl AppState {
             metrics_handle,
             conference_bridge,
             storage_manager,
+            recording_base_dir,
         }
     }
 }
@@ -94,7 +104,13 @@ async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateSessionRequest>,
 ) -> ApiResult<axum::response::Response> {
-    tracing::info!("API request to create session");
+    let sdp_len = request.sdp.as_ref().map(|s| s.len());
+    tracing::info!(
+        "API request to create session (from_tag={:?}, to_tag={:?}, sdp_len={:?})",
+        request.from_tag,
+        request.to_tag,
+        sdp_len
+    );
 
     // Validate request
     request.validate()
@@ -122,7 +138,14 @@ async fn create_session(
     // Create session
     let session = state
         .session_manager
-        .create_session(call_id.clone(), participant_a, participant_b)
+        .create_session(
+            call_id.clone(),
+            participant_a,
+            participant_b,
+            request.sdp.clone(),
+            request.from_tag.clone(),
+            request.to_tag.clone(),
+        )
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to create session: {}", e)))?;
 
@@ -134,6 +157,9 @@ async fn create_session(
         state: format!("{:?}", session_state),
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
+        sdp: session.sdp().map(|s| s.to_string()),
+        from_tag: session.from_tag().map(|t| t.to_string()),
+        to_tag: session.to_tag().map(|t| t.to_string()),
         participant_a: None,
         participant_b: None,
     };
@@ -169,6 +195,9 @@ async fn get_session(
         state: format!("{:?}", session_state),
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
+        sdp: session.sdp().map(|s| s.to_string()),
+        from_tag: session.from_tag().map(|t| t.to_string()),
+        to_tag: session.to_tag().map(|t| t.to_string()),
         participant_a: Some(ParticipantStats {
             id: "A".to_string(),
             packets_received: stats_a.packets_received,
@@ -230,6 +259,9 @@ async fn list_sessions(
             state: format!("{:?}", session_state),
             rtp_port: ports.rtp_port,
             rtcp_port: ports.rtcp_port,
+            sdp: session.sdp().map(|s| s.to_string()),
+            from_tag: session.from_tag().map(|t| t.to_string()),
+            to_tag: session.to_tag().map(|t| t.to_string()),
             participant_a: None,
             participant_b: None,
         });
@@ -275,6 +307,9 @@ async fn start_session(
         state: format!("{:?}", session_state),
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
+        sdp: session.sdp().map(|s| s.to_string()),
+        from_tag: session.from_tag().map(|t| t.to_string()),
+        to_tag: session.to_tag().map(|t| t.to_string()),
         participant_a: None,
         participant_b: None,
     };
@@ -314,6 +349,7 @@ mod tests {
             session_manager,
             metrics_handle,
             conference_bridge,
+            std::env::temp_dir().join("forge-test-recordings"),
         ))
     }
 
@@ -373,6 +409,9 @@ mod tests {
             call_id.clone(),
             ParticipantId::generate(),
             ParticipantId::generate(),
+            None,
+            None,
+            None,
         ).await.unwrap();
 
         let app = routes().with_state(state);
@@ -400,6 +439,9 @@ mod tests {
             call_id.clone(),
             ParticipantId::generate(),
             ParticipantId::generate(),
+            None,
+            None,
+            None,
         ).await.unwrap();
 
         let app = routes().with_state(state);

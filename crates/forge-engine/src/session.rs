@@ -103,6 +103,12 @@ pub struct MediaSession {
     event_bus: Option<Arc<EventBus>>,
     /// Forwarding task handles
     forwarding_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// Optional offer/answer SDP associated with the session
+    sdp: Option<String>,
+    /// SIP/SDP from-tag if provided
+    from_tag: Option<String>,
+    /// SIP/SDP to-tag if provided
+    to_tag: Option<String>,
     /// XDP manager for kernel-level packet forwarding (Linux only)
     #[cfg(all(target_os = "linux", feature = "xdp"))]
     xdp_manager: Option<Arc<XdpManager>>,
@@ -120,6 +126,9 @@ impl MediaSession {
         port_pool: &Arc<PortPool>,
         config: MediaSessionConfig,
         event_bus: Option<Arc<EventBus>>,
+        sdp: Option<String>,
+        from_tag: Option<String>,
+        to_tag: Option<String>,
     ) -> Result<Self> {
         // Allocate ports
         let ports = port_pool.allocate().await?;
@@ -163,6 +172,9 @@ impl MediaSession {
             config,
             event_bus: event_bus.clone(),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
+            sdp,
+            from_tag,
+            to_tag,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_manager: None,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
@@ -190,6 +202,9 @@ impl MediaSession {
         config: MediaSessionConfig,
         event_bus: Option<Arc<EventBus>>,
         xdp_manager: Option<Arc<XdpManager>>,
+        sdp: Option<String>,
+        from_tag: Option<String>,
+        to_tag: Option<String>,
     ) -> Result<Self> {
         // Allocate ports
         let ports = port_pool.allocate().await?;
@@ -233,6 +248,9 @@ impl MediaSession {
             config,
             event_bus: event_bus.clone(),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
+            sdp,
+            from_tag,
+            to_tag,
             xdp_manager,
             xdp_active: Arc::new(AtomicBool::new(false)),
         };
@@ -584,6 +602,21 @@ impl MediaSession {
     pub fn participant_b(&self) -> &Arc<RwLock<Participant>> {
         &self.participant_b
     }
+
+    /// Get associated SDP (if any)
+    pub fn sdp(&self) -> Option<&str> {
+        self.sdp.as_deref()
+    }
+
+    /// Get from-tag (if any)
+    pub fn from_tag(&self) -> Option<&str> {
+        self.from_tag.as_deref()
+    }
+
+    /// Get to-tag (if any)
+    pub fn to_tag(&self) -> Option<&str> {
+        self.to_tag.as_deref()
+    }
 }
 
 impl Drop for MediaSession {
@@ -644,6 +677,9 @@ mod tests {
             &port_pool,
             MediaSessionConfig::default(),
             None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -669,6 +705,9 @@ mod tests {
                 participant_b,
                 &port_pool,
                 MediaSessionConfig::default(),
+                None,
+                None,
+                None,
                 None,
             )
             .await
@@ -704,6 +743,9 @@ mod tests {
             participant_b,
             &port_pool,
             session_config,
+            None,
+            None,
+            None,
             None,
         )
         .await

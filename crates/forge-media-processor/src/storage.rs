@@ -92,7 +92,7 @@ pub struct StorageManager {
     /// Recording metadata index
     recordings: HashMap<String, RecordingInfo>,
     /// Base directory for recordings
-    base_dir: PathBuf,
+    _base_dir: PathBuf,
     /// Retention period (recordings older than this will be deleted)
     retention_period: Duration,
     /// Maximum storage size in bytes (0 = unlimited)
@@ -113,7 +113,7 @@ impl StorageManager {
     ) -> Self {
         Self {
             recordings: HashMap::new(),
-            base_dir: base_dir.as_ref().to_path_buf(),
+            _base_dir: base_dir.as_ref().to_path_buf(),
             retention_period,
             max_storage_bytes,
         }
@@ -179,7 +179,6 @@ impl StorageManager {
 
     /// Clean up old recordings based on retention policy
     pub async fn cleanup_old_recordings(&mut self) -> Result<usize> {
-        let now = SystemTime::now();
         let mut deleted_count = 0;
 
         // Find recordings to delete

@@ -192,8 +192,25 @@ pub struct ApiConfig {
     pub enable_cors: bool,
 
     /// Allowed origins for CORS
-    #[serde(default)]
+    #[serde(default = "default_cors_origins")]
     pub cors_origins: Vec<String>,
+
+    /// Static bearer tokens for API authentication
+    /// If empty, authentication is disabled (not recommended for production)
+    #[serde(default)]
+    pub auth_tokens: Vec<String>,
+
+    /// Maximum requests allowed per window for rate limiting
+    #[serde(default = "default_rate_limit_requests")]
+    pub rate_limit_requests_per_window: usize,
+
+    /// Rate limit window size in seconds
+    #[serde(default = "default_rate_limit_window_secs")]
+    pub rate_limit_window_secs: u64,
+
+    /// Base directory for recordings (all recording paths are constrained within this directory)
+    #[serde(default = "default_recording_base_dir")]
+    pub recording_base_dir: std::path::PathBuf,
 }
 
 impl Default for ApiConfig {
@@ -206,7 +223,11 @@ impl Default for ApiConfig {
             tls_key: None,
             ws_bind: None,
             enable_cors: true,
-            cors_origins: vec!["*".to_string()],
+            cors_origins: default_cors_origins(),
+            auth_tokens: Vec::new(),
+            rate_limit_requests_per_window: default_rate_limit_requests(),
+            rate_limit_window_secs: default_rate_limit_window_secs(),
+            recording_base_dir: default_recording_base_dir(),
         }
     }
 }
@@ -217,4 +238,20 @@ fn default_http_bind() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_cors_origins() -> Vec<String> {
+    vec!["http://localhost:3000".to_string()]
+}
+
+fn default_rate_limit_requests() -> usize {
+    120
+}
+
+fn default_rate_limit_window_secs() -> u64 {
+    60
+}
+
+fn default_recording_base_dir() -> std::path::PathBuf {
+    "/var/lib/forge/recordings".into()
 }

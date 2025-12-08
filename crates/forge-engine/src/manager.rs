@@ -136,6 +136,9 @@ impl SessionManager {
         call_id: CallId,
         participant_a: ParticipantId,
         participant_b: ParticipantId,
+        sdp: Option<String>,
+        from_tag: Option<String>,
+        to_tag: Option<String>,
     ) -> Result<Arc<MediaSession>> {
         tracing::debug!("Creating new media session");
 
@@ -159,6 +162,9 @@ impl SessionManager {
                     self.config.session_config.clone(),
                     self.event_bus.clone(),
                     self.xdp_manager.clone(),
+                    sdp,
+                    from_tag,
+                    to_tag,
                 )
                 .await?,
             )
@@ -174,6 +180,9 @@ impl SessionManager {
                     &self.port_pool,
                     self.config.session_config.clone(),
                     self.event_bus.clone(),
+                    sdp,
+                    from_tag,
+                    to_tag,
                 )
                 .await?,
             )
@@ -304,6 +313,9 @@ impl SessionManager {
             return;
         }
 
+        // Reset shutdown flag in case monitoring was stopped previously
+        self.shutdown.store(false, Ordering::Relaxed);
+
         tracing::info!(
             "Starting timeout monitoring with interval of {:?}",
             self.config.cleanup_interval
@@ -372,7 +384,7 @@ mod tests {
         let participant_b = ParticipantId::generate();
 
         let session = manager
-            .create_session(call_id.clone(), participant_a, participant_b)
+            .create_session(call_id.clone(), participant_a, participant_b, None, None, None)
             .await
             .unwrap();
 
@@ -399,7 +411,7 @@ mod tests {
 
         // Create session
         manager
-            .create_session(call_id.clone(), participant_a, participant_b)
+            .create_session(call_id.clone(), participant_a, participant_b, None, None, None)
             .await
             .unwrap();
         assert_eq!(manager.session_count(), 1);
@@ -431,7 +443,7 @@ mod tests {
 
         // Create session with short timeout
         manager
-            .create_session(call_id.clone(), participant_a, participant_b)
+            .create_session(call_id.clone(), participant_a, participant_b, None, None, None)
             .await
             .unwrap();
         assert_eq!(manager.session_count(), 1);
@@ -443,5 +455,51 @@ mod tests {
         let removed = manager.cleanup_timedout_sessions().await;
         assert_eq!(removed, 1);
         assert_eq!(manager.session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_monitoring_restart_after_stop() {
+        let config = SessionManagerConfig {
+            port_pool_config: PortPoolConfig::new(53000, 54000).unwrap(),
+            session_config: MediaSessionConfig {
+                session_timeout: std::time::Duration::from_millis(30),
+                ..Default::default()
+            },
+            cleanup_interval: std::time::Duration::from_millis(10),
+        };
+
+        let manager = SessionManager::new(config, None);
+
+        // First run
+        manager.start_monitoring().await;
+        let call_id = CallId::generate();
+        manager.create_session(
+            call_id.clone(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(manager.session_count(), 0, "session should be cleaned up");
+        manager.stop_monitoring().await;
+
+        // Second run after stop should still work
+        manager.start_monitoring().await;
+        let call_id2 = CallId::generate();
+        manager.create_session(
+            call_id2.clone(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        assert_eq!(manager.session_count(), 0, "session should be cleaned up after restart");
+        manager.stop_monitoring().await;
     }
 }

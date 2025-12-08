@@ -117,6 +117,7 @@ pub struct SrtpContext {
     /// Key material for inbound (decrypting) traffic
     remote_key: Option<SrtpKeyMaterial>,
     /// Replay protection window
+    #[allow(dead_code)]
     replay_window: ReplayWindow,
 }
 

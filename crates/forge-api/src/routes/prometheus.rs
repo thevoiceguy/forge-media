@@ -2,11 +2,13 @@
 
 use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::sessions::AppState;
 
 /// Prometheus metrics handle (shared across requests)
+static PROM_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+
 pub struct MetricsHandle {
     handle: PrometheusHandle,
 }
@@ -14,7 +16,8 @@ pub struct MetricsHandle {
 impl MetricsHandle {
     /// Initialize Prometheus metrics exporter
     pub fn init() -> Self {
-        let handle = PrometheusBuilder::new()
+        let handle = PROM_HANDLE.get_or_init(|| {
+            PrometheusBuilder::new()
             // Configure histogram buckets for latency metrics
             .set_buckets_for_metric(
                 Matcher::Suffix("duration_seconds".to_string()),
@@ -33,9 +36,10 @@ impl MetricsHandle {
             )
             .unwrap()
             .install_recorder()
-            .expect("Failed to install Prometheus recorder");
+            .expect("Failed to install Prometheus recorder")
+        });
 
-        Self { handle }
+        Self { handle: handle.clone() }
     }
 
     /// Get the Prometheus handle for rendering metrics

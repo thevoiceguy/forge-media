@@ -51,6 +51,7 @@ struct SubBandState {
     // Predictor state
     predictor: PredictorState,
     // Quantizer lookup tables
+    #[allow(dead_code)]
     quantizer: QuantizerState,
 }
 
@@ -67,6 +68,7 @@ struct PredictorState {
 /// Quantizer state
 struct QuantizerState {
     // Quantizer table
+    #[allow(dead_code)]
     table: Vec<i32>,
 }
 
@@ -166,6 +168,7 @@ impl QmfState {
 /// G.722 wideband codec
 pub struct G722Codec {
     sample_rate: u32,
+    #[allow(dead_code)]
     bit_rate: G722BitRate,
     encoder_state: G722State,
     decoder_state: G722State,

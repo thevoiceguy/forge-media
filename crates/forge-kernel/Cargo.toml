@@ -5,9 +5,30 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
-forge-core = { path = "../forge-core" }
-tokio = { workspace = true }
+# Aya - Pure Rust eBPF library
+aya = { version = "0.12", features = ["async_tokio"] }
+aya-log = "0.2"
+
+# Async runtime
+tokio = { workspace = true, features = ["sync", "time"] }
+
+# Logging and tracing
 tracing = { workspace = true }
+
+# Error handling
 thiserror = { workspace = true }
+
+# Serialization for BPF map types
+bytes = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
+
+[build-dependencies]
+aya-build = "0.1"
+
+[features]
+default = []

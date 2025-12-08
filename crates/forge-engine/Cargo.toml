@@ -9,6 +9,11 @@ license.workspace = true
 [dependencies]
 forge-core = { path = "../forge-core" }
 forge-rtp = { path = "../forge-rtp" }
+
+# XDP support (Linux only, optional)
+[target.'cfg(target_os = "linux")'.dependencies]
+forge-kernel = { path = "../forge-kernel", optional = true }
+
 tokio = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
@@ -17,3 +22,7 @@ dashmap = { workspace = true }
 parking_lot = { workspace = true }
 chrono = { workspace = true }
 bytes = { workspace = true }
+
+[features]
+default = []
+xdp = ["forge-kernel"]

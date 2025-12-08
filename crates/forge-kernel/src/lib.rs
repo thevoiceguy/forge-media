@@ -1,7 +1,16 @@
-//! forge-kernel - Implementation placeholder
+//! Forge Kernel Module
 //!
-//! This crate will contain the implementation for kernel.
+//! eBPF/XDP integration for high-performance RTP packet forwarding
 
-#![allow(dead_code, unused_variables)]
+pub mod error;
 
-pub struct Placeholder;
+#[cfg(target_os = "linux")]
+pub mod xdp;
+
+pub use error::{Error, Result};
+
+#[cfg(target_os = "linux")]
+pub use xdp::{XdpManager, XdpMode};
+
+// Re-export commonly used types
+pub use aya;

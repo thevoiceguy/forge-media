@@ -6,6 +6,7 @@ members = [
     "crates/forge-engine",
     "crates/forge-transcoding",
     "crates/forge-kernel",
+    "crates/forge-kernel-ebpf",
     "crates/forge-conference",
     "crates/forge-recording",
     "crates/forge-dtmf",
@@ -85,6 +86,7 @@ validator = { version = "0.16", features = ["derive"] }
 
 # eBPF/XDP (Linux only)
 aya = { version = "0.12", features = ["async_tokio"] }
+aya-ebpf = "0.1"
 aya-log = "0.2"
 aya-build = "0.1"
 

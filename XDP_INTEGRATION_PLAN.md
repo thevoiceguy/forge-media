@@ -8,7 +8,8 @@
 
 **Key Decisions**:
 - **Scope**: Document first, implementation follows
-- **Crate**: Aya (pure Rust, no LLVM dependency, Tokio integration)
+- **eBPF Framework**: Aya (pure Rust, no LLVM dependency, Tokio integration)
+- **eBPF Language**: Rust (both userspace and kernel code in Rust via aya-ebpf)
 - **Mode**: XDP_SKB (generic) for development, XDP_DRV (native) for production
 - **Feature**: Optional via `--features xdp` with graceful fallback
 - **Timeline**: 12 weeks full implementation (can be phased)
@@ -301,11 +302,36 @@ Size: 256KB
 
 ## XDP Program Logic
 
-**File**: `crates/forge-kernel/src/bpf/rtp_forward.bpf.c`
+> **Note**: With Aya, we write the eBPF program in **Rust** (not C). This provides type safety, memory safety, and better tooling while still compiling to BPF bytecode that runs in the kernel.
 
-```c
-SEC("xdp")
-int xdp_rtp_forward(struct xdp_md *ctx) {
+**Crate**: `crates/forge-kernel-ebpf/` (Pure Rust eBPF program)
+
+**File**: `crates/forge-kernel-ebpf/src/main.rs`
+
+```rust
+#![no_std]
+#![no_main]
+
+use aya_ebpf::{
+    bindings::xdp_action,
+    macros::{map, xdp},
+    maps::HashMap,
+    programs::XdpContext,
+};
+
+#[map]
+static FORWARD_MAP: HashMap<ForwardKey, ForwardValue> =
+    HashMap::with_max_entries(10000, 0);
+
+#[xdp]
+pub fn rtp_forward(ctx: XdpContext) -> u32 {
+    match try_forward(&ctx) {
+        Ok(action) => action,
+        Err(_) => xdp_action::XDP_PASS,
+    }
+}
+
+fn try_forward(ctx: &XdpContext) -> Result<u32, ()> {
     // 1. Parse Ethernet → IP → UDP
     // 2. Check if UDP destination port in RTP range (30000-40000)
     // 3. Skip RTCP (odd ports) → XDP_PASS
@@ -314,6 +340,12 @@ int xdp_rtp_forward(struct xdp_md *ctx) {
     //    - Not found: Send event + XDP_PASS (learning)
     // 5. Update statistics
     // 6. Return XDP_TX or XDP_REDIRECT
+    Ok(xdp_action::XDP_PASS)
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    unsafe { core::hint::unreachable_unchecked() }
 }
 ```
 
@@ -331,21 +363,44 @@ Packet arrives → Parse UDP
 
 ## Userspace Integration
 
-### New Crate: forge-kernel
+### New Crates
+
+#### 1. forge-kernel-ebpf (eBPF Program - Runs in Kernel)
+
+**Structure**:
+```
+crates/forge-kernel-ebpf/
+├── Cargo.toml            # with [lib] crate-type = ["cdylib"]
+├── src/
+│   └── main.rs           # XDP program (Rust, no_std)
+└── .cargo/
+    └── config.toml       # Build settings for eBPF target
+```
+
+**Dependencies**:
+```toml
+[dependencies]
+aya-ebpf = "0.1"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/main.rs"
+```
+
+#### 2. forge-kernel (Userspace Loader)
 
 **Structure**:
 ```
 crates/forge-kernel/
 ├── Cargo.toml
-├── build.rs              # Compile BPF program
+├── build.rs              # Build forge-kernel-ebpf and embed bytecode
 ├── src/
 │   ├── lib.rs            # Public API
 │   ├── xdp_manager.rs    # XDP lifecycle
 │   ├── map_sync.rs       # Map updates
 │   ├── event_poller.rs   # Ring buffer poller
 │   └── error.rs
-└── src/bpf/
-    └── rtp_forward.bpf.c # XDP program
+└── xtask/                # Build helper (optional)
 ```
 
 **Dependencies**:
@@ -480,21 +535,26 @@ impl MediaSession {
 **Validation**: Can attach/detach empty XDP program
 
 ### Phase 2: XDP Program (Weeks 3-4)
-**Goal**: Implement kernel forwarding logic
+**Goal**: Implement kernel forwarding logic in Rust
 
 **Tasks**:
-- [ ] Write XDP program (rtp_forward.bpf.c)
-- [ ] Implement UDP parsing
-- [ ] Implement map lookup
+- [ ] Create forge-kernel-ebpf crate (Rust, no_std)
+- [ ] Define shared types (ForwardKey, ForwardValue)
+- [ ] Implement XDP program entry point
+- [ ] Implement UDP parsing (Ethernet → IP → UDP)
+- [ ] Implement map lookup and forwarding logic
 - [ ] Implement header rewrite
 - [ ] Add ring buffer events
-- [ ] Test with bpf_printk and bpftool
+- [ ] Update forge-kernel build.rs to compile and embed eBPF bytecode
+- [ ] Test with aya-log and bpftool
 
 **Files Created**:
-- `crates/forge-kernel/src/bpf/rtp_forward.bpf.c`
-- `crates/forge-kernel/build.rs`
+- `crates/forge-kernel-ebpf/Cargo.toml`
+- `crates/forge-kernel-ebpf/src/main.rs` (Rust eBPF program)
+- `crates/forge-kernel-ebpf/.cargo/config.toml`
+- `crates/forge-kernel/build.rs` (build script)
 
-**Validation**: XDP program loads, verifier accepts, basic forwarding works
+**Validation**: XDP program compiles to BPF, loads, verifier accepts, basic forwarding works
 
 ### Phase 3: Userspace Manager (Weeks 5-6)
 **Goal**: Rust interface to XDP

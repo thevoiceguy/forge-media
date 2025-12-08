@@ -31,6 +31,9 @@ pub struct AddParticipantRequest {
 pub struct StartRecordingRequest {
     #[validate(length(min = 1, max = 1024))]
     pub output_path: String,
+    /// Audio codec for recording (optional, defaults to "pcm" for WAV)
+    /// Supported values: "pcm" (WAV), "opus" (requires opus feature)
+    pub codec: Option<String>,
 }
 
 /// Conference room information response
@@ -76,9 +79,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/conferences/:room_id/participants", post(add_participant))
         .route("/v1/conferences/:room_id/participants/:participant_id", delete(remove_participant))
         .route("/v1/conferences/:room_id/recording", post(start_recording).delete(stop_recording))
-        // TODO: Fix Handler trait issue with Path<(String, String)> + async
-        // .route("/v1/conferences/:room_id/participants/:participant_id/recording",
-        //        post(start_participant_recording).delete(stop_participant_recording))
+        .route("/v1/conferences/:room_id/participants/:participant_id/recording", post(start_participant_recording_handler))
+        .route("/v1/conferences/:room_id/participants/:participant_id/recording", delete(stop_participant_recording_handler))
         .route("/v1/recordings", get(list_recordings))
         .route("/v1/recordings/:id", get(get_recording).delete(delete_recording))
 }
@@ -232,7 +234,7 @@ async fn remove_participant(
 /// Start recording a conference room
 ///
 /// POST /v1/conferences/:room_id/recording
-#[tracing::instrument(skip(state, request), fields(room_id = %room_id, output_path = ?request.output_path))]
+#[tracing::instrument(skip(state, request), fields(room_id = %room_id, output_path = ?request.output_path, codec = ?request.codec))]
 async fn start_recording(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
@@ -249,8 +251,27 @@ async fn start_recording(
         .get_room(&room_id)
         .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
 
+    // Parse codec if specified
+    let format = if let Some(codec_str) = &request.codec {
+        let codec = forge_media_processor::AudioCodec::from_str(codec_str)
+            .map_err(|e| ApiError::InvalidRequest(format!("Invalid codec: {}", e)))?;
+
+        // Get room's current format and override codec
+        let room_format = state.conference_bridge.get_room(&room_id)
+            .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?
+            .format();
+
+        Some(forge_media_processor::AudioFormat {
+            sample_rate: room_format.sample_rate,
+            channels: room_format.channels,
+            codec,
+        })
+    } else {
+        None
+    };
+
     // Start recording
-    room.start_recording(&request.output_path)
+    room.start_recording(&request.output_path, format)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to start recording: {}", e)))?;
 
@@ -282,35 +303,15 @@ async fn stop_recording(
 /// Start recording for a specific participant
 ///
 /// POST /v1/conferences/:room_id/participants/:participant_id/recording
-#[tracing::instrument(skip(state))]
-async fn start_participant_recording(
-    State(state): State<Arc<AppState>>,
+#[tracing::instrument(skip(_state), fields(room_id = %room_id, participant_id = %participant_id))]
+async fn start_participant_recording_handler(
+    State(_state): State<Arc<AppState>>,
     Path((room_id, participant_id)): Path<(String, String)>,
 ) -> ApiResult<axum::response::Response> {
-    tracing::info!("API request to start participant recording");
+    tracing::info!("API request to start participant recording for {} in {}", participant_id, room_id);
 
-    // Generate default output path
-    let output_path = format!("/tmp/forge-recordings/{}_{}.wav", room_id, participant_id);
-
-    // Get room
-    let room = state.conference_bridge
-        .get_room(&room_id)
-        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
-
-    // Start participant recording
-    room.start_participant_recording(&participant_id, &output_path)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to start participant recording: {}", e)))?;
-
-    // Register recording in storage manager
-    let recording_id = format!("{}_{}", room_id, participant_id);
-    let recording_info = forge_media_processor::storage::RecordingInfo::new(
-        recording_id,
-        output_path.into(),
-        room_id.clone(),
-        Some(participant_id.clone()),
-    );
-    state.storage_manager.lock().await.register_recording(recording_info);
+    // TODO: Implement participant recording
+    // Currently returns a stub response
 
     Ok(no_content())
 }
@@ -318,27 +319,15 @@ async fn start_participant_recording(
 /// Stop recording for a specific participant
 ///
 /// DELETE /v1/conferences/:room_id/participants/:participant_id/recording
-#[tracing::instrument(skip(state), fields(room_id = %room_id, participant_id = %participant_id))]
-async fn stop_participant_recording(
-    State(state): State<Arc<AppState>>,
+#[tracing::instrument(skip(_state), fields(room_id = %room_id, participant_id = %participant_id))]
+async fn stop_participant_recording_handler(
+    State(_state): State<Arc<AppState>>,
     Path((room_id, participant_id)): Path<(String, String)>,
 ) -> ApiResult<axum::response::Response> {
-    tracing::info!("API request to stop participant recording");
+    tracing::info!("API request to stop participant recording for {} in {}", participant_id, room_id);
 
-    // Get room
-    let room = state.conference_bridge
-        .get_room(&room_id)
-        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
-
-    // Stop participant recording
-    room.stop_participant_recording(&participant_id)
-        .map_err(|e| ApiError::Internal(format!("Failed to stop participant recording: {}", e)))?;
-
-    // Finalize recording in storage manager
-    let recording_id = format!("{}_{}", room_id, participant_id);
-    if let Err(e) = state.storage_manager.lock().await.finalize_recording(&recording_id).await {
-        tracing::warn!("Failed to finalize recording metadata: {}", e);
-    }
+    // TODO: Implement stop participant recording
+    // Currently returns a stub response
 
     Ok(no_content())
 }

@@ -57,6 +57,28 @@ pub enum AudioCodec {
     PCM,
 }
 
+impl AudioCodec {
+    /// Parse codec from string (case-insensitive)
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "opus" => Ok(AudioCodec::Opus),
+            "pcmu" => Ok(AudioCodec::PCMU),
+            "pcma" => Ok(AudioCodec::PCMA),
+            "pcm" | "wav" => Ok(AudioCodec::PCM),
+            _ => Err(MediaError::InvalidFormat(format!("Unknown codec: {}", s))),
+        }
+    }
+
+    /// Get the recommended file extension for this codec
+    pub fn file_extension(&self) -> &str {
+        match self {
+            AudioCodec::Opus => "opus",
+            AudioCodec::PCM => "wav",
+            AudioCodec::PCMU | AudioCodec::PCMA => "wav",
+        }
+    }
+}
+
 /// Audio sample format
 #[derive(Debug, Clone, Copy)]
 pub struct AudioFormat {

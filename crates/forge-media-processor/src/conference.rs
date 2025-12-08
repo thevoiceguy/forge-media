@@ -108,11 +108,15 @@ impl ConferenceRoom {
     ///
     /// # Arguments
     /// * `output_path` - Path where the recording will be saved
-    pub async fn start_recording<P: AsRef<Path>>(&self, output_path: P) -> Result<()> {
+    /// * `format` - Optional format override (uses room's format if None)
+    pub async fn start_recording<P: AsRef<Path>>(&self, output_path: P, format: Option<AudioFormat>) -> Result<()> {
         let path = output_path.as_ref();
-        info!("Starting recording for room {} to {:?}", self.id, path);
+        let recording_format = format.unwrap_or(self.format);
 
-        let recorder = AudioRecorder::new(path, self.format).await?;
+        info!("Starting recording for room {} to {:?} with codec {:?}",
+              self.id, path, recording_format.codec);
+
+        let recorder = AudioRecorder::new(path, recording_format).await?;
         recorder.start()?;
 
         *self.recorder.write() = Some(recorder);

@@ -1,15 +1,38 @@
 //! Audio recording from RTP streams
 //!
-//! Records RTP audio packets to WAV files
+//! Records RTP audio packets to WAV or Opus files
 
-use crate::{AudioFormat, MediaError, Result};
+use crate::{AudioCodec, AudioFormat, MediaError, Result};
+#[cfg(feature = "opus")]
+use audiopus::coder::Encoder as OpusEncoder;
+#[cfg(feature = "opus")]
+use audiopus::{Application, Channels, SampleRate};
 use bytes::Bytes;
 use hound::{WavSpec, WavWriter};
 use parking_lot::Mutex;
+use std::fs::File;
+use std::io::BufWriter;
+#[cfg(feature = "opus")]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tracing::{info, warn};
+
+/// Writer abstraction for different audio formats
+enum RecorderWriter {
+    /// WAV format writer
+    Wav(WavWriter<BufWriter<File>>),
+    /// Opus format writer with Ogg container
+    #[cfg(feature = "opus")]
+    Opus {
+        encoder: OpusEncoder,
+        file: BufWriter<File>,
+        frame_buffer: Vec<i16>,
+        frame_size: usize,
+        ogg_stream: ogg::PacketWriter<BufWriter<File>>,
+    },
+}
 
 /// Audio recorder for RTP streams
 pub struct AudioRecorder {
@@ -17,8 +40,8 @@ pub struct AudioRecorder {
     path: PathBuf,
     /// Audio format
     format: AudioFormat,
-    /// WAV writer (wrapped in Arc<Mutex> for thread safety)
-    writer: Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>,
+    /// Format-specific writer (wrapped in Arc<Mutex> for thread safety)
+    writer: Arc<Mutex<Option<RecorderWriter>>>,
     /// Total samples recorded
     samples_recorded: Arc<Mutex<u64>>,
     /// Recording state
@@ -58,23 +81,79 @@ impl AudioRecorder {
             return Ok(());
         }
 
-        info!("Starting recording to {:?}", self.path);
+        info!("Starting recording to {:?} with codec {:?}", self.path, self.format.codec);
 
-        // Create WAV specification
-        let spec = WavSpec {
-            channels: self.format.channels,
-            sample_rate: self.format.sample_rate,
-            bits_per_sample: 16, // 16-bit PCM
-            sample_format: hound::SampleFormat::Int,
+        let writer = match self.format.codec {
+            AudioCodec::PCM => {
+                // Create WAV specification
+                let spec = WavSpec {
+                    channels: self.format.channels,
+                    sample_rate: self.format.sample_rate,
+                    bits_per_sample: 16, // 16-bit PCM
+                    sample_format: hound::SampleFormat::Int,
+                };
+
+                // Create WAV writer
+                let file = std::fs::File::create(&self.path)?;
+                let buf_writer = std::io::BufWriter::new(file);
+                let wav_writer = WavWriter::new(buf_writer, spec)
+                    .map_err(|e| MediaError::Internal(format!("Failed to create WAV writer: {}", e)))?;
+
+                RecorderWriter::Wav(wav_writer)
+            }
+            #[cfg(feature = "opus")]
+            AudioCodec::Opus => {
+                // Determine sample rate for Opus
+                let opus_sample_rate = match self.format.sample_rate {
+                    8000 => SampleRate::Hz8000,
+                    12000 => SampleRate::Hz12000,
+                    16000 => SampleRate::Hz16000,
+                    24000 => SampleRate::Hz24000,
+                    48000 => SampleRate::Hz48000,
+                    _ => {
+                        warn!("Unsupported sample rate {} for Opus, using 48000", self.format.sample_rate);
+                        SampleRate::Hz48000
+                    }
+                };
+
+                // Determine channel configuration
+                let channels = if self.format.channels == 1 {
+                    Channels::Mono
+                } else {
+                    Channels::Stereo
+                };
+
+                // Create Opus encoder
+                let encoder = OpusEncoder::new(opus_sample_rate, channels, Application::Voip)
+                    .map_err(|e| MediaError::Encoding(format!("Failed to create Opus encoder: {:?}", e)))?;
+
+                // Frame size: 20ms of audio (sample_rate / 50)
+                let frame_size = (self.format.sample_rate / 50) as usize * self.format.channels as usize;
+
+                // Create file for Ogg container
+                let file = std::fs::File::create(&self.path)?;
+                let buf_writer = std::io::BufWriter::new(file);
+
+                // Create Ogg packet writer
+                let ogg_stream = ogg::PacketWriter::new(buf_writer);
+
+                RecorderWriter::Opus {
+                    encoder,
+                    file: std::io::BufWriter::new(std::fs::File::create(&self.path)?),
+                    frame_buffer: Vec::with_capacity(frame_size),
+                    frame_size,
+                    ogg_stream,
+                }
+            }
+            _ => {
+                return Err(MediaError::Encoding(format!(
+                    "Unsupported codec for recording: {:?}",
+                    self.format.codec
+                )));
+            }
         };
 
-        // Create WAV writer
-        let file = std::fs::File::create(&self.path)?;
-        let buf_writer = std::io::BufWriter::new(file);
-        let wav_writer = WavWriter::new(buf_writer, spec)
-            .map_err(|e| MediaError::Internal(format!("Failed to create WAV writer: {}", e)))?;
-
-        *self.writer.lock() = Some(wav_writer);
+        *self.writer.lock() = Some(writer);
         *is_recording = true;
         *self.samples_recorded.lock() = 0;
 
@@ -90,9 +169,33 @@ impl AudioRecorder {
         let mut writer_guard = self.writer.lock();
 
         if let Some(writer) = writer_guard.as_mut() {
-            for &sample in samples {
-                writer.write_sample(sample)
-                    .map_err(|e| MediaError::Encoding(format!("Failed to write sample: {}", e)))?;
+            match writer {
+                RecorderWriter::Wav(wav_writer) => {
+                    // Write directly to WAV
+                    for &sample in samples {
+                        wav_writer.write_sample(sample)
+                            .map_err(|e| MediaError::Encoding(format!("Failed to write sample: {}", e)))?;
+                    }
+                }
+                #[cfg(feature = "opus")]
+                RecorderWriter::Opus { encoder, file, frame_buffer, frame_size, ogg_stream } => {
+                    // Buffer samples for Opus frame-based encoding
+                    let mut remaining = samples;
+
+                    while !remaining.is_empty() {
+                        let space_in_buffer = *frame_size - frame_buffer.len();
+                        let to_copy = remaining.len().min(space_in_buffer);
+
+                        frame_buffer.extend_from_slice(&remaining[..to_copy]);
+                        remaining = &remaining[to_copy..];
+
+                        // If we have a complete frame, encode it
+                        if frame_buffer.len() == *frame_size {
+                            self.encode_opus_frame(encoder, file, frame_buffer, ogg_stream)?;
+                            frame_buffer.clear();
+                        }
+                    }
+                }
             }
 
             let mut samples_recorded = self.samples_recorded.lock();
@@ -102,6 +205,38 @@ impl AudioRecorder {
         } else {
             Err(MediaError::Internal("Recorder not started".to_string()))
         }
+    }
+
+    /// Encode and write a single Opus frame
+    #[cfg(feature = "opus")]
+    fn encode_opus_frame(
+        &self,
+        encoder: &mut OpusEncoder,
+        file: &mut BufWriter<File>,
+        frame: &[i16],
+        ogg_stream: &mut ogg::PacketWriter<BufWriter<File>>,
+    ) -> Result<()> {
+        // Allocate output buffer for encoded data (max Opus packet is 4000 bytes)
+        let mut output = vec![0u8; 4000];
+
+        // Encode the frame
+        let encoded_size = encoder.encode(frame, &mut output)
+            .map_err(|e| MediaError::Encoding(format!("Opus encoding failed: {:?}", e)))?;
+
+        // Truncate to actual encoded size
+        output.truncate(encoded_size);
+
+        // Write as Ogg packet
+        let packet = ogg::Packet {
+            data: output.into(),
+            granule_pos: 0, // Updated during finalization
+            absgp_page: false,
+        };
+
+        ogg_stream.write_packet(packet, 0, ogg::PacketWriteEndInfo::NormalPacket, None)
+            .map_err(|e| MediaError::Encoding(format!("Failed to write Ogg packet: {}", e)))?;
+
+        Ok(())
     }
 
     /// Write raw RTP payload (assumes PCM data)
@@ -130,8 +265,38 @@ impl AudioRecorder {
 
         let mut writer_guard = self.writer.lock();
         if let Some(writer) = writer_guard.take() {
-            writer.finalize()
-                .map_err(|e| MediaError::Internal(format!("Failed to finalize WAV file: {}", e)))?;
+            match writer {
+                RecorderWriter::Wav(wav_writer) => {
+                    wav_writer.finalize()
+                        .map_err(|e| MediaError::Internal(format!("Failed to finalize WAV file: {}", e)))?;
+                }
+                #[cfg(feature = "opus")]
+                RecorderWriter::Opus { mut encoder, mut file, frame_buffer, frame_size, mut ogg_stream } => {
+                    // Encode any remaining buffered samples as a partial frame
+                    if !frame_buffer.is_empty() {
+                        // Pad with silence to complete the frame
+                        let mut padded_frame = frame_buffer;
+                        padded_frame.resize(frame_size, 0);
+                        self.encode_opus_frame(&mut encoder, &mut file, &padded_frame, &mut ogg_stream)?;
+                    }
+
+                    // Finalize Ogg stream
+                    ogg_stream.write_packet(
+                        ogg::Packet {
+                            data: vec![].into(),
+                            granule_pos: 0,
+                            absgp_page: true,
+                        },
+                        0,
+                        ogg::PacketWriteEndInfo::EndStream,
+                        None,
+                    ).map_err(|e| MediaError::Internal(format!("Failed to finalize Ogg stream: {}", e)))?;
+
+                    // Flush file buffer
+                    file.flush()
+                        .map_err(|e| MediaError::Internal(format!("Failed to flush Opus file: {}", e)))?;
+                }
+            }
         }
 
         *is_recording = false;

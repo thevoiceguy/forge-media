@@ -63,6 +63,7 @@ pub struct AppState {
     pub session_manager: Arc<SessionManager>,
     pub metrics_handle: Arc<super::prometheus::MetricsHandle>,
     pub conference_bridge: Arc<forge_media_processor::conference::ConferenceBridge>,
+    pub storage_manager: Arc<tokio::sync::Mutex<forge_media_processor::storage::StorageManager>>,
 }
 
 impl AppState {
@@ -71,10 +72,16 @@ impl AppState {
         metrics_handle: Arc<super::prometheus::MetricsHandle>,
         conference_bridge: Arc<forge_media_processor::conference::ConferenceBridge>,
     ) -> Self {
+        // Create default storage manager
+        let storage_manager = Arc::new(tokio::sync::Mutex::new(
+            forge_media_processor::storage::StorageManager::default()
+        ));
+
         Self {
             session_manager,
             metrics_handle,
             conference_bridge,
+            storage_manager,
         }
     }
 }
@@ -300,8 +307,14 @@ mod tests {
             port_pool_config,
             ..Default::default()
         };
-        let session_manager = Arc::new(SessionManager::new(session_manager_config, None));
-        Arc::new(AppState::new(session_manager))
+        let session_manager = SessionManager::new(session_manager_config, None);
+        let metrics_handle = Arc::new(crate::routes::prometheus::MetricsHandle::init());
+        let conference_bridge = Arc::new(forge_media_processor::conference::ConferenceBridge::default());
+        Arc::new(AppState::new(
+            session_manager,
+            metrics_handle,
+            conference_bridge,
+        ))
     }
 
     fn test_state() -> Arc<AppState> {

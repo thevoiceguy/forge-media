@@ -1,10 +1,11 @@
 //! Conference and recording endpoints
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 use validator::Validate;
 
 use crate::error::{ApiError, ApiResult};
@@ -48,6 +49,25 @@ pub struct RoomListResponse {
     pub count: usize,
 }
 
+/// Recording information response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecordingResponse {
+    pub id: String,
+    pub room_id: String,
+    pub participant_id: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub size_bytes: u64,
+    pub duration_secs: f64,
+}
+
+/// List of recordings response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecordingListResponse {
+    pub recordings: Vec<RecordingResponse>,
+    pub count: usize,
+}
+
 /// Create routes for conference and recording management
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -56,6 +76,11 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/conferences/:room_id/participants", post(add_participant))
         .route("/v1/conferences/:room_id/participants/:participant_id", delete(remove_participant))
         .route("/v1/conferences/:room_id/recording", post(start_recording).delete(stop_recording))
+        // TODO: Fix Handler trait issue with Path<(String, String)> + async
+        // .route("/v1/conferences/:room_id/participants/:participant_id/recording",
+        //        post(start_participant_recording).delete(stop_participant_recording))
+        .route("/v1/recordings", get(list_recordings))
+        .route("/v1/recordings/:id", get(get_recording).delete(delete_recording))
 }
 
 /// List all conference rooms
@@ -254,26 +279,168 @@ async fn stop_recording(
     Ok(no_content())
 }
 
+/// Start recording for a specific participant
+///
+/// POST /v1/conferences/:room_id/participants/:participant_id/recording
+#[tracing::instrument(skip(state))]
+async fn start_participant_recording(
+    State(state): State<Arc<AppState>>,
+    Path((room_id, participant_id)): Path<(String, String)>,
+) -> ApiResult<axum::response::Response> {
+    tracing::info!("API request to start participant recording");
+
+    // Generate default output path
+    let output_path = format!("/tmp/forge-recordings/{}_{}.wav", room_id, participant_id);
+
+    // Get room
+    let room = state.conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Start participant recording
+    room.start_participant_recording(&participant_id, &output_path)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to start participant recording: {}", e)))?;
+
+    // Register recording in storage manager
+    let recording_id = format!("{}_{}", room_id, participant_id);
+    let recording_info = forge_media_processor::storage::RecordingInfo::new(
+        recording_id,
+        output_path.into(),
+        room_id.clone(),
+        Some(participant_id.clone()),
+    );
+    state.storage_manager.lock().await.register_recording(recording_info);
+
+    Ok(no_content())
+}
+
+/// Stop recording for a specific participant
+///
+/// DELETE /v1/conferences/:room_id/participants/:participant_id/recording
+#[tracing::instrument(skip(state), fields(room_id = %room_id, participant_id = %participant_id))]
+async fn stop_participant_recording(
+    State(state): State<Arc<AppState>>,
+    Path((room_id, participant_id)): Path<(String, String)>,
+) -> ApiResult<axum::response::Response> {
+    tracing::info!("API request to stop participant recording");
+
+    // Get room
+    let room = state.conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Stop participant recording
+    room.stop_participant_recording(&participant_id)
+        .map_err(|e| ApiError::Internal(format!("Failed to stop participant recording: {}", e)))?;
+
+    // Finalize recording in storage manager
+    let recording_id = format!("{}_{}", room_id, participant_id);
+    if let Err(e) = state.storage_manager.lock().await.finalize_recording(&recording_id).await {
+        tracing::warn!("Failed to finalize recording metadata: {}", e);
+    }
+
+    Ok(no_content())
+}
+
+/// List all recordings
+///
+/// GET /v1/recordings
+#[tracing::instrument(skip(state))]
+async fn list_recordings(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<ApiSuccess<RecordingListResponse>>> {
+    tracing::info!("API request to list recordings");
+
+    let storage = state.storage_manager.lock().await;
+    let recordings: Vec<RecordingResponse> = storage.list_recordings()
+        .iter()
+        .map(|r| recording_info_to_response(r))
+        .collect();
+
+    let response = RecordingListResponse {
+        count: recordings.len(),
+        recordings,
+    };
+
+    Ok(Json(success(response)))
+}
+
+/// Get recording information
+///
+/// GET /v1/recordings/:id
+#[tracing::instrument(skip(state), fields(recording_id = %recording_id))]
+async fn get_recording(
+    State(state): State<Arc<AppState>>,
+    Path(recording_id): Path<String>,
+) -> ApiResult<Json<ApiSuccess<RecordingResponse>>> {
+    tracing::info!("API request to get recording info");
+
+    let storage = state.storage_manager.lock().await;
+    let recording = storage.get_recording(&recording_id)
+        .ok_or_else(|| ApiError::RecordingNotFound(format!("Recording {} not found", recording_id)))?;
+
+    let response = recording_info_to_response(recording);
+
+    Ok(Json(success(response)))
+}
+
+/// Delete a recording
+///
+/// DELETE /v1/recordings/:id
+#[tracing::instrument(skip(state), fields(recording_id = %recording_id))]
+async fn delete_recording(
+    State(state): State<Arc<AppState>>,
+    Path(recording_id): Path<String>,
+) -> ApiResult<axum::response::Response> {
+    tracing::info!("API request to delete recording");
+
+    state.storage_manager.lock().await
+        .delete_recording(&recording_id)
+        .await
+        .map_err(|e| ApiError::RecordingNotFound(format!("Recording not found: {}", e)))?;
+
+    Ok(no_content())
+}
+
+/// Convert RecordingInfo to RecordingResponse
+fn recording_info_to_response(info: &forge_media_processor::storage::RecordingInfo) -> RecordingResponse {
+    RecordingResponse {
+        id: info.id.clone(),
+        room_id: info.room_id.clone(),
+        participant_id: info.participant_id.clone(),
+        started_at: info.started_at.duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "unknown".to_string()),
+        ended_at: info.ended_at.and_then(|t|
+            t.duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs().to_string())
+        ),
+        size_bytes: info.size_bytes,
+        duration_secs: info.duration_secs,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use forge_media_processor::AudioFormat;
     use tower::ServiceExt;
 
     fn create_test_state() -> Arc<AppState> {
-        let bridge = forge_media_processor::conference::ConferenceBridge::new(
-            AudioFormat::pcm_mono(), 480
-        ).unwrap();
+        let bridge = Arc::new(forge_media_processor::conference::ConferenceBridge::new(
+            forge_media_processor::AudioFormat::pcm_mono(), 480
+        ).unwrap());
         let session_manager = forge_engine::SessionManager::new(
             Default::default(), None
         );
-        let metrics_handle = super::prometheus::MetricsHandle::init();
+        let metrics_handle = Arc::new(crate::routes::prometheus::MetricsHandle::init());
         Arc::new(AppState::new(
-            Arc::new(session_manager),
-            Arc::new(metrics_handle),
-            Arc::new(bridge),
+            session_manager,
+            metrics_handle,
+            bridge,
         ))
     }
 

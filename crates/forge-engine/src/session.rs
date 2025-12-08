@@ -3,6 +3,7 @@
 use forge_core::{CallId, ParticipantId, ForgeError, Result, ForgeEvent, EventBus};
 use forge_rtp::{PortPool, PortPair, RtpSocketPair, RtpSocketConfig};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
@@ -85,6 +86,10 @@ pub struct MediaSession {
     sockets: Arc<RtpSocketPair>,
     /// Port pair allocation
     ports: PortPair,
+    /// Port pool reference for cleanup
+    port_pool: Arc<PortPool>,
+    /// Track if ports have been deallocated
+    ports_deallocated: Arc<AtomicBool>,
     /// Session creation time
     created_at: Instant,
     /// Last activity time
@@ -103,7 +108,7 @@ impl MediaSession {
         call_id: CallId,
         participant_a_id: ParticipantId,
         participant_b_id: ParticipantId,
-        port_pool: &PortPool,
+        port_pool: &Arc<PortPool>,
         config: MediaSessionConfig,
         event_bus: Option<Arc<EventBus>>,
     ) -> Result<Self> {
@@ -142,6 +147,8 @@ impl MediaSession {
             participant_b: Arc::new(RwLock::new(participant_b)),
             sockets: Arc::new(sockets),
             ports,
+            port_pool: Arc::clone(port_pool),
+            ports_deallocated: Arc::new(AtomicBool::new(false)),
             created_at: now,
             last_activity: Arc::new(RwLock::new(now)),
             config,
@@ -249,6 +256,9 @@ impl MediaSession {
 
         *self.state.write().await = SessionState::Terminated;
 
+        // Deallocate ports - guaranteed cleanup
+        self.deallocate_ports().await;
+
         // Publish termination event
         if let Some(bus) = &self.event_bus {
             bus.publish(ForgeEvent::SessionTerminated {
@@ -261,8 +271,27 @@ impl MediaSession {
         Ok(())
     }
 
+    /// Deallocate ports (idempotent)
+    async fn deallocate_ports(&self) {
+        // Use compare_exchange to ensure we only deallocate once
+        if self
+            .ports_deallocated
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            tracing::debug!(
+                "Deallocating ports for session {}: RTP={}, RTCP={}",
+                self.call_id.0,
+                self.ports.rtp_port,
+                self.ports.rtcp_port
+            );
+            self.port_pool.deallocate(self.ports).await;
+        }
+    }
+
     /// Update last activity timestamp
-    async fn update_activity(&self) {
+    /// This should be called whenever RTP packets are received/forwarded
+    pub async fn update_activity(&self) {
         *self.last_activity.write().await = Instant::now();
     }
 
@@ -285,6 +314,37 @@ impl MediaSession {
 impl Drop for MediaSession {
     fn drop(&mut self) {
         tracing::debug!("MediaSession {} dropped", self.call_id.0);
+
+        // Ensure ports are deallocated even if stop_forwarding was never called
+        // Check if ports have already been deallocated
+        if !self.ports_deallocated.load(Ordering::SeqCst) {
+            tracing::warn!(
+                "Session {} dropped without cleanup - spawning port deallocation task",
+                self.call_id.0
+            );
+
+            // Spawn a detached task to deallocate ports asynchronously
+            let port_pool = Arc::clone(&self.port_pool);
+            let ports = self.ports;
+            let ports_deallocated = Arc::clone(&self.ports_deallocated);
+            let call_id = self.call_id.0.clone();
+
+            tokio::spawn(async move {
+                // Double-check to avoid race condition
+                if ports_deallocated
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    tracing::debug!(
+                        "Drop cleanup: Deallocating ports for session {}: RTP={}, RTCP={}",
+                        call_id,
+                        ports.rtp_port,
+                        ports.rtcp_port
+                    );
+                    port_pool.deallocate(ports).await;
+                }
+            });
+        }
     }
 }
 
@@ -296,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_creation() {
         let config = PortPoolConfig::new(30000, 31000).unwrap();
-        let port_pool = PortPool::new(config);
+        let port_pool = Arc::new(PortPool::new(config));
 
         let call_id = CallId::generate();
         let participant_a = ParticipantId::generate();
@@ -321,7 +381,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_lifecycle() {
         let config = PortPoolConfig::new(31000, 32000).unwrap();
-        let port_pool = PortPool::new(config);
+        let port_pool = Arc::new(PortPool::new(config));
 
         let call_id = CallId::generate();
         let participant_a = ParticipantId::generate();
@@ -352,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_timeout() {
         let config = PortPoolConfig::new(32000, 33000).unwrap();
-        let port_pool = PortPool::new(config);
+        let port_pool = Arc::new(PortPool::new(config));
 
         let call_id = CallId::generate();
         let participant_a = ParticipantId::generate();

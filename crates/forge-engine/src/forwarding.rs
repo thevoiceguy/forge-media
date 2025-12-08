@@ -99,10 +99,13 @@ impl ForwardingEngine {
                         }
                     };
 
-                    // Update sender statistics
+                    // Update sender statistics and session activity
                     let packet_len = packet.payload.len() as u64;
                     Self::update_stats(&sender, &participant_a, &participant_b, packet_len, true)
                         .await;
+
+                    // Update session activity timestamp
+                    session.update_activity().await;
 
                     // Forward packet to receiver
                     let receiver_addr = {
@@ -197,15 +200,14 @@ mod tests {
     use super::*;
     use crate::session::MediaSessionConfig;
     use forge_core::{CallId, ParticipantId};
-    use forge_rtp::{PortPool, PortPoolConfig, RtpPacket};
-    use bytes::Bytes;
+    use forge_rtp::{PortPool, PortPoolConfig};
     use std::net::{IpAddr, Ipv4Addr};
 
     #[tokio::test]
     async fn test_forwarding_basic() {
         // Create port pool
         let config = PortPoolConfig::new(40000, 41000).unwrap();
-        let port_pool = PortPool::new(config);
+        let port_pool = Arc::new(PortPool::new(config));
 
         // Create session
         let call_id = CallId::generate();

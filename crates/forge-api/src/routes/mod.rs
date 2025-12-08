@@ -1,6 +1,7 @@
 //! API routes
 
 pub mod health;
+pub mod metrics;
 pub mod sessions;
 
 use axum::Router;
@@ -11,4 +12,5 @@ pub fn create_router() -> Router<Arc<sessions::AppState>> {
     Router::new()
         .merge(health::routes())
         .merge(sessions::routes())
+        .merge(metrics::routes())
 }

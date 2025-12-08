@@ -515,6 +515,7 @@ dependencies = [
  "forge-core",
  "forge-engine",
  "forge-rtp",
+ "lazy_static",
  "serde",
  "serde_json",
  "thiserror",

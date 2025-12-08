@@ -4,7 +4,11 @@ use crate::session::{MediaSession, MediaSessionConfig};
 use dashmap::DashMap;
 use forge_core::{CallId, ParticipantId, ForgeError, Result, EventBus};
 use forge_rtp::{PortPool, PortPoolConfig};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
 /// Session manager configuration
 #[derive(Debug, Clone)]
@@ -13,6 +17,8 @@ pub struct SessionManagerConfig {
     pub port_pool_config: PortPoolConfig,
     /// Default session configuration
     pub session_config: MediaSessionConfig,
+    /// Interval for checking and cleaning up timed-out sessions
+    pub cleanup_interval: Duration,
 }
 
 impl Default for SessionManagerConfig {
@@ -20,6 +26,7 @@ impl Default for SessionManagerConfig {
         Self {
             port_pool_config: PortPoolConfig::default(),
             session_config: MediaSessionConfig::default(),
+            cleanup_interval: Duration::from_secs(30), // Check every 30 seconds
         }
     }
 }
@@ -29,24 +36,32 @@ pub struct SessionManager {
     /// Active sessions indexed by call ID
     sessions: DashMap<CallId, Arc<MediaSession>>,
     /// Port pool for allocating RTP/RTCP ports
-    port_pool: PortPool,
+    port_pool: Arc<PortPool>,
     /// Configuration
     config: SessionManagerConfig,
     /// Event bus for publishing events
     event_bus: Option<Arc<EventBus>>,
+    /// Timeout monitoring task handle
+    monitoring_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Shutdown flag for monitoring task
+    shutdown: Arc<AtomicBool>,
 }
 
 impl SessionManager {
     /// Create a new session manager
-    pub fn new(config: SessionManagerConfig, event_bus: Option<Arc<EventBus>>) -> Self {
-        let port_pool = PortPool::new(config.port_pool_config.clone());
+    pub fn new(config: SessionManagerConfig, event_bus: Option<Arc<EventBus>>) -> Arc<Self> {
+        let port_pool = Arc::new(PortPool::new(config.port_pool_config.clone()));
 
-        Self {
+        let manager = Arc::new(Self {
             sessions: DashMap::new(),
             port_pool,
             config,
             event_bus,
-        }
+            monitoring_task: Arc::new(Mutex::new(None)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+        });
+
+        manager
     }
 
     /// Create a new media session
@@ -121,11 +136,8 @@ impl SessionManager {
 
         let session = session.1; // Extract value from (K, V) tuple
 
-        // Stop forwarding
+        // Stop forwarding (this will also deallocate ports automatically)
         session.stop_forwarding().await?;
-
-        // Deallocate ports
-        self.port_pool.deallocate(session.ports()).await;
 
         tracing::info!(
             "Stopped session {} with {} active sessions remaining",
@@ -177,6 +189,64 @@ impl SessionManager {
         }
 
         removed
+    }
+
+    /// Start the timeout monitoring task
+    pub async fn start_monitoring(self: &Arc<Self>) {
+        let mut task = self.monitoring_task.lock().await;
+
+        if task.is_some() {
+            tracing::warn!("Timeout monitoring task already running");
+            return;
+        }
+
+        tracing::info!(
+            "Starting timeout monitoring with interval of {:?}",
+            self.config.cleanup_interval
+        );
+
+        let manager = Arc::clone(self);
+        let interval = self.config.cleanup_interval;
+        let shutdown = Arc::clone(&self.shutdown);
+
+        *task = Some(tokio::spawn(async move {
+            loop {
+                // Check shutdown flag
+                if shutdown.load(Ordering::Relaxed) {
+                    tracing::info!("Timeout monitoring task shutting down");
+                    break;
+                }
+
+                // Sleep for the cleanup interval
+                tokio::time::sleep(interval).await;
+
+                // Check again after sleep in case shutdown was signaled
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // Cleanup timed-out sessions
+                manager.cleanup_timedout_sessions().await;
+            }
+
+            tracing::info!("Timeout monitoring task stopped");
+        }));
+    }
+
+    /// Stop the timeout monitoring task
+    pub async fn stop_monitoring(&self) {
+        tracing::info!("Stopping timeout monitoring");
+
+        // Signal shutdown
+        self.shutdown.store(true, Ordering::Relaxed);
+
+        // Cancel the task
+        let mut task = self.monitoring_task.lock().await;
+        if let Some(handle) = task.take() {
+            handle.abort();
+        }
+
+        tracing::info!("Timeout monitoring stopped");
     }
 }
 
@@ -246,6 +316,7 @@ mod tests {
                 session_timeout: std::time::Duration::from_millis(50),
                 ..Default::default()
             },
+            cleanup_interval: std::time::Duration::from_millis(10),
         };
 
         let manager = SessionManager::new(config, None);

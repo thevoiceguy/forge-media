@@ -53,7 +53,7 @@ pub struct SessionListResponse {
 /// Application state with session manager
 #[derive(Clone)]
 pub struct AppState {
-    session_manager: Arc<SessionManager>,
+    pub session_manager: Arc<SessionManager>,
 }
 
 impl AppState {

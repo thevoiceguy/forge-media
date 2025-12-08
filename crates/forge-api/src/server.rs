@@ -49,7 +49,7 @@ impl ApiServer {
             ..Default::default()
         };
 
-        let session_manager = Arc::new(SessionManager::new(session_manager_config, None));
+        let session_manager = SessionManager::new(session_manager_config, None);
         let state = Arc::new(AppState::new(session_manager));
 
         Self { config, state }
@@ -107,19 +107,27 @@ impl ApiServer {
 
         info!("Starting Forge API server on {}", self.config.bind_addr);
 
+        // Start session timeout monitoring
+        self.state.session_manager.start_monitoring().await;
+
         let listener = TcpListener::bind(&self.config.bind_addr).await?;
 
         info!("✓ API server listening on {}", self.config.bind_addr);
         info!("  Health check: http://{}/health", self.config.bind_addr);
         info!("  Sessions API: http://{}/v1/sessions", self.config.bind_addr);
 
-        axum::serve(listener, router)
+        let result = axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_signal)
             .await
             .map_err(|e| {
                 error!("Server error: {}", e);
                 std::io::Error::new(std::io::ErrorKind::Other, e)
-            })
+            });
+
+        // Stop session timeout monitoring on shutdown
+        self.state.session_manager.stop_monitoring().await;
+
+        result
     }
 }
 

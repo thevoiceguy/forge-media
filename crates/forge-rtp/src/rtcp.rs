@@ -5,6 +5,58 @@
 
 use bytes::{Buf, BufMut, BytesMut};
 use forge_core::{ForgeError, Result};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// NTP timestamp utilities
+pub mod ntp {
+    use super::*;
+
+    /// Number of seconds between NTP epoch (Jan 1, 1900) and Unix epoch (Jan 1, 1970)
+    const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
+
+    /// Get current NTP timestamp as a 64-bit value
+    pub fn now() -> u64 {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System time before Unix epoch");
+
+        let unix_secs = duration.as_secs();
+        let nanos = duration.subsec_nanos();
+
+        // Convert Unix time to NTP time
+        let ntp_secs = unix_secs + NTP_UNIX_OFFSET;
+
+        // Convert nanoseconds to NTP fractional seconds (2^32 units per second)
+        let ntp_frac = ((nanos as u64) * (1u64 << 32)) / 1_000_000_000;
+
+        (ntp_secs << 32) | ntp_frac
+    }
+
+    /// Get current NTP timestamp split into MSW and LSW
+    pub fn now_split() -> (u32, u32) {
+        let ntp = now();
+        let msw = (ntp >> 32) as u32;
+        let lsw = (ntp & 0xFFFFFFFF) as u32;
+        (msw, lsw)
+    }
+
+    /// Convert NTP timestamp (MSW, LSW) to Unix timestamp in seconds
+    pub fn to_unix_secs(ntp_msw: u32, _ntp_lsw: u32) -> u64 {
+        let ntp_secs = ntp_msw as u64;
+
+        // Convert from NTP epoch to Unix epoch
+        if ntp_secs >= NTP_UNIX_OFFSET {
+            ntp_secs - NTP_UNIX_OFFSET
+        } else {
+            0
+        }
+    }
+
+    /// Convert NTP timestamp to fractional seconds (0.0 - 1.0)
+    pub fn fractional_seconds(ntp_lsw: u32) -> f64 {
+        (ntp_lsw as f64) / (1u64 << 32) as f64
+    }
+}
 
 /// RTCP packet types as defined in RFC 3550
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +178,32 @@ impl SenderReport {
         }
     }
 
+    /// Create a new sender report with current NTP timestamp
+    pub fn with_current_time(ssrc: u32, rtp_timestamp: u32, packet_count: u32, octet_count: u32) -> Self {
+        let (ntp_msw, ntp_lsw) = ntp::now_split();
+        Self {
+            ssrc,
+            ntp_timestamp_msw: ntp_msw,
+            ntp_timestamp_lsw: ntp_lsw,
+            rtp_timestamp,
+            sender_packet_count: packet_count,
+            sender_octet_count: octet_count,
+            report_blocks: Vec::new(),
+        }
+    }
+
+    /// Update NTP timestamp to current time
+    pub fn update_timestamp(&mut self) {
+        let (ntp_msw, ntp_lsw) = ntp::now_split();
+        self.ntp_timestamp_msw = ntp_msw;
+        self.ntp_timestamp_lsw = ntp_lsw;
+    }
+
+    /// Add a reception report block
+    pub fn add_report_block(&mut self, block: ReceptionReportBlock) {
+        self.report_blocks.push(block);
+    }
+
     /// Parse SR from bytes
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < 24 {
@@ -196,6 +274,11 @@ impl ReceiverReport {
         }
     }
 
+    /// Add a reception report block
+    pub fn add_report_block(&mut self, block: ReceptionReportBlock) {
+        self.report_blocks.push(block);
+    }
+
     /// Parse RR from bytes
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < 4 {
@@ -248,6 +331,19 @@ pub struct ReceptionReportBlock {
 }
 
 impl ReceptionReportBlock {
+    /// Create a new reception report block
+    pub fn new(ssrc: u32) -> Self {
+        Self {
+            ssrc,
+            fraction_lost: 0,
+            cumulative_lost: 0,
+            extended_highest_seq: 0,
+            jitter: 0,
+            last_sr: 0,
+            delay_since_last_sr: 0,
+        }
+    }
+
     /// Parse report block from bytes
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < 24 {
@@ -306,6 +402,61 @@ pub struct SdesItem {
     pub text: String,
 }
 
+impl SdesItem {
+    /// Create a new SDES item
+    pub fn new(item_type: u8, text: String) -> Self {
+        Self { item_type, text }
+    }
+
+    /// Parse SDES item from bytes
+    pub fn parse(data: &[u8]) -> Result<(Self, usize)> {
+        if data.is_empty() {
+            return Err(ForgeError::Rtcp("SDES item too short".to_string()));
+        }
+
+        let item_type = data[0];
+
+        // END item has no length or text
+        if item_type == sdes_type::END {
+            return Ok((Self {
+                item_type,
+                text: String::new(),
+            }, 1));
+        }
+
+        if data.len() < 2 {
+            return Err(ForgeError::Rtcp("SDES item missing length".to_string()));
+        }
+
+        let length = data[1] as usize;
+
+        if data.len() < 2 + length {
+            return Err(ForgeError::Rtcp("SDES item text too short".to_string()));
+        }
+
+        let text = String::from_utf8_lossy(&data[2..2 + length]).to_string();
+
+        Ok((Self { item_type, text }, 2 + length))
+    }
+
+    /// Serialize SDES item to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        if self.item_type == sdes_type::END {
+            return vec![0];
+        }
+
+        let text_bytes = self.text.as_bytes();
+        let length = text_bytes.len().min(255);
+
+        let mut buf = Vec::with_capacity(2 + length);
+        buf.push(self.item_type);
+        buf.push(length as u8);
+        buf.extend_from_slice(&text_bytes[..length]);
+
+        buf
+    }
+}
+
 /// SDES item types
 pub mod sdes_type {
     pub const END: u8 = 0;
@@ -335,6 +486,78 @@ pub struct SdesChunk {
     pub items: Vec<SdesItem>,
 }
 
+impl SdesChunk {
+    /// Create a new SDES chunk
+    pub fn new(ssrc: u32) -> Self {
+        Self {
+            ssrc,
+            items: Vec::new(),
+        }
+    }
+
+    /// Add an item to this chunk
+    pub fn add_item(&mut self, item: SdesItem) {
+        self.items.push(item);
+    }
+
+    /// Parse SDES chunk from bytes
+    pub fn parse(data: &[u8]) -> Result<(Self, usize)> {
+        if data.len() < 4 {
+            return Err(ForgeError::Rtcp("SDES chunk too short".to_string()));
+        }
+
+        let mut cursor = std::io::Cursor::new(data);
+        let ssrc = cursor.get_u32();
+
+        let mut items = Vec::new();
+        let mut offset = 4;
+
+        // Parse items until END or end of data
+        loop {
+            if offset >= data.len() {
+                break;
+            }
+
+            let (item, item_size) = SdesItem::parse(&data[offset..])?;
+            offset += item_size;
+
+            if item.item_type == sdes_type::END {
+                items.push(item);
+                break;
+            }
+
+            items.push(item);
+        }
+
+        // Round up to 32-bit boundary
+        let padded_offset = (offset + 3) & !3;
+
+        Ok((Self { ssrc, items }, padded_offset))
+    }
+
+    /// Serialize SDES chunk to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        buf.put_u32(self.ssrc);
+
+        for item in &self.items {
+            buf.put_slice(&item.to_bytes());
+        }
+
+        // Add END item if not present
+        if self.items.is_empty() || self.items.last().unwrap().item_type != sdes_type::END {
+            buf.put_u8(sdes_type::END);
+        }
+
+        // Pad to 32-bit boundary
+        while buf.len() % 4 != 0 {
+            buf.put_u8(0);
+        }
+
+        buf.to_vec()
+    }
+}
+
 impl SourceDescription {
     /// Create new SDES packet
     pub fn new() -> Self {
@@ -344,6 +567,35 @@ impl SourceDescription {
     /// Add a chunk
     pub fn add_chunk(&mut self, ssrc: u32, items: Vec<SdesItem>) {
         self.chunks.push(SdesChunk { ssrc, items });
+    }
+
+    /// Parse SDES packet from bytes
+    pub fn parse(data: &[u8], chunk_count: u8) -> Result<Self> {
+        let mut chunks = Vec::new();
+        let mut offset = 0;
+
+        for _ in 0..chunk_count {
+            if offset >= data.len() {
+                break;
+            }
+
+            let (chunk, chunk_size) = SdesChunk::parse(&data[offset..])?;
+            chunks.push(chunk);
+            offset += chunk_size;
+        }
+
+        Ok(Self { chunks })
+    }
+
+    /// Serialize SDES packet to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        for chunk in &self.chunks {
+            buf.extend_from_slice(&chunk.to_bytes());
+        }
+
+        buf
     }
 }
 
@@ -371,6 +623,65 @@ impl Bye {
             ssrcs,
             reason: Some(reason),
         }
+    }
+
+    /// Parse BYE packet from bytes
+    pub fn parse(data: &[u8], source_count: u8) -> Result<Self> {
+        if data.len() < (source_count as usize * 4) {
+            return Err(ForgeError::Rtcp("BYE packet too short".to_string()));
+        }
+
+        let mut cursor = std::io::Cursor::new(data);
+        let mut ssrcs = Vec::new();
+
+        // Parse SSRCs
+        for _ in 0..source_count {
+            ssrcs.push(cursor.get_u32());
+        }
+
+        // Parse optional reason
+        let reason = if cursor.remaining() > 0 {
+            let length = cursor.get_u8() as usize;
+
+            if cursor.remaining() < length {
+                return Err(ForgeError::Rtcp("BYE reason too short".to_string()));
+            }
+
+            let mut reason_bytes = vec![0u8; length];
+            cursor.copy_to_slice(&mut reason_bytes);
+
+            Some(String::from_utf8_lossy(&reason_bytes).to_string())
+        } else {
+            None
+        };
+
+        Ok(Self { ssrcs, reason })
+    }
+
+    /// Serialize BYE packet to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+
+        // Write SSRCs
+        for ssrc in &self.ssrcs {
+            buf.put_u32(*ssrc);
+        }
+
+        // Write optional reason
+        if let Some(reason) = &self.reason {
+            let reason_bytes = reason.as_bytes();
+            let length = reason_bytes.len().min(255);
+
+            buf.put_u8(length as u8);
+            buf.put_slice(&reason_bytes[..length]);
+
+            // Pad to 32-bit boundary
+            while buf.len() % 4 != 0 {
+                buf.put_u8(0);
+            }
+        }
+
+        buf.to_vec()
     }
 }
 
@@ -402,12 +713,12 @@ impl RtcpPacket {
                 Ok(RtcpPacket::ReceiverReport(rr))
             }
             RtcpPacketType::SDES => {
-                // TODO: Implement SDES parsing
-                Err(ForgeError::Rtcp("SDES parsing not yet implemented".to_string()))
+                let sdes = SourceDescription::parse(&data[4..], header.count)?;
+                Ok(RtcpPacket::SourceDescription(sdes))
             }
             RtcpPacketType::BYE => {
-                // TODO: Implement BYE parsing
-                Err(ForgeError::Rtcp("BYE parsing not yet implemented".to_string()))
+                let bye = Bye::parse(&data[4..], header.count)?;
+                Ok(RtcpPacket::Bye(bye))
             }
             RtcpPacketType::APP => {
                 Err(ForgeError::Rtcp("APP packets not supported".to_string()))
@@ -444,13 +755,33 @@ impl RtcpPacket {
                 buf.extend_from_slice(&rr.to_bytes());
                 buf
             }
-            RtcpPacket::SourceDescription(_sdes) => {
-                // TODO: Implement SDES serialization
-                vec![]
+            RtcpPacket::SourceDescription(sdes) => {
+                let payload = sdes.to_bytes();
+                let header = RtcpHeader {
+                    version: 2,
+                    padding: false,
+                    count: sdes.chunks.len() as u8,
+                    packet_type: RtcpPacketType::SDES,
+                    length: ((payload.len() / 4) as u16).saturating_sub(1),
+                };
+
+                let mut buf = header.to_bytes();
+                buf.extend_from_slice(&payload);
+                buf
             }
-            RtcpPacket::Bye(_bye) => {
-                // TODO: Implement BYE serialization
-                vec![]
+            RtcpPacket::Bye(bye) => {
+                let payload = bye.to_bytes();
+                let header = RtcpHeader {
+                    version: 2,
+                    padding: false,
+                    count: bye.ssrcs.len() as u8,
+                    packet_type: RtcpPacketType::BYE,
+                    length: ((payload.len() / 4) as u16).saturating_sub(1),
+                };
+
+                let mut buf = header.to_bytes();
+                buf.extend_from_slice(&payload);
+                buf
             }
         }
     }

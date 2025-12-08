@@ -931,6 +931,7 @@ dependencies = [
  "forge-core",
  "forge-rtp",
  "hound",
+ "lazy_static",
  "ogg",
  "parking_lot",
  "rubato",

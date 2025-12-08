@@ -360,7 +360,7 @@ mod tests {
         let room = ConferenceRoom::new("test-room", AudioFormat::pcm_mono(), 480).unwrap();
 
         // Start recording
-        room.start_recording(&recording_path).await.unwrap();
+        room.start_recording(&recording_path, None).await.unwrap();
         assert!(room.is_recording());
 
         // Add participant and write audio

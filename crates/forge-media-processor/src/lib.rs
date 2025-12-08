@@ -6,10 +6,13 @@
 //! - Codec transcoding
 //! - Conference bridge management
 
+pub mod codecs;
 pub mod conference;
 pub mod mixer;
 pub mod recorder;
+pub mod resampler;
 pub mod storage;
+pub mod transcoder;
 
 use thiserror::Error;
 

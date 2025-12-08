@@ -1,0 +1,24 @@
+# Forge Media Engine Configuration - XDP Testing
+
+[api]
+bind = "127.0.0.1:8080"
+enable_cors = true
+cors_origins = ["http://localhost:3000"]
+auth_tokens = []
+rate_limit_requests_per_window = 120
+rate_limit_window_secs = 60
+recording_base_dir = "/tmp/forge-recordings"
+
+[engine]
+port_range_min = 30000
+port_range_max = 40000
+
+[engine.xdp]
+# Enable XDP for high-performance packet forwarding
+enabled = true
+# Use loopback interface for testing
+interface = "lo"
+# Use generic mode (works on all interfaces)
+mode = "generic"
+# Fallback to userspace if XDP fails
+fallback = true

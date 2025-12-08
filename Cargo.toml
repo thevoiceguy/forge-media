@@ -111,7 +111,7 @@ license.workspace = true
 [dependencies]
 forge-core = { path = "crates/forge-core" }
 forge-rtp = { path = "crates/forge-rtp" }
-forge-engine = { path = "crates/forge-engine" }
+forge-engine = { path = "crates/forge-engine", features = [] }
 forge-api = { path = "crates/forge-api", optional = false }
 forge-transcoding = { path = "crates/forge-transcoding", optional = true }
 forge-conference = { path = "crates/forge-conference", optional = true }
@@ -157,6 +157,7 @@ sbc = ["dep:forge-sbc"]
 siprec = ["dep:forge-siprec"]
 ai-stream = ["dep:forge-ai-stream"]
 ha = ["dep:forge-ha"]
+xdp = ["forge-engine/xdp"]
 
 [profile.dev]
 opt-level = 0

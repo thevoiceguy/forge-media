@@ -8,18 +8,19 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use forge_media_processor::{AudioFormat, AudioCodec, transcoder::Transcoder};
+//! use forge_transcoder::{AudioFormat, Transcoder};
+//! use forge_codecs::AudioCodecType;
 //!
 //! let src_format = AudioFormat {
 //!     sample_rate: 8000,
 //!     channels: 1,
-//!     codec: AudioCodec::PCMU,
+//!     codec: AudioCodecType::PCMU,
 //! };
 //!
 //! let dst_format = AudioFormat {
 //!     sample_rate: 48000,
 //!     channels: 1,
-//!     codec: AudioCodec::Opus,
+//!     codec: AudioCodecType::Opus,
 //! };
 //!
 //! let mut transcoder = Transcoder::new(src_format, dst_format).unwrap();
@@ -30,7 +31,7 @@
 //! ```
 
 use crate::{AudioFormat, TranscoderError, Result};
-use forge_codecs::{self as codecs, AudioCodec};
+use forge_codecs::{self as codecs, AudioCodec, AudioCodecType};
 use forge_resampler::Resampler;
 
 /// Audio transcoder for format conversion
@@ -71,14 +72,14 @@ impl Transcoder {
         }
 
         // Create source codec (decoder) if not PCM
-        let src_codec = if src_format.codec != crate::AudioCodec::PCM {
+        let src_codec = if src_format.codec != AudioCodecType::PCM {
             Some(codecs::create_codec(&src_format)?)
         } else {
             None
         };
 
         // Create destination codec (encoder) if not PCM
-        let dst_codec = if dst_format.codec != crate::AudioCodec::PCM {
+        let dst_codec = if dst_format.codec != AudioCodecType::PCM {
             Some(codecs::create_codec(&dst_format)?)
         } else {
             None
@@ -245,18 +246,18 @@ mod tests {
         let src = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
         let dst = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMA,
+            codec: AudioCodecType::PCMA,
         };
 
         let transcoder = Transcoder::new(src, dst).unwrap();
         assert!(transcoder.needs_transcoding());
-        assert_eq!(transcoder.src_format().codec, crate::AudioCodec::PCMU);
-        assert_eq!(transcoder.dst_format().codec, crate::AudioCodec::PCMA);
+        assert_eq!(transcoder.src_format().codec, AudioCodecType::PCMU);
+        assert_eq!(transcoder.dst_format().codec, AudioCodecType::PCMA);
     }
 
     #[test]
@@ -264,7 +265,7 @@ mod tests {
         let format = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
 
         let transcoder = Transcoder::new(format, format).unwrap();
@@ -276,18 +277,18 @@ mod tests {
         let src = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
         let dst = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMA,
+            codec: AudioCodecType::PCMA,
         };
 
         let mut transcoder = Transcoder::new(src, dst).unwrap();
 
         // Encode test signal with G.711 μ-law
-        use crate::codecs::g711::G711MuLaw;
+        use forge_codecs::g711::G711MuLaw;
         let mut mulaw = G711MuLaw::new(8000);
         let pcm = vec![1000i16; 80]; // 10ms at 8kHz
         let mulaw_data = mulaw.encode(&pcm).unwrap();
@@ -304,12 +305,12 @@ mod tests {
         let src = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
         let dst = AudioFormat {
             sample_rate: 16000,
             channels: 1,
-            codec: crate::AudioCodec::PCMA,
+            codec: AudioCodecType::PCMA,
         };
 
         let transcoder = Transcoder::new(src, dst).unwrap();
@@ -322,12 +323,12 @@ mod tests {
         let src = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
         let dst = AudioFormat {
             sample_rate: 8000,
             channels: 2,
-            codec: crate::AudioCodec::PCMA,
+            codec: AudioCodecType::PCMA,
         };
 
         let result = Transcoder::new(src, dst);
@@ -339,18 +340,18 @@ mod tests {
         let src = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
         let dst = AudioFormat {
             sample_rate: 16000,
             channels: 1,
-            codec: crate::AudioCodec::PCMA,
+            codec: AudioCodecType::PCMA,
         };
 
         let mut transcoder = Transcoder::new(src, dst).unwrap();
 
         // Process some data
-        use crate::codecs::g711::G711MuLaw;
+        use forge_codecs::g711::G711MuLaw;
         let mut mulaw = G711MuLaw::new(8000);
         let pcm = vec![1000i16; 80];
         let mulaw_data = mulaw.encode(&pcm).unwrap();
@@ -366,18 +367,18 @@ mod tests {
         let src = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
         let dst = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMA,
+            codec: AudioCodecType::PCMA,
         };
 
         let mut transcoder = Transcoder::new(src, dst).unwrap();
 
         // Create test frames
-        use crate::codecs::g711::G711MuLaw;
+        use forge_codecs::g711::G711MuLaw;
         let mut mulaw = G711MuLaw::new(8000);
         let pcm = vec![1000i16; 80];
         let frame = mulaw.encode(&pcm).unwrap();
@@ -396,12 +397,12 @@ mod tests {
         let src = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCM,
+            codec: AudioCodecType::PCM,
         };
         let dst = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
 
         let transcoder = Transcoder::new(src, dst).unwrap();
@@ -420,12 +421,12 @@ mod tests {
         let src = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
         let dst = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCM,
+            codec: AudioCodecType::PCM,
         };
 
         let transcoder = Transcoder::new(src, dst).unwrap();
@@ -443,12 +444,12 @@ mod tests {
         let src = AudioFormat {
             sample_rate: 8000,
             channels: 1,
-            codec: crate::AudioCodec::PCMU,
+            codec: AudioCodecType::PCMU,
         };
         let dst = AudioFormat {
             sample_rate: 16000,
             channels: 1,
-            codec: crate::AudioCodec::PCMA,
+            codec: AudioCodecType::PCMA,
         };
 
         let transcoder = TranscoderBuilder::new(src, dst).build().unwrap();

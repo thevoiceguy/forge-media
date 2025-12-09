@@ -6,7 +6,7 @@ use thiserror::Error;
 
 mod transcoder;
 
-pub use forge_core::AudioFormat;
+pub use forge_codecs::AudioFormat;
 pub use transcoder::Transcoder;
 
 /// Transcoder error types

@@ -27,6 +27,14 @@ pub struct CreateSessionRequest {
     pub from_tag: Option<String>,
     #[validate(length(min = 1, max = 256))]
     pub to_tag: Option<String>,
+    /// TOS/DSCP value for QoS marking (0-255)
+    /// Common values:
+    /// - 0xB8 (184) = EF (Expedited Forwarding) - for voice (default)
+    /// - 0xA0 (160) = AF41 - for video
+    /// - 0x00 (0) = Best effort
+    /// If not specified, uses the global default from config
+    #[validate(range(max = 255))]
+    pub tos: Option<u8>,
 }
 
 /// Session information response
@@ -135,16 +143,27 @@ async fn create_session(
         ParticipantId::generate()
     };
 
+    // Prepare custom session config if TOS is specified
+    let custom_config = if let Some(tos) = request.tos {
+        let mut config = forge_engine::MediaSessionConfig::default();
+        config.socket_config.tos = tos;
+        tracing::debug!("Creating session with custom TOS: 0x{:02X} (DSCP=0x{:02X})", tos, tos >> 2);
+        Some(config)
+    } else {
+        None
+    };
+
     // Create session
     let session = state
         .session_manager
-        .create_session(
+        .create_session_with_config(
             call_id.clone(),
             participant_a,
             participant_b,
             request.sdp.clone(),
             request.from_tag.clone(),
             request.to_tag.clone(),
+            custom_config,
         )
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to create session: {}", e)))?;

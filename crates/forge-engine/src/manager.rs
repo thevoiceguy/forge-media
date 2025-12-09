@@ -140,6 +140,30 @@ impl SessionManager {
         from_tag: Option<String>,
         to_tag: Option<String>,
     ) -> Result<Arc<MediaSession>> {
+        self.create_session_with_config(
+            call_id,
+            participant_a,
+            participant_b,
+            sdp,
+            from_tag,
+            to_tag,
+            None, // Use default config
+        )
+        .await
+    }
+
+    /// Create a new media session with custom configuration
+    #[tracing::instrument(skip(self, custom_config), fields(call_id = %call_id.0))]
+    pub async fn create_session_with_config(
+        &self,
+        call_id: CallId,
+        participant_a: ParticipantId,
+        participant_b: ParticipantId,
+        sdp: Option<String>,
+        from_tag: Option<String>,
+        to_tag: Option<String>,
+        custom_config: Option<MediaSessionConfig>,
+    ) -> Result<Arc<MediaSession>> {
         tracing::debug!("Creating new media session");
 
         // Check if session already exists
@@ -150,6 +174,9 @@ impl SessionManager {
             )));
         }
 
+        // Use custom config or default
+        let session_config = custom_config.unwrap_or_else(|| self.config.session_config.clone());
+
         // Create session
         #[cfg(all(target_os = "linux", feature = "xdp"))]
         let session = {
@@ -159,7 +186,7 @@ impl SessionManager {
                     participant_a,
                     participant_b,
                     &self.port_pool,
-                    self.config.session_config.clone(),
+                    session_config,
                     self.event_bus.clone(),
                     self.xdp_manager.clone(),
                     sdp,
@@ -178,7 +205,7 @@ impl SessionManager {
                     participant_a,
                     participant_b,
                     &self.port_pool,
-                    self.config.session_config.clone(),
+                    session_config,
                     self.event_bus.clone(),
                     sdp,
                     from_tag,

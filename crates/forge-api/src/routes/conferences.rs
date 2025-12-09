@@ -397,7 +397,7 @@ async fn delete_recording(
 }
 
 /// Convert RecordingInfo to RecordingResponse
-fn recording_info_to_response(info: &forge_media_processor::storage::RecordingInfo) -> RecordingResponse {
+fn recording_info_to_response(info: &forge_storage::RecordingInfo) -> RecordingResponse {
     RecordingResponse {
         id: info.id.clone(),
         room_id: info.room_id.clone(),

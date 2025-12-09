@@ -10,7 +10,6 @@ pub mod codecs;
 pub mod conference;
 pub mod mixer;
 pub mod recorder;
-pub mod storage;
 pub mod transcoder;
 
 use thiserror::Error;

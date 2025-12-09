@@ -66,7 +66,7 @@ pub struct AppState {
     pub session_manager: Arc<SessionManager>,
     pub metrics_handle: Arc<super::prometheus::MetricsHandle>,
     pub conference_bridge: Arc<forge_media_processor::conference::ConferenceBridge>,
-    pub storage_manager: Arc<tokio::sync::Mutex<forge_media_processor::storage::StorageManager>>,
+    pub storage_manager: Arc<tokio::sync::Mutex<forge_storage::StorageManager>>,
     pub recording_base_dir: std::path::PathBuf,
 }
 
@@ -79,7 +79,7 @@ impl AppState {
     ) -> Self {
         // Create default storage manager
         let storage_manager = Arc::new(tokio::sync::Mutex::new(
-            forge_media_processor::storage::StorageManager::new(
+            forge_storage::StorageManager::new(
                 &recording_base_dir,
                 std::time::Duration::from_secs(7 * 24 * 3600),
                 0,

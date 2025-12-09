@@ -2,7 +2,7 @@
 //!
 //! Manages recording metadata, retention policies, and automatic cleanup
 
-use crate::{MediaError, Result};
+use crate::{StorageError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -69,7 +69,7 @@ impl RecordingInfo {
         let end_time = self.ended_at.unwrap_or_else(SystemTime::now);
         end_time
             .duration_since(self.started_at)
-            .map_err(|e| MediaError::Internal(format!("Failed to calculate age: {}", e)))
+            .map_err(|e| StorageError::Internal(format!("Failed to calculate age: {}", e)))
     }
 
     /// Check if recording file exists
@@ -128,7 +128,7 @@ impl StorageManager {
     /// Finalize a recording
     pub async fn finalize_recording(&mut self, id: &str) -> Result<()> {
         let recording = self.recordings.get_mut(id)
-            .ok_or_else(|| MediaError::RecordingNotFound(format!("Recording {} not found", id)))?;
+            .ok_or_else(|| StorageError::RecordingNotFound(format!("Recording {} not found", id)))?;
 
         recording.finalize().await?;
         info!("Finalized recording {}: {} bytes, {:.2}s",
@@ -165,7 +165,7 @@ impl StorageManager {
     /// Delete a recording
     pub async fn delete_recording(&mut self, id: &str) -> Result<()> {
         let recording = self.recordings.remove(id)
-            .ok_or_else(|| MediaError::RecordingNotFound(format!("Recording {} not found", id)))?;
+            .ok_or_else(|| StorageError::RecordingNotFound(format!("Recording {} not found", id)))?;
 
         recording.delete().await?;
         info!("Deleted recording {}", id);

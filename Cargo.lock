@@ -789,6 +789,7 @@ dependencies = [
  "forge-engine",
  "forge-media-processor",
  "forge-rtp",
+ "forge-storage",
  "lazy_static",
  "metrics 0.21.1",
  "metrics-exporter-prometheus",
@@ -1035,6 +1036,17 @@ name = "forge-siprec"
 version = "0.1.0"
 dependencies = [
  "forge-core",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "forge-storage"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

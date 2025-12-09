@@ -141,6 +141,10 @@ impl ForwardingEngine {
                                 event.event_type
                             );
 
+                            // Record metrics
+                            counter!("forge_dtmf_events_total", 1, "method" => "rfc2833", "digit" => format!("{}", event.digit));
+                            counter!("forge_dtmf_rfc2833_events_total", 1, "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type));
+
                             // Publish event to EventBus
                             if let Some(bus) = session.event_bus() {
                                 bus.publish(event.to_forge_event(call_id.clone()));
@@ -151,6 +155,7 @@ impl ForwardingEngine {
                                 call_id.0,
                                 event.digit
                             );
+                            counter!("forge_dtmf_duplicates_suppressed_total", 1, "method" => "rfc2833", "digit" => format!("{}", event.digit));
                         }
                     }
                 }
@@ -186,6 +191,7 @@ impl ForwardingEngine {
             };
 
             // Process with inband DTMF detector
+            counter!("forge_dtmf_inband_packets_processed_total", 1);
             let mut detector = session.inband_detector().lock().await;
             match detector.process_samples(&pcm_samples) {
                 Ok(events) => {
@@ -200,6 +206,10 @@ impl ForwardingEngine {
                                 event.event_type
                             );
 
+                            // Record metrics
+                            counter!("forge_dtmf_events_total", 1, "method" => "inband", "digit" => format!("{}", event.digit));
+                            counter!("forge_dtmf_inband_events_total", 1, "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type));
+
                             // Publish event to EventBus
                             if let Some(bus) = session.event_bus() {
                                 bus.publish(event.to_forge_event(call_id.clone()));
@@ -210,6 +220,7 @@ impl ForwardingEngine {
                                 call_id.0,
                                 event.digit
                             );
+                            counter!("forge_dtmf_duplicates_suppressed_total", 1, "method" => "inband", "digit" => format!("{}", event.digit));
                         }
                     }
                 }

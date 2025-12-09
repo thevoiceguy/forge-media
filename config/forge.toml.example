@@ -1,0 +1,149 @@
+# Forge Media Engine Configuration Example
+#
+# Copy this file to forge.toml and customize as needed.
+# The engine will look for config in these locations (in order):
+#   1. /etc/forge/config.toml
+#   2. ./config/forge.toml
+#   3. ./forge.toml
+
+# ============================================================================
+# API Server Configuration
+# ============================================================================
+[api]
+# HTTP API server bind address
+http_bind = "0.0.0.0:8080"
+
+# HTTPS configuration (optional)
+enable_https = false
+# https_bind = "0.0.0.0:8443"
+# tls_cert = "/path/to/cert.pem"
+# tls_key = "/path/to/key.pem"
+
+# CORS configuration
+enable_cors = true
+cors_origins = ["http://localhost:3000", "https://your-frontend.example.com"]
+
+# Authentication tokens (empty = no auth, not recommended for production)
+# Generate secure tokens: openssl rand -hex 32
+auth_tokens = [
+    # "your-secret-token-here",
+]
+
+# Rate limiting (per IP address)
+rate_limit_requests_per_window = 120  # Max requests
+rate_limit_window_secs = 60            # Time window in seconds
+
+# Recording base directory
+# All recording paths are constrained within this directory
+recording_base_dir = "/var/lib/forge/recordings"
+
+# ============================================================================
+# Media Engine Configuration
+# ============================================================================
+[engine]
+# RTP/RTCP port allocation range
+# Ensure this range is open in your firewall
+port_range_start = 30000
+port_range_end = 40000
+
+# Session timeout in seconds
+# Sessions idle longer than this will be automatically terminated
+session_timeout_secs = 300
+
+# TOS/DSCP value for QoS marking
+# Common values:
+#   0xB8 (184) = EF (Expedited Forwarding) - recommended for voice
+#   0xAF (175) = AF41 - high priority
+#   0x00 (0)   = Best effort (default)
+tos = 184
+
+# IP version configuration
+# Options: "ipv4_only", "ipv6_only", "dual_stack"
+ip_version = "dual_stack"
+
+# Network interfaces (optional, for multi-homed servers)
+# [[engine.interfaces]]
+# name = "eth0"
+# address = "192.168.1.100"
+# advertised_address = "203.0.113.100"  # Public IP for NAT scenarios
+
+# ============================================================================
+# XDP/eBPF Acceleration Configuration
+# ============================================================================
+[engine.xdp]
+# Enable XDP/eBPF for high-performance packet forwarding
+#
+# Benefits:
+#   - Sub-10µs packet forwarding latency (vs ~75µs userspace)
+#   - 10x higher throughput (500k+ PPS per core)
+#   - 75% reduction in CPU usage for media forwarding
+#
+# Requirements:
+#   - Linux kernel >= 5.4
+#   - Compiled with 'xdp' feature: cargo build --features xdp
+#   - Root/CAP_BPF privileges to load eBPF programs
+#
+# Note: XDP only accelerates RTP forwarding after endpoints are learned.
+#       Signaling, RTCP, and control plane remain in userspace.
+enabled = false
+
+# Network interface to attach XDP program
+#
+# Development/Testing: Use "lo" (loopback)
+# Production: Use your primary network interface
+#   - Find with: ip link show
+#   - Common names: "eth0", "ens3", "enp0s3", etc.
+interface = "lo"
+
+# XDP mode
+#
+# Options:
+#   "generic" (XDP_SKB):
+#     - Software-based XDP
+#     - Works on all network interfaces
+#     - Latency: ~50-100µs (still better than userspace ~75µs)
+#     - Good for: Testing, compatibility, older NICs
+#
+#   "native" (XDP_DRV):
+#     - Driver-based XDP (requires NIC support)
+#     - Hardware offload at NIC level
+#     - Latency: <10µs (best performance)
+#     - Good for: Production with modern NICs
+#     - Supported NICs: Intel i40e, ixgbe, mlx5, virtio_net, etc.
+#
+# Recommendation: Start with "generic", upgrade to "native" in production
+mode = "generic"
+
+# Fallback to userspace forwarding if XDP fails to load
+#
+# If true: System works normally even if XDP unavailable
+# If false: Fail fast if XDP cannot be loaded
+#
+# Recommendation: true (for maximum compatibility)
+fallback = true
+
+# ============================================================================
+# Production Example Configuration
+# ============================================================================
+#
+# For production deployment on a dedicated media server:
+#
+# [api]
+# http_bind = "0.0.0.0:8080"
+# enable_https = true
+# https_bind = "0.0.0.0:8443"
+# tls_cert = "/etc/forge/certs/fullchain.pem"
+# tls_key = "/etc/forge/certs/privkey.pem"
+# auth_tokens = ["your-secure-token-here"]
+# recording_base_dir = "/var/lib/forge/recordings"
+#
+# [engine]
+# port_range_start = 30000
+# port_range_end = 40000
+# tos = 184
+#
+# [engine.xdp]
+# enabled = true
+# interface = "eth0"  # Your primary NIC
+# mode = "native"     # For best performance
+# fallback = true

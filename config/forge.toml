@@ -1,24 +1,54 @@
-# Forge Media Engine Configuration - XDP Testing
+# Forge Media Engine Configuration
+#
+# This file configures the Forge Media Engine including XDP/eBPF acceleration.
 
 [api]
-bind = "127.0.0.1:8080"
+# HTTP API server bind address
+http_bind = "127.0.0.1:8080"
+
+# CORS configuration
 enable_cors = true
 cors_origins = ["http://localhost:3000"]
+
+# Authentication tokens (empty = no auth, not recommended for production)
 auth_tokens = []
+
+# Rate limiting
 rate_limit_requests_per_window = 120
 rate_limit_window_secs = 60
+
+# Recording base directory
 recording_base_dir = "/tmp/forge-recordings"
 
 [engine]
-port_range_min = 30000
-port_range_max = 40000
+# RTP/RTCP port allocation range
+port_range_start = 30000
+port_range_end = 40000
+
+# Session timeout in seconds
+session_timeout_secs = 300
+
+# TOS/DSCP value for QoS (0xB8 = EF - Expedited Forwarding for voice)
+tos = 184
+
+# IP version: "ipv4_only", "ipv6_only", or "dual_stack"
+ip_version = "dual_stack"
 
 [engine.xdp]
-# Enable XDP for high-performance packet forwarding
+# Enable XDP/eBPF for sub-10µs RTP packet forwarding
+# Requires Linux kernel >= 5.4 and 'xdp' feature compiled
 enabled = true
-# Use loopback interface for testing
+
+# Network interface to attach XDP program
+# Development: "lo" (loopback)
+# Production: "eth0", "ens3", etc. (your primary NIC)
 interface = "lo"
-# Use generic mode (works on all interfaces)
+
+# XDP mode:
+# - "generic": XDP_SKB - software mode, works on all NICs (~50-100µs latency)
+# - "native": XDP_DRV - driver mode, requires NIC support (<10µs latency)
 mode = "generic"
-# Fallback to userspace if XDP fails
+
+# Fallback to userspace forwarding if XDP fails to load
+# Recommended: true (for compatibility)
 fallback = true

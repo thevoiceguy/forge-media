@@ -7,7 +7,6 @@
 //! - Conference bridge management
 
 pub mod codecs;
-pub mod transcoder;
 
 use thiserror::Error;
 

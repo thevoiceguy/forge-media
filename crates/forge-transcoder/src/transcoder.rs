@@ -29,8 +29,8 @@
 //! let opus_data = transcoder.transcode(&g711_data).unwrap();
 //! ```
 
-use crate::codecs::{self, AudioCodec};
-use crate::{AudioFormat, MediaError, Result};
+use crate::{AudioFormat, TranscoderError, Result};
+use forge_codecs::{self as codecs, AudioCodec};
 use forge_resampler::Resampler;
 
 /// Audio transcoder for format conversion
@@ -65,7 +65,7 @@ impl Transcoder {
     pub fn new(src_format: AudioFormat, dst_format: AudioFormat) -> Result<Self> {
         // Validate formats
         if src_format.channels != dst_format.channels {
-            return Err(MediaError::InvalidFormat(
+            return Err(TranscoderError::InvalidFormat(
                 "Channel count mismatch - channel conversion not yet supported".to_string(),
             ));
         }
@@ -196,7 +196,7 @@ impl Transcoder {
     /// Convert raw PCM bytes (little-endian i16) to samples
     fn bytes_to_pcm(&self, bytes: &[u8]) -> Result<Vec<i16>> {
         if bytes.len() % 2 != 0 {
-            return Err(MediaError::InvalidFormat(
+            return Err(TranscoderError::InvalidFormat(
                 "PCM data must have even number of bytes".to_string(),
             ));
         }

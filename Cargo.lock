@@ -1111,6 +1111,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-transcoder"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "forge-codecs",
+ "forge-core",
+ "forge-resampler",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "forge-transcoding"
 version = "0.1.0"
 dependencies = [

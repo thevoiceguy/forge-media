@@ -1020,6 +1020,7 @@ dependencies = [
  "bytes",
  "forge-core",
  "hmac",
+ "libc",
  "openssl",
  "sha1",
  "sha2",

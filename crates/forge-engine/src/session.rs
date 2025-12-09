@@ -193,6 +193,7 @@ impl MediaSession {
     ) -> Result<Self> {
         // Allocate ports
         let ports = port_pool.allocate().await?;
+        let mut port_guard = PortAllocationGuard::new(Arc::clone(port_pool), ports);
         tracing::info!(
             "Allocated ports for session {}: RTP={}, RTCP={}",
             call_id.0,
@@ -202,6 +203,7 @@ impl MediaSession {
 
         // Create socket pair
         let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
+        port_guard.disarm();
 
         let participant_a = Participant {
             id: participant_a_id,
@@ -286,6 +288,7 @@ impl MediaSession {
     ) -> Result<Self> {
         // Allocate ports
         let ports = port_pool.allocate().await?;
+        let mut port_guard = PortAllocationGuard::new(Arc::clone(port_pool), ports);
         tracing::info!(
             "Allocated ports for session {}: RTP={}, RTCP={}",
             call_id.0,
@@ -295,6 +298,7 @@ impl MediaSession {
 
         // Create socket pair
         let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
+        port_guard.disarm();
 
         let participant_a = Participant {
             id: participant_a_id,
@@ -873,10 +877,49 @@ fn codec_name(codec: forge_codecs::AudioCodecType) -> &'static str {
     }
 }
 
+/// Guard that returns allocated ports if construction fails before the session owns them
+struct PortAllocationGuard {
+    port_pool: Arc<PortPool>,
+    ports: PortPair,
+    active: bool,
+}
+
+impl PortAllocationGuard {
+    fn new(port_pool: Arc<PortPool>, ports: PortPair) -> Self {
+        Self {
+            port_pool,
+            ports,
+            active: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PortAllocationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let pool = Arc::clone(&self.port_pool);
+            let ports = self.ports;
+            tokio::spawn(async move {
+                pool.deallocate(ports).await;
+                tracing::debug!(
+                    "PortAllocationGuard cleaned up ports after construction failure: RTP={}, RTCP={}",
+                    ports.rtp_port,
+                    ports.rtcp_port
+                );
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use forge_rtp::PortPoolConfig;
+    use std::net::{SocketAddr, UdpSocket};
 
     #[tokio::test]
     async fn test_session_creation() {
@@ -976,5 +1019,38 @@ mod tests {
 
         // Should be timed out now
         assert!(session.is_timed_out().await);
+    }
+
+    #[tokio::test]
+    async fn test_ports_released_on_socket_failure() {
+        let config = PortPoolConfig::new(20000, 20200).unwrap();
+        let port_pool = Arc::new(PortPool::new(config));
+
+        // Pre-bind RTP port so socket creation fails with EADDRINUSE when reuse is disabled
+        let prebind_addr: SocketAddr = "0.0.0.0:20000".parse().unwrap();
+        let _sock = UdpSocket::bind(prebind_addr).expect("failed to prebind test socket");
+
+        let mut session_config = MediaSessionConfig::default();
+        session_config.socket_config.reuse_address = false;
+
+        let result = MediaSession::new(
+            CallId::generate(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            &port_pool,
+            session_config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_err(), "socket creation should fail when port is already bound");
+
+        // Give the guard's spawned deallocation task time to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        assert_eq!(port_pool.allocated_count().await, 0, "ports should be returned to pool");
     }
 }

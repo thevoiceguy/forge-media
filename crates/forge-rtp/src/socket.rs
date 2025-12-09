@@ -133,14 +133,11 @@ impl RtpSocketPair {
                     tracing::debug!("Set IPv4 TOS to 0x{:02X} (DSCP=0x{:02X})", config.tos, config.tos >> 2);
                 }
                 SocketAddr::V6(_) => {
-                    // IPv6: Set IPV6_TCLASS
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        socket
-                            .set_unicast_hops_v6(config.tos as u32)
-                            .map_err(|e| ForgeError::Network(format!("Failed to set IPV6_TCLASS: {}", e)))?;
-                        tracing::debug!("Set IPv6 Traffic Class to 0x{:02X}", config.tos);
+                    // IPv6: Set IPV6_TCLASS (traffic class / DSCP)
+                    if let Err(e) = set_ipv6_tclass(&socket, config.tos as u32) {
+                        return Err(ForgeError::Network(format!("Failed to set IPV6_TCLASS: {}", e)));
                     }
+                    tracing::debug!("Set IPv6 Traffic Class to 0x{:02X} (DSCP=0x{:02X})", config.tos, config.tos >> 2);
                 }
             }
         }
@@ -319,6 +316,35 @@ impl RtpSocketPair {
     pub fn rtcp_socket(&self) -> Arc<UdpSocket> {
         Arc::clone(&self.rtcp_socket)
     }
+}
+
+/// Set IPv6 traffic class (DSCP/ECN) using IPV6_TCLASS
+#[cfg(unix)]
+fn set_ipv6_tclass(socket: &socket2::Socket, tclass: u32) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let value = tclass as libc::c_int;
+    let ret = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IPV6,
+            libc::IPV6_TCLASS,
+            &value as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+
+    if ret == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Windows: socket2 does not expose IPV6_TCLASS; skip setting DSCP.
+#[cfg(windows)]
+fn set_ipv6_tclass(_socket: &socket2::Socket, _tclass: u32) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

@@ -101,6 +101,8 @@ pub struct MediaSession {
     config: MediaSessionConfig,
     /// Event bus for publishing events
     event_bus: Option<Arc<EventBus>>,
+    /// RFC 2833 (telephone-event) DTMF detector
+    dtmf_detector: Arc<Mutex<forge_dtmf::Rfc2833Detector>>,
     /// Forwarding task handles
     forwarding_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Optional offer/answer SDP associated with the session
@@ -171,6 +173,7 @@ impl MediaSession {
             last_activity: Arc::new(RwLock::new(now)),
             config,
             event_bus: event_bus.clone(),
+            dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -247,6 +250,7 @@ impl MediaSession {
             last_activity: Arc::new(RwLock::new(now)),
             config,
             event_bus: event_bus.clone(),
+            dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -304,6 +308,16 @@ impl MediaSession {
     /// Check if session has timed out
     pub async fn is_timed_out(&self) -> bool {
         self.idle_time().await > self.config.session_timeout
+    }
+
+    /// Get the event bus
+    pub fn event_bus(&self) -> Option<&Arc<EventBus>> {
+        self.event_bus.as_ref()
+    }
+
+    /// Get the DTMF detector
+    pub fn dtmf_detector(&self) -> &Arc<Mutex<forge_dtmf::Rfc2833Detector>> {
+        &self.dtmf_detector
     }
 
     /// Activate XDP fast path for this session

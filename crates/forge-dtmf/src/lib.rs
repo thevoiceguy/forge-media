@@ -20,9 +20,9 @@ pub mod rfc2833;
 pub mod inband;
 pub mod detector;
 
-pub use rfc2833::{Rfc2833Event, Rfc2833Generator};
+pub use rfc2833::{Rfc2833Event, Rfc2833Generator, Rfc2833Detector};
 pub use inband::{InbandDetector, GoertzelDetector};
-pub use detector::{DtmfDetector, DtmfEvent, DtmfDigit, DtmfEventType};
+pub use detector::{DtmfDetector, DtmfEvent, DtmfDigit, DtmfEventType, DtmfMethod};
 
 use thiserror::Error;
 

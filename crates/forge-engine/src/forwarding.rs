@@ -118,6 +118,47 @@ impl ForwardingEngine {
     ) {
         let call_id = session.call_id();
 
+        // Check for RFC 2833 telephone-event packets (payload type 101)
+        if packet.header.payload_type() == 101 {
+            tracing::debug!(
+                "Received RFC 2833 telephone-event packet for session {} from {}",
+                call_id.0,
+                source_addr
+            );
+
+            // Process with DTMF detector
+            let mut detector = session.dtmf_detector().lock().await;
+            match detector.process_with_timestamp(&packet.payload, packet.header.timestamp) {
+                Ok(events) => {
+                    for event in events {
+                        tracing::info!(
+                            "DTMF detected for session {}: {} ({:?})",
+                            call_id.0,
+                            event.digit,
+                            event.event_type
+                        );
+
+                        // Publish event to EventBus
+                        if let Some(bus) = session.event_bus() {
+                            bus.publish(event.to_forge_event(call_id.clone()));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to process RFC 2833 packet for session {}: {}",
+                        call_id.0,
+                        e
+                    );
+                }
+            }
+
+            // Update activity but don't forward RFC 2833 packets
+            session.update_activity().await;
+            counter!("forge_dtmf_rfc2833_packets_total", 1);
+            return;
+        }
+
         // Determine which participant sent this packet
         let (sender, receiver) = {
             let a = participant_a.read().await;

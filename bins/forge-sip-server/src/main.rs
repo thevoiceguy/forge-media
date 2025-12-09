@@ -67,8 +67,8 @@ async fn main() -> Result<()> {
     info!("");
 
     let sip_bind: SocketAddr = "0.0.0.0:5060".parse().unwrap();
-    let forge_api_url = "http://localhost:8081";
-    let local_ip = "192.168.1.81";
+    let forge_api_url = "http://localhost:8080";
+    let local_ip = std::env::var("LOCAL_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
 
     info!("Configuration:");
     info!("  SIP Listen: {}", sip_bind);

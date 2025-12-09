@@ -255,7 +255,7 @@ async fn start_recording(
     // Parse codec if specified
     let format = if let Some(codec_str) = &request.codec {
         let codec = forge_media_processor::AudioCodec::from_str(codec_str)
-            .map_err(|e| ApiError::InvalidRequest(format!("Invalid codec: {}", e)))?;
+            .ok_or_else(|| ApiError::InvalidRequest(format!("Invalid codec: {}", codec_str)))?;
 
         // Get room's current format and override codec
         let room_format = state.conference_bridge.get_room(&room_id)

@@ -154,6 +154,8 @@ pub enum AudioCodec {
     AMR,
     /// AMR-WB
     AMRWB,
+    /// Raw PCM (for WAV files, etc.)
+    PCM,
 }
 
 impl AudioCodec {
@@ -178,6 +180,7 @@ impl AudioCodec {
             Self::ILBC => 8000,
             Self::AMR => 8000,
             Self::AMRWB => 16000,
+            Self::PCM => 48000, // Default, can vary
         }
     }
 
@@ -191,7 +194,80 @@ impl AudioCodec {
             Self::ILBC => 15200,
             Self::AMR => 12200,
             Self::AMRWB => 23850,
+            Self::PCM => 1536000, // 48kHz * 16bit * 2 channels
         }
+    }
+
+    /// Parse codec from string (case-insensitive)
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "opus" => Some(Self::Opus),
+            "pcmu" => Some(Self::PCMU),
+            "pcma" => Some(Self::PCMA),
+            "pcm" | "wav" => Some(Self::PCM),
+            "g722" => Some(Self::G722),
+            "g729" => Some(Self::G729),
+            "speex" => Some(Self::Speex),
+            "ilbc" => Some(Self::ILBC),
+            "amr" => Some(Self::AMR),
+            "amrwb" | "amr-wb" => Some(Self::AMRWB),
+            _ => None,
+        }
+    }
+
+    /// Get the recommended file extension for this codec
+    pub fn file_extension(&self) -> &str {
+        match self {
+            Self::Opus => "opus",
+            Self::PCM => "wav",
+            Self::PCMU | Self::PCMA | Self::G722 | Self::G729 => "wav",
+            Self::Speex => "spx",
+            Self::ILBC => "wav",
+            Self::AMR => "amr",
+            Self::AMRWB => "awb",
+        }
+    }
+}
+
+/// Audio sample format
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct AudioFormat {
+    /// Sample rate in Hz (e.g., 48000, 16000, 8000)
+    pub sample_rate: u32,
+    /// Number of audio channels (1 = mono, 2 = stereo)
+    pub channels: u16,
+    /// Codec used for encoding
+    pub codec: AudioCodec,
+}
+
+impl Default for AudioFormat {
+    fn default() -> Self {
+        Self {
+            sample_rate: 48000,
+            channels: 1,
+            codec: AudioCodec::Opus,
+        }
+    }
+}
+
+impl AudioFormat {
+    /// Create a new audio format
+    pub fn new(sample_rate: u32, channels: u16, codec: AudioCodec) -> Self {
+        Self {
+            sample_rate,
+            channels,
+            codec,
+        }
+    }
+
+    /// Create Opus format (48kHz mono)
+    pub fn opus_mono() -> Self {
+        Self::new(48000, 1, AudioCodec::Opus)
+    }
+
+    /// Create PCM format for WAV files (48kHz mono)
+    pub fn pcm_mono() -> Self {
+        Self::new(48000, 1, AudioCodec::PCM)
     }
 }
 

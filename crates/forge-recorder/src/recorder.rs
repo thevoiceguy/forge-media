@@ -2,7 +2,7 @@
 //!
 //! Records RTP audio packets to WAV or Opus files
 
-use crate::{AudioCodec, AudioFormat, MediaError, Result};
+use crate::{AudioCodec, AudioFormat, RecorderError, Result};
 #[cfg(feature = "opus")]
 use audiopus::coder::Encoder as OpusEncoder;
 #[cfg(feature = "opus")]
@@ -97,7 +97,7 @@ impl AudioRecorder {
                 let file = std::fs::File::create(&self.path)?;
                 let buf_writer = std::io::BufWriter::new(file);
                 let wav_writer = WavWriter::new(buf_writer, spec)
-                    .map_err(|e| MediaError::Internal(format!("Failed to create WAV writer: {}", e)))?;
+                    .map_err(|e| RecorderError::Internal(format!("Failed to create WAV writer: {}", e)))?;
 
                 RecorderWriter::Wav(wav_writer)
             }
@@ -125,7 +125,7 @@ impl AudioRecorder {
 
                 // Create Opus encoder
                 let encoder = OpusEncoder::new(opus_sample_rate, channels, Application::Voip)
-                    .map_err(|e| MediaError::Encoding(format!("Failed to create Opus encoder: {:?}", e)))?;
+                    .map_err(|e| RecorderError::Encoding(format!("Failed to create Opus encoder: {:?}", e)))?;
 
                 // Frame size: 20ms of audio (sample_rate / 50)
                 let frame_size = (self.format.sample_rate / 50) as usize * self.format.channels as usize;
@@ -146,7 +146,7 @@ impl AudioRecorder {
                 }
             }
             _ => {
-                return Err(MediaError::Encoding(format!(
+                return Err(RecorderError::Encoding(format!(
                     "Unsupported codec for recording: {:?}",
                     self.format.codec
                 )));
@@ -174,7 +174,7 @@ impl AudioRecorder {
                     // Write directly to WAV
                     for &sample in samples {
                         wav_writer.write_sample(sample)
-                            .map_err(|e| MediaError::Encoding(format!("Failed to write sample: {}", e)))?;
+                            .map_err(|e| RecorderError::Encoding(format!("Failed to write sample: {}", e)))?;
                     }
                 }
                 #[cfg(feature = "opus")]
@@ -203,7 +203,7 @@ impl AudioRecorder {
 
             Ok(())
         } else {
-            Err(MediaError::Internal("Recorder not started".to_string()))
+            Err(RecorderError::Internal("Recorder not started".to_string()))
         }
     }
 
@@ -221,7 +221,7 @@ impl AudioRecorder {
 
         // Encode the frame
         let encoded_size = encoder.encode(frame, &mut output)
-            .map_err(|e| MediaError::Encoding(format!("Opus encoding failed: {:?}", e)))?;
+            .map_err(|e| RecorderError::Encoding(format!("Opus encoding failed: {:?}", e)))?;
 
         // Truncate to actual encoded size
         output.truncate(encoded_size);
@@ -234,7 +234,7 @@ impl AudioRecorder {
         };
 
         ogg_stream.write_packet(packet, 0, ogg::PacketWriteEndInfo::NormalPacket, None)
-            .map_err(|e| MediaError::Encoding(format!("Failed to write Ogg packet: {}", e)))?;
+            .map_err(|e| RecorderError::Encoding(format!("Failed to write Ogg packet: {}", e)))?;
 
         Ok(())
     }
@@ -268,7 +268,7 @@ impl AudioRecorder {
             match writer {
                 RecorderWriter::Wav(wav_writer) => {
                     wav_writer.finalize()
-                        .map_err(|e| MediaError::Internal(format!("Failed to finalize WAV file: {}", e)))?;
+                        .map_err(|e| RecorderError::Internal(format!("Failed to finalize WAV file: {}", e)))?;
                 }
                 #[cfg(feature = "opus")]
                 RecorderWriter::Opus { mut encoder, mut file, frame_buffer, frame_size, mut ogg_stream } => {
@@ -290,11 +290,11 @@ impl AudioRecorder {
                         0,
                         ogg::PacketWriteEndInfo::EndStream,
                         None,
-                    ).map_err(|e| MediaError::Internal(format!("Failed to finalize Ogg stream: {}", e)))?;
+                    ).map_err(|e| RecorderError::Internal(format!("Failed to finalize Ogg stream: {}", e)))?;
 
                     // Flush file buffer
                     file.flush()
-                        .map_err(|e| MediaError::Internal(format!("Failed to flush Opus file: {}", e)))?;
+                        .map_err(|e| RecorderError::Internal(format!("Failed to flush Opus file: {}", e)))?;
                 }
             }
         }

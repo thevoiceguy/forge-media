@@ -4,9 +4,9 @@
 
 use crate::{
     mixer::AudioMixer,
-    recorder::AudioRecorder,
     AudioFormat, MediaError, Result,
 };
+use forge_recorder::AudioRecorder;
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::RwLock;

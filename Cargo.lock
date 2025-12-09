@@ -937,6 +937,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "forge-core",
+ "forge-recorder",
  "forge-resampler",
  "forge-rtp",
  "hound",
@@ -948,6 +949,21 @@ dependencies = [
  "serde_json",
  "symphonia",
  "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "forge-recorder"
+version = "0.1.0"
+dependencies = [
+ "audiopus",
+ "bytes",
+ "forge-core",
+ "hound",
+ "ogg",
+ "parking_lot",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

@@ -1,0 +1,26 @@
+[package]
+name = "forge-recorder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+opus = ["audiopus", "ogg"]
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+
+bytes = { workspace = true }
+hound = "3.5"
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+tracing = { workspace = true }
+
+# Optional Opus support
+audiopus = { version = "0.3.0-rc.0", optional = true }
+ogg = { version = "0.8", optional = true }

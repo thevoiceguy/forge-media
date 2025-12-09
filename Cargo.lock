@@ -815,16 +815,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "forge-conference"
-version = "0.1.0"
-dependencies = [
- "forge-core",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "forge-conference-processor"
 version = "0.1.0"
 dependencies = [
@@ -925,7 +915,6 @@ dependencies = [
  "anyhow",
  "forge-ai-stream",
  "forge-api",
- "forge-conference",
  "forge-core",
  "forge-dtmf",
  "forge-engine",
@@ -935,7 +924,6 @@ dependencies = [
  "forge-rtp",
  "forge-sbc",
  "forge-siprec",
- "forge-transcoding",
  "forge-transcription",
  "forge-webrtc",
  "tokio",
@@ -1119,16 +1107,6 @@ dependencies = [
  "forge-core",
  "forge-resampler",
  "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "forge-transcoding"
-version = "0.1.0"
-dependencies = [
- "forge-core",
- "thiserror 1.0.69",
- "tokio",
  "tracing",
 ]
 

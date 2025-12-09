@@ -174,22 +174,27 @@ Forge follows a modular, layered architecture:
 
 ```
 forge-media/
-├── forge-core         # Common types, traits, utilities
-├── forge-rtp          # RTP/RTCP/SRTP implementation
-├── forge-engine       # Core engine and session management
-├── forge-transcoding  # Codec implementations
-├── forge-conference   # Audio conferencing
-├── forge-recording    # Recording system
-├── forge-dtmf         # DTMF detection and generation
-├── forge-transcription# Real-time transcription
-├── forge-injection    # Audio injection and TTS
-├── forge-webrtc       # WebRTC support
-├── forge-sdp          # SDP parsing and generation
-├── forge-sbc          # SBC features
-├── forge-siprec       # SIPREC (RFC 7865/7866)
-├── forge-ai-stream    # AI streaming integration
-├── forge-ha           # High availability
-└── forge-api          # HTTP/WebSocket API
+├── forge-core                  # Common types, traits, utilities
+├── forge-rtp                   # RTP/RTCP/SRTP implementation
+├── forge-engine                # Core engine and session management
+├── forge-codecs                # Audio codec implementations (G.711, Opus, etc.)
+├── forge-resampler             # Audio sample rate conversion
+├── forge-transcoder            # Audio transcoding pipeline
+├── forge-storage               # Recording storage management
+├── forge-recorder              # Audio recording (WAV, Opus)
+├── forge-mixer                 # Multi-party audio mixing
+├── forge-conference-processor  # Conference bridge management
+├── forge-recording             # Recording system
+├── forge-dtmf                  # DTMF detection and generation
+├── forge-transcription         # Real-time transcription
+├── forge-injection             # Audio injection and TTS
+├── forge-webrtc                # WebRTC support
+├── forge-sdp                   # SDP parsing and generation
+├── forge-sbc                   # SBC features
+├── forge-siprec                # SIPREC (RFC 7865/7866)
+├── forge-ai-stream             # AI streaming integration
+├── forge-ha                    # High availability
+└── forge-api                   # HTTP/WebSocket API
 ```
 
 See [FORGE ARCHITECTURE.md](FORGE%20ARCHITECTURE.md) for detailed design.

@@ -13,31 +13,38 @@
 - **Library** (`src/lib.rs`): Use in FCP and other Rust projects
 - **Binary** (`src/main.rs`): Run as standalone media server
 
-The complete Rust workspace has been established with 17 specialized crates:
+The complete Rust workspace has been established with specialized crates:
 
 ```
 forge-media/
-├── Cargo.toml                 # Workspace configuration
-├── src/main.rs               # Binary entry point
-├── config/forge.toml         # Example configuration
+├── Cargo.toml                      # Workspace configuration
+├── src/main.rs                    # Binary entry point
+├── config/forge.toml              # Example configuration
 ├── crates/
-│   ├── forge-core/          # ✅ Core types, errors, config
-│   ├── forge-rtp/           # ✅ RTP packet parsing implemented
-│   ├── forge-engine/        # 🚧 Scaffold ready
-│   ├── forge-transcoding/   # 🚧 Scaffold ready
-│   ├── forge-kernel/        # 🚧 Scaffold ready
-│   ├── forge-conference/    # 🚧 Scaffold ready
-│   ├── forge-recording/     # 🚧 Scaffold ready
-│   ├── forge-dtmf/          # 🚧 Scaffold ready
-│   ├── forge-transcription/ # 🚧 Scaffold ready
-│   ├── forge-injection/     # 🚧 Scaffold ready
-│   ├── forge-webrtc/        # 🚧 Scaffold ready
-│   ├── forge-sdp/           # 🚧 Scaffold ready
-│   ├── forge-sbc/           # 🚧 Scaffold ready
-│   ├── forge-siprec/        # 🚧 Scaffold ready
-│   ├── forge-ai-stream/     # 🚧 Scaffold ready
-│   ├── forge-ha/            # 🚧 Scaffold ready
-│   └── forge-api/           # 🚧 Scaffold ready
+│   ├── forge-core/                # ✅ Core types, errors, config
+│   ├── forge-rtp/                 # ✅ RTP packet parsing implemented
+│   ├── forge-engine/              # 🚧 Core engine and session management
+│   ├── forge-codecs/              # ✅ Audio codec implementations (G.711, Opus)
+│   ├── forge-resampler/           # ✅ Audio sample rate conversion
+│   ├── forge-transcoder/          # ✅ Audio transcoding pipeline
+│   ├── forge-storage/             # ✅ Recording storage management
+│   ├── forge-recorder/            # ✅ Audio recording (WAV, Opus)
+│   ├── forge-mixer/               # ✅ Multi-party audio mixing
+│   ├── forge-conference-processor/# ✅ Conference bridge management
+│   ├── forge-media-processor/     # ✅ Media processing core
+│   ├── forge-kernel/              # 🚧 Kernel offload (eBPF/XDP)
+│   ├── forge-kernel-ebpf/         # 🚧 eBPF programs
+│   ├── forge-recording/           # 🚧 Recording system
+│   ├── forge-dtmf/                # 🚧 DTMF detection and generation
+│   ├── forge-transcription/       # 🚧 Real-time transcription
+│   ├── forge-injection/           # 🚧 Audio injection and TTS
+│   ├── forge-webrtc/              # 🚧 WebRTC support
+│   ├── forge-sdp/                 # 🚧 SDP parsing and generation
+│   ├── forge-sbc/                 # 🚧 SBC features
+│   ├── forge-siprec/              # 🚧 SIPREC (RFC 7865/7866)
+│   ├── forge-ai-stream/           # 🚧 AI streaming integration
+│   ├── forge-ha/                  # 🚧 High availability
+│   └── forge-api/                 # 🚧 HTTP/WebSocket API
 └── Documentation (see below)
 ```
 

@@ -149,34 +149,55 @@ forge-media/
 │   │       ├── ports.rs         # Port pool management
 │   │       └── sockets.rs       # Socket management with TOS/QoS
 │   │
-│   ├── forge-transcoding/       # Codec transcoding
+│   ├── forge-codecs/            # Audio codec implementations
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── codecs/
-│   │       │   ├── mod.rs
-│   │       │   ├── pcmu.rs      # G.711 μ-law
-│   │       │   ├── pcma.rs      # G.711 A-law
-│   │       │   ├── g722.rs      # G.722
-│   │       │   ├── opus.rs      # Opus
-│   │       │   └── g729.rs      # G.729 (feature-gated)
-│   │       ├── resampler.rs     # Sample rate conversion
-│   │       └── pipeline.rs      # Transcoding pipeline
+│   │       ├── mod.rs
+│   │       ├── g711.rs          # G.711 μ-law/A-law
+│   │       ├── g722.rs          # G.722
+│   │       ├── opus.rs          # Opus
+│   │       └── g729.rs          # G.729 (feature-gated)
+│   │
+│   ├── forge-resampler/         # Sample rate conversion
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       └── resampler.rs     # Rubato-based resampler
+│   │
+│   ├── forge-transcoder/        # Audio transcoding pipeline
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       └── transcoder.rs    # Transcode between codecs/sample rates
+│   │
+│   ├── forge-storage/           # Recording storage management
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       └── storage.rs       # Storage backend abstraction
+│   │
+│   ├── forge-recorder/          # Audio recording (WAV, Opus)
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       └── recorder.rs      # Audio recording to files
+│   │
+│   ├── forge-mixer/             # Multi-party audio mixing
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       └── mixer.rs         # Audio mixing and stream management
+│   │
+│   ├── forge-conference-processor/  # Conference bridge management
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       └── conference.rs    # Conference rooms and bridges
+│   │
+│   ├── forge-media-processor/   # Media processing core
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       └── codecs/          # Legacy codec module
 │   │
 │   ├── forge-kernel/            # Kernel offload
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── rtpengine.rs     # xt_RTPENGINE interface
 │   │       └── ebpf.rs          # eBPF/XDP programs
-│   │
-│   ├── forge-conference/        # Audio conferencing
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── room.rs          # Conference room
-│   │       ├── participant.rs   # Participant handling
-│   │       ├── mixer.rs         # Audio mixing
-│   │       ├── vad.rs           # Voice activity detection
-│   │       ├── agc.rs           # Automatic gain control
-│   │       └── dominant.rs      # Dominant speaker detection
 │   │
 │   ├── forge-recording/         # Recording system
 │   │   └── src/

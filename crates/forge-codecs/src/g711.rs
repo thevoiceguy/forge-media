@@ -179,7 +179,7 @@ fn encode_ulaw(pcm: i16) -> u8 {
 }
 
 /// Decode μ-law to PCM
-fn decode_ulaw(ulaw: u8) -> i16 {
+pub fn decode_ulaw(ulaw: u8) -> i16 {
     ULAW_DEC_TABLE[ulaw as usize]
 }
 
@@ -190,7 +190,7 @@ fn encode_alaw(pcm: i16) -> u8 {
 }
 
 /// Decode A-law to PCM
-fn decode_alaw(alaw: u8) -> i16 {
+pub fn decode_alaw(alaw: u8) -> i16 {
     ALAW_DEC_TABLE[alaw as usize]
 }
 

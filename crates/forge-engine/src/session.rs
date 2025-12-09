@@ -103,6 +103,8 @@ pub struct MediaSession {
     event_bus: Option<Arc<EventBus>>,
     /// RFC 2833 (telephone-event) DTMF detector
     dtmf_detector: Arc<Mutex<forge_dtmf::Rfc2833Detector>>,
+    /// Inband DTMF detector (Goertzel algorithm)
+    inband_detector: Arc<Mutex<forge_dtmf::GoertzelDetector>>,
     /// Forwarding task handles
     forwarding_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Optional offer/answer SDP associated with the session
@@ -174,6 +176,7 @@ impl MediaSession {
             config,
             event_bus: event_bus.clone(),
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
+            inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -251,6 +254,7 @@ impl MediaSession {
             config,
             event_bus: event_bus.clone(),
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
+            inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -318,6 +322,11 @@ impl MediaSession {
     /// Get the DTMF detector
     pub fn dtmf_detector(&self) -> &Arc<Mutex<forge_dtmf::Rfc2833Detector>> {
         &self.dtmf_detector
+    }
+
+    /// Get the inband DTMF detector
+    pub fn inband_detector(&self) -> &Arc<Mutex<forge_dtmf::GoertzelDetector>> {
+        &self.inband_detector
     }
 
     /// Activate XDP fast path for this session

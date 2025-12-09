@@ -159,6 +159,51 @@ impl ForwardingEngine {
             return;
         }
 
+        // Check for inband DTMF in G.711 audio (payload types 0=PCMU, 8=PCMA)
+        let payload_type = packet.header.payload_type();
+        if payload_type == 0 || payload_type == 8 {
+            // Decode G.711 to PCM samples for DTMF detection
+            let pcm_samples: Vec<i16> = if payload_type == 0 {
+                // PCMU (µ-law)
+                packet.payload.iter().map(|&byte| {
+                    forge_codecs::g711::decode_ulaw(byte)
+                }).collect()
+            } else {
+                // PCMA (A-law)
+                packet.payload.iter().map(|&byte| {
+                    forge_codecs::g711::decode_alaw(byte)
+                }).collect()
+            };
+
+            // Process with inband DTMF detector
+            let mut detector = session.inband_detector().lock().await;
+            match detector.process_samples(&pcm_samples) {
+                Ok(events) => {
+                    for event in events {
+                        tracing::info!(
+                            "Inband DTMF detected for session {}: {} ({:?})",
+                            call_id.0,
+                            event.digit,
+                            event.event_type
+                        );
+
+                        // Publish event to EventBus
+                        if let Some(bus) = session.event_bus() {
+                            bus.publish(event.to_forge_event(call_id.clone()));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::trace!(
+                        "Inband DTMF processing for session {}: {}",
+                        call_id.0,
+                        e
+                    );
+                }
+            }
+            // Note: Continue with normal forwarding (inband detection is passive)
+        }
+
         // Determine which participant sent this packet
         let (sender, receiver) = {
             let a = participant_a.read().await;

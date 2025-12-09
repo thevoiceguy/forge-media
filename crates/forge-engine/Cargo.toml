@@ -10,6 +10,7 @@ license.workspace = true
 forge-core = { path = "../forge-core" }
 forge-rtp = { path = "../forge-rtp" }
 forge-dtmf = { path = "../forge-dtmf" }
+forge-codecs = { path = "../forge-codecs" }
 
 # XDP support (Linux only, optional)
 [target.'cfg(target_os = "linux")'.dependencies]

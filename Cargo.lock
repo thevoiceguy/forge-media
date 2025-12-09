@@ -861,6 +861,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "forge-codecs",
  "forge-core",
  "forge-dtmf",
  "forge-kernel",

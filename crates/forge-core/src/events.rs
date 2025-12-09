@@ -11,6 +11,30 @@ use tokio::sync::broadcast;
 /// Default event channel capacity
 pub const DEFAULT_EVENT_CAPACITY: usize = 4096;
 
+/// DTMF detection method
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DtmfDetectionMethod {
+    /// RFC 2833 (telephone-event) RTP payload
+    Rfc2833,
+    /// Inband audio frequency detection
+    Inband,
+    /// SIP INFO message
+    SipInfo,
+}
+
+/// DTMF event type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DtmfEventKind {
+    /// Digit press started
+    Start,
+    /// Digit press continues
+    Continue,
+    /// Digit press ended
+    End,
+}
+
 /// All possible events that can occur in the Forge engine
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -111,6 +135,9 @@ pub enum ForgeEvent {
     DtmfDigitDetected {
         call_id: CallId,
         digit: char,
+        duration_ms: Option<u32>,
+        method: DtmfDetectionMethod,
+        event_type: DtmfEventKind,
         timestamp: DateTime<Utc>,
     },
 

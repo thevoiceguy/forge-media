@@ -220,6 +220,26 @@ impl DtmfEvent {
             timestamp: Some(timestamp),
         }
     }
+
+    /// Convert to forge-core ForgeEvent
+    pub fn to_forge_event(&self, call_id: forge_core::CallId) -> forge_core::ForgeEvent {
+        forge_core::ForgeEvent::DtmfDigitDetected {
+            call_id,
+            digit: format!("{}", self.digit).chars().next().unwrap(),
+            duration_ms: self.duration_ms,
+            method: match self.method {
+                DtmfMethod::Rfc2833 => forge_core::DtmfDetectionMethod::Rfc2833,
+                DtmfMethod::Inband => forge_core::DtmfDetectionMethod::Inband,
+                DtmfMethod::SipInfo => forge_core::DtmfDetectionMethod::SipInfo,
+            },
+            event_type: match self.event_type {
+                DtmfEventType::Start => forge_core::DtmfEventKind::Start,
+                DtmfEventType::Continue => forge_core::DtmfEventKind::Continue,
+                DtmfEventType::End => forge_core::DtmfEventKind::End,
+            },
+            timestamp: chrono::Utc::now(),
+        }
+    }
 }
 
 /// Unified DTMF detector interface

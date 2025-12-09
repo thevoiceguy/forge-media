@@ -17,6 +17,7 @@ opus = ["audiopus", "ogg"]
 [dependencies]
 forge-core = { path = "../forge-core" }
 forge-rtp = { path = "../forge-rtp" }
+forge-resampler = { path = "../forge-resampler" }
 
 # Async runtime
 tokio = { workspace = true, features = ["fs", "io-util"] }

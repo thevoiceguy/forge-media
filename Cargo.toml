@@ -23,6 +23,7 @@ members = [
     "bins/forge-sip-server",
     "crates/forge-media-processor",
     "crates/forge-codecs",
+    "crates/forge-resampler",
 ]
 
 [workspace.package]

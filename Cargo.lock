@@ -936,6 +936,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "forge-core",
+ "forge-resampler",
  "forge-rtp",
  "hound",
  "lazy_static",
@@ -958,6 +959,15 @@ dependencies = [
  "forge-core",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "forge-resampler"
+version = "0.1.0"
+dependencies = [
+ "rubato",
+ "thiserror 1.0.69",
  "tracing",
 ]
 

@@ -8,7 +8,7 @@
 //! averaging for downsampling, which provides reasonable quality
 //! for telephony applications.
 
-use crate::{MediaError, Result};
+use crate::{ResamplerError, Result};
 
 /// Audio resampler for sample rate conversion
 pub struct Resampler {
@@ -33,13 +33,13 @@ impl Resampler {
     /// * `channels` - Number of channels (1 or 2)
     pub fn new(src_rate: u32, dst_rate: u32, channels: u16) -> Result<Self> {
         if src_rate == 0 || dst_rate == 0 {
-            return Err(MediaError::InvalidFormat(
+            return Err(ResamplerError::InvalidFormat(
                 "Sample rates must be greater than 0".to_string(),
             ));
         }
 
         if channels != 1 && channels != 2 {
-            return Err(MediaError::InvalidFormat(
+            return Err(ResamplerError::InvalidFormat(
                 "Only mono (1) and stereo (2) channels are supported".to_string(),
             ));
         }
@@ -63,7 +63,7 @@ impl Resampler {
     pub fn resample(&mut self, input: &[i16]) -> Result<Vec<i16>> {
         // Validate input length
         if input.len() % self.channels as usize != 0 {
-            return Err(MediaError::InvalidFormat(
+            return Err(ResamplerError::InvalidFormat(
                 "Input length must be multiple of channel count".to_string(),
             ));
         }

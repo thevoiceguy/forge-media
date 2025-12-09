@@ -30,8 +30,8 @@
 //! ```
 
 use crate::codecs::{self, AudioCodec};
-use crate::resampler::Resampler;
 use crate::{AudioFormat, MediaError, Result};
+use forge_resampler::Resampler;
 
 /// Audio transcoder for format conversion
 ///

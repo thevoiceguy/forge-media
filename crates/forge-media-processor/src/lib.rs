@@ -10,7 +10,6 @@ pub mod codecs;
 pub mod conference;
 pub mod mixer;
 pub mod recorder;
-pub mod resampler;
 pub mod storage;
 pub mod transcoder;
 
@@ -42,6 +41,9 @@ pub enum MediaError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Resampler error: {0}")]
+    Resampler(#[from] forge_resampler::ResamplerError),
 }
 
 /// Result type for media operations

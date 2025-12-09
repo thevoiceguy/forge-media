@@ -130,17 +130,27 @@ impl ForwardingEngine {
             let mut detector = session.dtmf_detector().lock().await;
             match detector.process_with_timestamp(&packet.payload, packet.header.timestamp) {
                 Ok(events) => {
+                    // Check deduplication before publishing
+                    let mut dedup = session.dtmf_dedup().lock().await;
                     for event in events {
-                        tracing::info!(
-                            "DTMF detected for session {}: {} ({:?})",
-                            call_id.0,
-                            event.digit,
-                            event.event_type
-                        );
+                        if dedup.should_publish(&event) {
+                            tracing::info!(
+                                "RFC 2833 DTMF detected for session {}: {} ({:?})",
+                                call_id.0,
+                                event.digit,
+                                event.event_type
+                            );
 
-                        // Publish event to EventBus
-                        if let Some(bus) = session.event_bus() {
-                            bus.publish(event.to_forge_event(call_id.clone()));
+                            // Publish event to EventBus
+                            if let Some(bus) = session.event_bus() {
+                                bus.publish(event.to_forge_event(call_id.clone()));
+                            }
+                        } else {
+                            tracing::debug!(
+                                "RFC 2833 DTMF suppressed (duplicate) for session {}: {}",
+                                call_id.0,
+                                event.digit
+                            );
                         }
                     }
                 }
@@ -179,17 +189,27 @@ impl ForwardingEngine {
             let mut detector = session.inband_detector().lock().await;
             match detector.process_samples(&pcm_samples) {
                 Ok(events) => {
+                    // Check deduplication before publishing
+                    let mut dedup = session.dtmf_dedup().lock().await;
                     for event in events {
-                        tracing::info!(
-                            "Inband DTMF detected for session {}: {} ({:?})",
-                            call_id.0,
-                            event.digit,
-                            event.event_type
-                        );
+                        if dedup.should_publish(&event) {
+                            tracing::info!(
+                                "Inband DTMF detected for session {}: {} ({:?})",
+                                call_id.0,
+                                event.digit,
+                                event.event_type
+                            );
 
-                        // Publish event to EventBus
-                        if let Some(bus) = session.event_bus() {
-                            bus.publish(event.to_forge_event(call_id.clone()));
+                            // Publish event to EventBus
+                            if let Some(bus) = session.event_bus() {
+                                bus.publish(event.to_forge_event(call_id.clone()));
+                            }
+                        } else {
+                            tracing::debug!(
+                                "Inband DTMF suppressed (duplicate) for session {}: {}",
+                                call_id.0,
+                                event.digit
+                            );
                         }
                     }
                 }

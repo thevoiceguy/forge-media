@@ -19,10 +19,12 @@
 pub mod rfc2833;
 pub mod inband;
 pub mod detector;
+pub mod dedup;
 
 pub use rfc2833::{Rfc2833Event, Rfc2833Generator, Rfc2833Detector};
 pub use inband::{InbandDetector, GoertzelDetector};
 pub use detector::{DtmfDetector, DtmfEvent, DtmfDigit, DtmfEventType, DtmfMethod};
+pub use dedup::DtmfDeduplicator;
 
 use thiserror::Error;
 

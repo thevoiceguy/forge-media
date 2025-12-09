@@ -4,7 +4,9 @@
 
 [api]
 # HTTP API server bind address
-http_bind = "127.0.0.1:8080"
+# Use 0.0.0.0 to listen on all interfaces (accessible from network)
+# Use 127.0.0.1 for localhost only
+http_bind = "0.0.0.0:8080"
 
 # CORS configuration
 enable_cors = true

@@ -3,9 +3,9 @@
 //! Manages multi-party audio conferences with mixing and recording
 
 use crate::{
-    mixer::AudioMixer,
     AudioFormat, MediaError, Result,
 };
+use forge_mixer::AudioMixer;
 use forge_recorder::AudioRecorder;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -62,23 +62,23 @@ impl ConferenceRoom {
     pub fn add_participant<S: Into<String>>(&self, participant_id: S) -> Result<()> {
         let participant_id = participant_id.into();
         info!("Adding participant {} to room {}", participant_id, self.id);
-        self.mixer.add_participant(participant_id, None)
+        Ok(self.mixer.add_participant(participant_id, None)?)
     }
 
     /// Remove a participant from the room
     pub fn remove_participant(&self, participant_id: &str) -> Result<()> {
         info!("Removing participant {} from room {}", participant_id, self.id);
-        self.mixer.remove_participant(participant_id)
+        Ok(self.mixer.remove_participant(participant_id)?)
     }
 
     /// Write audio samples from a participant
     pub fn write_audio(&self, participant_id: &str, samples: &[i16]) -> Result<()> {
-        self.mixer.write_samples(participant_id, samples)
+        Ok(self.mixer.write_samples(participant_id, samples)?)
     }
 
     /// Write RTP payload from a participant
     pub fn write_rtp_payload(&self, participant_id: &str, payload: &Bytes) -> Result<()> {
-        self.mixer.write_rtp_payload(participant_id, payload)
+        Ok(self.mixer.write_rtp_payload(participant_id, payload)?)
     }
 
     /// Mix audio for all participants
@@ -101,7 +101,7 @@ impl ConferenceRoom {
 
     /// Mix audio for a specific participant (excluding their own audio)
     pub fn mix_for_participant(&self, participant_id: &str) -> Result<Option<Vec<i16>>> {
-        self.mixer.mix_excluding(participant_id)
+        Ok(self.mixer.mix_excluding(participant_id)?)
     }
 
     /// Start recording the conference
@@ -157,7 +157,7 @@ impl ConferenceRoom {
 
     /// Set gain for a specific participant
     pub fn set_participant_gain(&self, participant_id: &str, gain: f32) -> Result<()> {
-        self.mixer.set_gain(participant_id, gain)
+        Ok(self.mixer.set_gain(participant_id, gain)?)
     }
 
     /// Get the audio format
@@ -179,18 +179,18 @@ impl ConferenceRoom {
         info!("Starting recording for participant {} in room {} to {:?}",
               participant_id, self.id, path);
 
-        self.mixer.start_participant_recording(participant_id, path).await
+        Ok(self.mixer.start_participant_recording(participant_id, path).await?)
     }
 
     /// Stop recording for a specific participant
     pub fn stop_participant_recording(&self, participant_id: &str) -> Result<()> {
         info!("Stopping recording for participant {} in room {}", participant_id, self.id);
-        self.mixer.stop_participant_recording(participant_id)
+        Ok(self.mixer.stop_participant_recording(participant_id)?)
     }
 
     /// Check if a participant is currently recording
     pub fn is_participant_recording(&self, participant_id: &str) -> Result<bool> {
-        self.mixer.is_participant_recording(participant_id)
+        Ok(self.mixer.is_participant_recording(participant_id)?)
     }
 }
 

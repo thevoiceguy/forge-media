@@ -26,6 +26,7 @@ members = [
     "crates/forge-resampler",
     "crates/forge-storage",
     "crates/forge-recorder",
+    "crates/forge-mixer",
 ]
 
 [workspace.package]

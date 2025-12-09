@@ -937,6 +937,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "forge-core",
+ "forge-mixer",
  "forge-recorder",
  "forge-resampler",
  "forge-rtp",
@@ -951,6 +952,19 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "forge-mixer"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "dashmap",
+ "forge-core",
+ "forge-recorder",
+ "parking_lot",
+ "thiserror 1.0.69",
  "tracing",
 ]
 

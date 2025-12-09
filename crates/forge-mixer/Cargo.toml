@@ -1,0 +1,18 @@
+[package]
+name = "forge-mixer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+forge-recorder = { path = "../forge-recorder" }
+
+bytes = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

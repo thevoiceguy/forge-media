@@ -2,7 +2,7 @@
 //!
 //! Combines multiple audio streams into a single mixed output
 
-use crate::{AudioFormat, MediaError, Result};
+use crate::{AudioFormat, MixerError, Result};
 use forge_recorder::AudioRecorder;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -68,7 +68,7 @@ impl ParticipantBuffer {
             recorder.stop()?;
             Ok(())
         } else {
-            Err(MediaError::RecordingNotFound("No active recording for participant".to_string()))
+            Err(MixerError::RecordingNotFound("No active recording for participant".to_string()))
         }
     }
 
@@ -97,7 +97,7 @@ impl AudioMixer {
     /// * `frame_size` - Frame size in samples for mixing operations
     pub fn new(format: AudioFormat, frame_size: usize) -> Result<Self> {
         if frame_size == 0 {
-            return Err(MediaError::InvalidFormat("Frame size must be > 0".to_string()));
+            return Err(MixerError::InvalidFormat("Frame size must be > 0".to_string()));
         }
 
         info!("Creating audio mixer with format: {:?}, frame_size: {}", format, frame_size);
@@ -130,7 +130,7 @@ impl AudioMixer {
         info!("Removing participant {}", id);
 
         self.participants.remove(id)
-            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
         Ok(())
     }
 
@@ -141,7 +141,7 @@ impl AudioMixer {
     /// * `samples` - PCM audio samples (16-bit signed integers)
     pub fn write_samples(&self, id: &str, samples: &[i16]) -> Result<()> {
         let mut participant = self.participants.get_mut(id)
-            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         participant.push_samples(samples);
         debug!("Wrote {} samples for participant {}", samples.len(), id);
@@ -278,7 +278,7 @@ impl AudioMixer {
     /// Set gain for a specific participant
     pub fn set_gain(&self, id: &str, gain: f32) -> Result<()> {
         let mut participant = self.participants.get_mut(id)
-            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         participant.gain = gain.clamp(0.0, 1.0);
         debug!("Set gain for participant {} to {}", id, participant.gain);
@@ -306,7 +306,7 @@ impl AudioMixer {
     /// Clear all buffered audio for a participant
     pub fn clear_buffer(&self, id: &str) -> Result<()> {
         let mut participant = self.participants.get_mut(id)
-            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         participant.samples.clear();
         debug!("Cleared buffer for participant {}", id);
@@ -325,7 +325,7 @@ impl AudioMixer {
     /// * `path` - Output file path for the recording
     pub async fn start_participant_recording<P: AsRef<Path>>(&self, id: &str, path: P) -> Result<()> {
         let participant = self.participants.get(id)
-            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         info!("Starting recording for participant {} to {:?}", id, path.as_ref());
         participant.start_recording(path, *self.format.read()).await
@@ -334,7 +334,7 @@ impl AudioMixer {
     /// Stop recording for a specific participant
     pub fn stop_participant_recording(&self, id: &str) -> Result<()> {
         let participant = self.participants.get(id)
-            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         info!("Stopping recording for participant {}", id);
         participant.stop_recording()
@@ -343,7 +343,7 @@ impl AudioMixer {
     /// Check if a participant is currently recording
     pub fn is_participant_recording(&self, id: &str) -> Result<bool> {
         let participant = self.participants.get(id)
-            .ok_or_else(|| MediaError::Internal(format!("Participant {} not found", id)))?;
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         Ok(participant.is_recording())
     }

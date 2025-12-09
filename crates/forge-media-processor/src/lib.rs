@@ -8,7 +8,6 @@
 
 pub mod codecs;
 pub mod conference;
-pub mod mixer;
 pub mod transcoder;
 
 use thiserror::Error;
@@ -45,6 +44,9 @@ pub enum MediaError {
 
     #[error("Recorder error: {0}")]
     Recorder(#[from] forge_recorder::RecorderError),
+
+    #[error("Mixer error: {0}")]
+    Mixer(#[from] forge_mixer::MixerError),
 }
 
 /// Result type for media operations

@@ -803,6 +803,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-codecs"
+version = "0.1.0"
+dependencies = [
+ "audiopus",
+ "lazy_static",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "forge-conference"
 version = "0.1.0"
 dependencies = [

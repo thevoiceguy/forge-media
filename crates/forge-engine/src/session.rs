@@ -12,6 +12,30 @@ use tokio::task::JoinHandle;
 #[cfg(all(target_os = "linux", feature = "xdp"))]
 use forge_kernel::{XdpManager, ForwardKey, ForwardValue};
 
+/// DTMF detection configuration
+#[derive(Debug, Clone)]
+pub struct DtmfConfig {
+    /// Enable RFC 2833 (telephone-event) detection
+    pub enable_rfc2833: bool,
+    /// Enable inband (Goertzel) detection
+    pub enable_inband: bool,
+    /// Enable deduplication (recommended when multiple methods enabled)
+    pub enable_dedup: bool,
+    /// Opus payload type for inband detection (dynamic, typically 111)
+    pub opus_payload_type: u8,
+}
+
+impl Default for DtmfConfig {
+    fn default() -> Self {
+        Self {
+            enable_rfc2833: true,
+            enable_inband: true,
+            enable_dedup: true,
+            opus_payload_type: 111, // Common dynamic payload type for Opus
+        }
+    }
+}
+
 /// Configuration for a media session
 #[derive(Debug, Clone)]
 pub struct MediaSessionConfig {
@@ -19,6 +43,8 @@ pub struct MediaSessionConfig {
     pub socket_config: RtpSocketConfig,
     /// Session timeout (idle duration before auto-termination)
     pub session_timeout: Duration,
+    /// DTMF detection configuration
+    pub dtmf_config: DtmfConfig,
 }
 
 impl Default for MediaSessionConfig {
@@ -26,6 +52,7 @@ impl Default for MediaSessionConfig {
         Self {
             socket_config: RtpSocketConfig::default(),
             session_timeout: Duration::from_secs(300), // 5 minutes
+            dtmf_config: DtmfConfig::default(),
         }
     }
 }
@@ -107,6 +134,9 @@ pub struct MediaSession {
     inband_detector: Arc<Mutex<forge_dtmf::GoertzelDetector>>,
     /// DTMF event deduplicator
     dtmf_dedup: Arc<Mutex<forge_dtmf::DtmfDeduplicator>>,
+    /// Opus decoder for inband DTMF detection
+    #[cfg(feature = "opus")]
+    opus_decoder: Arc<Mutex<forge_codecs::opus::OpusCodec>>,
     /// Forwarding task handles
     forwarding_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Optional offer/answer SDP associated with the session
@@ -180,6 +210,18 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            #[cfg(feature = "opus")]
+            opus_decoder: Arc::new(Mutex::new({
+                let opus_config = forge_codecs::opus::OpusConfig {
+                    sample_rate: 48000,
+                    channels: 1,
+                    application: forge_codecs::opus::OpusApplication::Voip,
+                    bitrate: 24000,
+                    frame_duration_ms: 20,
+                };
+                forge_codecs::opus::OpusCodec::with_config(opus_config)
+                    .expect("Failed to create Opus decoder for DTMF detection")
+            })),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -259,6 +301,18 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            #[cfg(feature = "opus")]
+            opus_decoder: Arc::new(Mutex::new({
+                let opus_config = forge_codecs::opus::OpusConfig {
+                    sample_rate: 48000,
+                    channels: 1,
+                    application: forge_codecs::opus::OpusApplication::Voip,
+                    bitrate: 24000,
+                    frame_duration_ms: 20,
+                };
+                forge_codecs::opus::OpusCodec::with_config(opus_config)
+                    .expect("Failed to create Opus decoder for DTMF detection")
+            })),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -336,6 +390,17 @@ impl MediaSession {
     /// Get the DTMF deduplicator
     pub fn dtmf_dedup(&self) -> &Arc<Mutex<forge_dtmf::DtmfDeduplicator>> {
         &self.dtmf_dedup
+    }
+
+    /// Get the DTMF configuration
+    pub fn dtmf_config(&self) -> &DtmfConfig {
+        &self.config.dtmf_config
+    }
+
+    /// Get the Opus decoder for inband DTMF detection
+    #[cfg(feature = "opus")]
+    pub fn opus_decoder(&self) -> &Arc<Mutex<forge_codecs::opus::OpusCodec>> {
+        &self.opus_decoder
     }
 
     /// Activate XDP fast path for this session

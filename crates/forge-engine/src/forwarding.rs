@@ -119,7 +119,7 @@ impl ForwardingEngine {
         let call_id = session.call_id();
 
         // Check for RFC 2833 telephone-event packets (payload type 101)
-        if packet.header.payload_type() == 101 {
+        if packet.header.payload_type() == 101 && session.dtmf_config().enable_rfc2833 {
             tracing::debug!(
                 "Received RFC 2833 telephone-event packet for session {} from {}",
                 call_id.0,
@@ -174,26 +174,60 @@ impl ForwardingEngine {
             return;
         }
 
-        // Check for inband DTMF in G.711 audio (payload types 0=PCMU, 8=PCMA)
+        // Check for inband DTMF in audio codecs
         let payload_type = packet.header.payload_type();
-        if payload_type == 0 || payload_type == 8 {
-            // Decode G.711 to PCM samples for DTMF detection
+        let opus_pt = session.dtmf_config().opus_payload_type;
+
+        // G.711 (payload types 0=PCMU, 8=PCMA) or Opus (configurable, typically 111)
+        if ((payload_type == 0 || payload_type == 8) || payload_type == opus_pt)
+            && session.dtmf_config().enable_inband {
+            // Decode audio to PCM samples for DTMF detection
             let pcm_samples: Vec<i16> = if payload_type == 0 {
                 // PCMU (µ-law)
                 packet.payload.iter().map(|&byte| {
                     forge_codecs::g711::decode_ulaw(byte)
                 }).collect()
-            } else {
+            } else if payload_type == 8 {
                 // PCMA (A-law)
                 packet.payload.iter().map(|&byte| {
                     forge_codecs::g711::decode_alaw(byte)
                 }).collect()
+            } else if payload_type == opus_pt {
+                // Opus - decode using the Opus decoder
+                #[cfg(feature = "opus")]
+                {
+                    let mut decoder = session.opus_decoder().lock().await;
+                    match decoder.decode(&packet.payload) {
+                        Ok(samples) => samples,
+                        Err(e) => {
+                            tracing::trace!(
+                                "Opus decoding failed for session {}: {}",
+                                call_id.0,
+                                e
+                            );
+                            // Skip DTMF detection, continue with normal forwarding
+                            Vec::new()
+                        }
+                    }
+                }
+                #[cfg(not(feature = "opus"))]
+                {
+                    tracing::trace!(
+                        "Opus DTMF detection disabled: opus feature not enabled"
+                    );
+                    // Skip DTMF detection, continue with normal forwarding
+                    Vec::new()
+                }
+            } else {
+                // Unknown codec - skip DTMF detection
+                Vec::new()
             };
 
-            // Process with inband DTMF detector
-            counter!("forge_dtmf_inband_packets_processed_total", 1);
-            let mut detector = session.inband_detector().lock().await;
-            match detector.process_samples(&pcm_samples) {
+            // Process with inband DTMF detector (only if we have samples)
+            if !pcm_samples.is_empty() {
+                counter!("forge_dtmf_inband_packets_processed_total", 1);
+                let mut detector = session.inband_detector().lock().await;
+                match detector.process_samples(&pcm_samples) {
                 Ok(events) => {
                     // Check deduplication before publishing
                     let mut dedup = session.dtmf_dedup().lock().await;
@@ -231,6 +265,7 @@ impl ForwardingEngine {
                         e
                     );
                 }
+            }
             }
             // Note: Continue with normal forwarding (inband detection is passive)
         }

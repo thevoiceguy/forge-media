@@ -28,3 +28,4 @@ bytes = { workspace = true }
 [features]
 default = []
 xdp = ["forge-kernel"]
+opus = ["forge-codecs/opus"]

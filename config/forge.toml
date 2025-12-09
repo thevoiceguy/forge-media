@@ -31,8 +31,8 @@ session_timeout_secs = 300
 # TOS/DSCP value for QoS (0xB8 = EF - Expedited Forwarding for voice)
 tos = 184
 
-# IP version: "ipv4_only", "ipv6_only", or "dual_stack"
-ip_version = "dual_stack"
+# IP version: "V4Only", "V6Only", or "DualStack"
+ip_version = "DualStack"
 
 [engine.xdp]
 # Enable XDP/eBPF for sub-10µs RTP packet forwarding

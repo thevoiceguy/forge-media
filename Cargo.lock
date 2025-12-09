@@ -1017,6 +1017,7 @@ dependencies = [
  "openssl",
  "sha1",
  "sha2",
+ "socket2 0.5.10",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

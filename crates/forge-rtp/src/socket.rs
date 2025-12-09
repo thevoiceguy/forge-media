@@ -17,6 +17,16 @@ pub struct RtpSocketConfig {
     pub recv_buffer_size: usize,
     /// Buffer size for send operations
     pub send_buffer_size: usize,
+    /// TOS/DSCP value for IP packets (0-255)
+    /// Common values:
+    /// - 0xB8 (184) = EF (Expedited Forwarding) - for voice
+    /// - 0xA0 (160) = AF41 - for video
+    /// - 0x00 (0) = Best effort (default)
+    pub tos: u8,
+    /// Enable SO_REUSEADDR for the sockets
+    pub reuse_address: bool,
+    /// Enable SO_REUSEPORT for the sockets (Linux/BSD)
+    pub reuse_port: bool,
 }
 
 impl Default for RtpSocketConfig {
@@ -25,6 +35,9 @@ impl Default for RtpSocketConfig {
             bind_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             recv_buffer_size: 1500,
             send_buffer_size: 1500,
+            tos: 0xB8, // EF (Expedited Forwarding) for voice by default
+            reuse_address: true,
+            reuse_port: false,
         }
     }
 }
@@ -53,22 +66,22 @@ pub struct RtpSocketPair {
 }
 
 impl RtpSocketPair {
-    /// Create a new RTP socket pair
+    /// Create a new RTP socket pair with QoS settings
     pub async fn new(ports: PortPair, config: RtpSocketConfig) -> Result<Self> {
-        // Bind RTP socket
+        // Create RTP socket with QoS
         let rtp_addr = SocketAddr::new(config.bind_addr, ports.rtp_port);
-        let rtp_socket = UdpSocket::bind(rtp_addr)
-            .await
-            .map_err(|e| ForgeError::Network(format!("Failed to bind RTP socket: {}", e)))?;
+        let rtp_socket = Self::create_qos_socket(rtp_addr, &config)?;
 
-        // Bind RTCP socket
+        // Create RTCP socket with QoS
         let rtcp_addr = SocketAddr::new(config.bind_addr, ports.rtcp_port);
-        let rtcp_socket = UdpSocket::bind(rtcp_addr)
-            .await
-            .map_err(|e| ForgeError::Network(format!("Failed to bind RTCP socket: {}", e)))?;
+        let rtcp_socket = Self::create_qos_socket(rtcp_addr, &config)?;
 
-        // Note: Socket buffer sizes can be set via setsockopt if needed
-        // For now, we rely on system defaults which are usually adequate
+        tracing::debug!(
+            "Created RTP socket pair with TOS=0x{:02X} on ports {}/{}",
+            config.tos,
+            ports.rtp_port,
+            ports.rtcp_port
+        );
 
         Ok(Self {
             rtp_socket: Arc::new(rtp_socket),
@@ -77,6 +90,75 @@ impl RtpSocketPair {
             remote_endpoint: Arc::new(RwLock::new(None)),
             config,
         })
+    }
+
+    /// Create a UDP socket with QoS settings
+    fn create_qos_socket(addr: SocketAddr, config: &RtpSocketConfig) -> Result<UdpSocket> {
+        use socket2::{Domain, Protocol, Socket, Type};
+        use std::net::SocketAddr as StdSocketAddr;
+
+        // Determine domain based on address type
+        let domain = match addr {
+            SocketAddr::V4(_) => Domain::IPV4,
+            SocketAddr::V6(_) => Domain::IPV6,
+        };
+
+        // Create socket using socket2
+        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))
+            .map_err(|e| ForgeError::Network(format!("Failed to create socket: {}", e)))?;
+
+        // Set SO_REUSEADDR
+        if config.reuse_address {
+            socket
+                .set_reuse_address(true)
+                .map_err(|e| ForgeError::Network(format!("Failed to set SO_REUSEADDR: {}", e)))?;
+        }
+
+        // Set SO_REUSEPORT (Linux/BSD only)
+        #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+        if config.reuse_port {
+            socket
+                .set_reuse_port(true)
+                .map_err(|e| ForgeError::Network(format!("Failed to set SO_REUSEPORT: {}", e)))?;
+        }
+
+        // Set TOS/DSCP for QoS
+        if config.tos > 0 {
+            match addr {
+                SocketAddr::V4(_) => {
+                    // IPv4: Set IP_TOS
+                    socket
+                        .set_tos(config.tos as u32)
+                        .map_err(|e| ForgeError::Network(format!("Failed to set IP_TOS: {}", e)))?;
+                    tracing::debug!("Set IPv4 TOS to 0x{:02X} (DSCP=0x{:02X})", config.tos, config.tos >> 2);
+                }
+                SocketAddr::V6(_) => {
+                    // IPv6: Set IPV6_TCLASS
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        socket
+                            .set_unicast_hops_v6(config.tos as u32)
+                            .map_err(|e| ForgeError::Network(format!("Failed to set IPV6_TCLASS: {}", e)))?;
+                        tracing::debug!("Set IPv6 Traffic Class to 0x{:02X}", config.tos);
+                    }
+                }
+            }
+        }
+
+        // Set non-blocking mode
+        socket
+            .set_nonblocking(true)
+            .map_err(|e| ForgeError::Network(format!("Failed to set non-blocking: {}", e)))?;
+
+        // Bind the socket
+        socket
+            .bind(&StdSocketAddr::from(addr).into())
+            .map_err(|e| ForgeError::Network(format!("Failed to bind socket to {}: {}", addr, e)))?;
+
+        // Convert to tokio UdpSocket
+        let std_socket: std::net::UdpSocket = socket.into();
+        UdpSocket::from_std(std_socket)
+            .map_err(|e| ForgeError::Network(format!("Failed to convert to tokio socket: {}", e)))
     }
 
     /// Get the local port pair

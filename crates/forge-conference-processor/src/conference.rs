@@ -3,7 +3,7 @@
 //! Manages multi-party audio conferences with mixing and recording
 
 use crate::{
-    AudioFormat, MediaError, Result,
+    AudioFormat, ConferenceError, Result,
 };
 use forge_mixer::AudioMixer;
 use forge_recorder::AudioRecorder;
@@ -132,7 +132,7 @@ impl ConferenceRoom {
             recorder.stop()?;
             Ok(())
         } else {
-            Err(MediaError::RecordingNotFound(format!("No active recording for room {}", self.id)))
+            Err(ConferenceError::RecordingNotFound(format!("No active recording for room {}", self.id)))
         }
     }
 
@@ -233,7 +233,7 @@ impl ConferenceBridge {
         let room_id = room_id.into();
 
         if self.rooms.contains_key(&room_id) {
-            return Err(MediaError::Internal(format!("Room {} already exists", room_id)));
+            return Err(ConferenceError::Internal(format!("Room {} already exists", room_id)));
         }
 
         let format = format.unwrap_or(self.default_format);
@@ -250,7 +250,7 @@ impl ConferenceBridge {
         self.rooms
             .get(room_id)
             .map(|r| r.value().clone())
-            .ok_or_else(|| MediaError::ConferenceNotFound(format!("Room {} not found", room_id)))
+            .ok_or_else(|| ConferenceError::ConferenceNotFound(format!("Room {} not found", room_id)))
     }
 
     /// Delete a conference room
@@ -258,7 +258,7 @@ impl ConferenceBridge {
         info!("Deleting conference room: {}", room_id);
 
         let (_, room) = self.rooms.remove(room_id)
-            .ok_or_else(|| MediaError::ConferenceNotFound(format!("Room {} not found", room_id)))?;
+            .ok_or_else(|| ConferenceError::ConferenceNotFound(format!("Room {} not found", room_id)))?;
 
         // Stop recording if active
         if room.is_recording() {

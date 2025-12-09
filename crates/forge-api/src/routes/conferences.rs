@@ -460,7 +460,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn create_test_state() -> Arc<AppState> {
-        let bridge = Arc::new(forge_media_processor::conference::ConferenceBridge::new(
+        let bridge = Arc::new(forge_conference_processor::ConferenceBridge::new(
             forge_media_processor::AudioFormat::pcm_mono(), 480
         ).unwrap());
         let session_manager = forge_engine::SessionManager::new(

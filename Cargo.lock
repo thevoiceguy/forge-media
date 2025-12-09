@@ -785,6 +785,7 @@ dependencies = [
  "axum",
  "axum-server",
  "chrono",
+ "forge-conference-processor",
  "forge-core",
  "forge-engine",
  "forge-media-processor",
@@ -820,6 +821,20 @@ dependencies = [
  "forge-core",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "forge-conference-processor"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "dashmap",
+ "forge-core",
+ "forge-mixer",
+ "forge-recorder",
+ "parking_lot",
+ "thiserror 1.0.69",
  "tracing",
 ]
 

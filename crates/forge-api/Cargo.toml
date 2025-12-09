@@ -12,6 +12,7 @@ forge-engine = { path = "../forge-engine" }
 forge-rtp = { path = "../forge-rtp" }
 forge-media-processor = { path = "../forge-media-processor" }
 forge-storage = { path = "../forge-storage" }
+forge-conference-processor = { path = "../forge-conference-processor" }
 
 # Async runtime
 tokio = { workspace = true }

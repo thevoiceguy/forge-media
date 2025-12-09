@@ -65,7 +65,7 @@ pub struct SessionListResponse {
 pub struct AppState {
     pub session_manager: Arc<SessionManager>,
     pub metrics_handle: Arc<super::prometheus::MetricsHandle>,
-    pub conference_bridge: Arc<forge_media_processor::conference::ConferenceBridge>,
+    pub conference_bridge: Arc<forge_conference_processor::ConferenceBridge>,
     pub storage_manager: Arc<tokio::sync::Mutex<forge_storage::StorageManager>>,
     pub recording_base_dir: std::path::PathBuf,
 }
@@ -74,7 +74,7 @@ impl AppState {
     pub fn new(
         session_manager: Arc<SessionManager>,
         metrics_handle: Arc<super::prometheus::MetricsHandle>,
-        conference_bridge: Arc<forge_media_processor::conference::ConferenceBridge>,
+        conference_bridge: Arc<forge_conference_processor::ConferenceBridge>,
         recording_base_dir: std::path::PathBuf,
     ) -> Self {
         // Create default storage manager
@@ -344,7 +344,7 @@ mod tests {
         };
         let session_manager = SessionManager::new(session_manager_config, None);
         let metrics_handle = Arc::new(crate::routes::prometheus::MetricsHandle::init());
-        let conference_bridge = Arc::new(forge_media_processor::conference::ConferenceBridge::default());
+        let conference_bridge = Arc::new(forge_conference_processor::ConferenceBridge::default());
         Arc::new(AppState::new(
             session_manager,
             metrics_handle,

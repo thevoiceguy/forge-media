@@ -866,6 +866,7 @@ dependencies = [
  "forge-dtmf",
  "forge-kernel",
  "forge-rtp",
+ "forge-transcoder",
  "metrics 0.21.1",
  "parking_lot",
  "thiserror 1.0.69",

@@ -344,6 +344,13 @@ impl ForwardingEngine {
         // Update session activity timestamp
         session.update_activity().await;
 
+        // Transcode if needed (different codecs between participants)
+        let packet = if session.transcoding_config().enable_transcoding {
+            Self::handle_transcoding(session, &sender, &receiver, participant_a, participant_b, packet).await
+        } else {
+            packet
+        };
+
         // Forward packet to receiver
         let receiver_addr = {
             let (a, b) = (participant_a.read().await, participant_b.read().await);
@@ -377,6 +384,100 @@ impl ForwardingEngine {
                 call_id.0
             );
         }
+    }
+
+    /// Handle transcoding if participants use different codecs
+    async fn handle_transcoding(
+        session: &Arc<MediaSession>,
+        sender: &Side,
+        _receiver: &Side,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        mut packet: forge_rtp::RtpPacket,
+    ) -> forge_rtp::RtpPacket {
+        // Get payload types for both participants
+        let (src_pt, dst_pt) = {
+            let a = participant_a.read().await;
+            let b = participant_b.read().await;
+            match sender {
+                Side::A => (a.payload_type, b.payload_type),
+                Side::B => (b.payload_type, a.payload_type),
+            }
+        };
+
+        // Check if transcoding is needed
+        if src_pt == dst_pt {
+            return packet; // Same codec, no transcoding needed
+        }
+
+        // Convert payload types to codec types
+        let pt_map = session.transcoding_config().payload_type_map;
+        let src_codec = match pt_map.to_codec(src_pt) {
+            Some(codec) => codec,
+            None => {
+                tracing::trace!("Unknown source codec for PT {}, skipping transcoding", src_pt);
+                return packet;
+            }
+        };
+
+        let dst_codec = match pt_map.to_codec(dst_pt) {
+            Some(codec) => codec,
+            None => {
+                tracing::trace!("Unknown destination codec for PT {}, skipping transcoding", dst_pt);
+                return packet;
+            }
+        };
+
+        // Initialize transcoder for this direction if needed
+        let transcoder_result = match sender {
+            Side::A => session.ensure_transcoder_a_to_b(src_codec, dst_codec).await,
+            Side::B => session.ensure_transcoder_b_to_a(src_codec, dst_codec).await,
+        };
+
+        if let Err(e) = transcoder_result {
+            tracing::error!("Failed to initialize transcoder: {}", e);
+            return packet;
+        }
+
+        // Get the appropriate transcoder
+        let transcoder = match sender {
+            Side::A => session.transcoder_a_to_b(),
+            Side::B => session.transcoder_b_to_a(),
+        };
+
+        // Transcode the payload
+        let mut transcoder_guard = transcoder.lock().await;
+        if let Some(ref mut tc) = *transcoder_guard {
+            match tc.transcode_rtp_payload(&packet.payload) {
+                Ok(transcoded_payloads) => {
+                    if let Some(transcoded_payload) = transcoded_payloads.first() {
+                        // Update packet with transcoded payload
+                        packet.payload = transcoded_payload.clone().into();
+
+                        // Update payload type in header (preserve marker bit)
+                        packet.header.marker_payload_type = (packet.header.marker_payload_type & 0x80) | dst_pt;
+
+                        // Record transcoding metrics
+                        counter!("forge_transcoding_packets_total", 1);
+                        counter!("forge_transcoding_bytes_total", transcoded_payload.len() as u64);
+
+                        tracing::trace!(
+                            "Transcoded packet: {} → {} ({} bytes → {} bytes)",
+                            codec_name(src_codec),
+                            codec_name(dst_codec),
+                            packet.payload.len(),
+                            transcoded_payload.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Transcoding failed: {}, forwarding original packet", e);
+                    counter!("forge_transcoding_errors_total", 1);
+                }
+            }
+        }
+
+        packet
     }
 
     /// Handle an RTCP packet
@@ -559,6 +660,16 @@ impl ForwardingEngine {
 enum Side {
     A,
     B,
+}
+
+/// Helper function to get codec name for logging
+fn codec_name(codec: forge_codecs::AudioCodecType) -> &'static str {
+    match codec {
+        forge_codecs::AudioCodecType::PCMU => "G.711 µ-law",
+        forge_codecs::AudioCodecType::PCMA => "G.711 A-law",
+        forge_codecs::AudioCodecType::Opus => "Opus",
+        forge_codecs::AudioCodecType::PCM => "PCM",
+    }
 }
 
 #[cfg(test)]

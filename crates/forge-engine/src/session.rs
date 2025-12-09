@@ -25,6 +25,15 @@ pub struct DtmfConfig {
     pub opus_payload_type: u8,
 }
 
+/// Transcoding configuration
+#[derive(Debug, Clone)]
+pub struct TranscodingConfig {
+    /// Enable automatic transcoding when participants use different codecs
+    pub enable_transcoding: bool,
+    /// RTP payload type mapping for codec detection
+    pub payload_type_map: forge_transcoder::rtp::PayloadTypeMap,
+}
+
 impl Default for DtmfConfig {
     fn default() -> Self {
         Self {
@@ -32,6 +41,15 @@ impl Default for DtmfConfig {
             enable_inband: true,
             enable_dedup: true,
             opus_payload_type: 111, // Common dynamic payload type for Opus
+        }
+    }
+}
+
+impl Default for TranscodingConfig {
+    fn default() -> Self {
+        Self {
+            enable_transcoding: true,
+            payload_type_map: forge_transcoder::rtp::PayloadTypeMap::default(),
         }
     }
 }
@@ -45,6 +63,8 @@ pub struct MediaSessionConfig {
     pub session_timeout: Duration,
     /// DTMF detection configuration
     pub dtmf_config: DtmfConfig,
+    /// Transcoding configuration
+    pub transcoding_config: TranscodingConfig,
 }
 
 impl Default for MediaSessionConfig {
@@ -53,6 +73,7 @@ impl Default for MediaSessionConfig {
             socket_config: RtpSocketConfig::default(),
             session_timeout: Duration::from_secs(300), // 5 minutes
             dtmf_config: DtmfConfig::default(),
+            transcoding_config: TranscodingConfig::default(),
         }
     }
 }
@@ -137,6 +158,10 @@ pub struct MediaSession {
     /// Opus decoder for inband DTMF detection
     #[cfg(feature = "opus")]
     opus_decoder: Arc<Mutex<forge_codecs::opus::OpusCodec>>,
+    /// Transcoder for A → B direction (optional, created when needed)
+    transcoder_a_to_b: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
+    /// Transcoder for B → A direction (optional, created when needed)
+    transcoder_b_to_a: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
     /// Forwarding task handles
     forwarding_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Optional offer/answer SDP associated with the session
@@ -222,6 +247,8 @@ impl MediaSession {
                 forge_codecs::opus::OpusCodec::with_config(opus_config)
                     .expect("Failed to create Opus decoder for DTMF detection")
             })),
+            transcoder_a_to_b: Arc::new(Mutex::new(None)),
+            transcoder_b_to_a: Arc::new(Mutex::new(None)),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -313,6 +340,8 @@ impl MediaSession {
                 forge_codecs::opus::OpusCodec::with_config(opus_config)
                     .expect("Failed to create Opus decoder for DTMF detection")
             })),
+            transcoder_a_to_b: Arc::new(Mutex::new(None)),
+            transcoder_b_to_a: Arc::new(Mutex::new(None)),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -401,6 +430,87 @@ impl MediaSession {
     #[cfg(feature = "opus")]
     pub fn opus_decoder(&self) -> &Arc<Mutex<forge_codecs::opus::OpusCodec>> {
         &self.opus_decoder
+    }
+
+    /// Get the transcoding configuration
+    pub fn transcoding_config(&self) -> &TranscodingConfig {
+        &self.config.transcoding_config
+    }
+
+    /// Get transcoder for A → B direction
+    pub fn transcoder_a_to_b(&self) -> &Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>> {
+        &self.transcoder_a_to_b
+    }
+
+    /// Get transcoder for B → A direction
+    pub fn transcoder_b_to_a(&self) -> &Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>> {
+        &self.transcoder_b_to_a
+    }
+
+    /// Initialize transcoder for A → B if needed
+    pub async fn ensure_transcoder_a_to_b(
+        &self,
+        src_codec: forge_codecs::AudioCodecType,
+        dst_codec: forge_codecs::AudioCodecType,
+    ) -> Result<()> {
+        if !self.config.transcoding_config.enable_transcoding {
+            return Ok(());
+        }
+
+        if src_codec == dst_codec {
+            return Ok(()); // No transcoding needed
+        }
+
+        let mut transcoder = self.transcoder_a_to_b.lock().await;
+        if transcoder.is_none() {
+            tracing::info!(
+                "Initializing transcoder for session {} A→B: {} → {}",
+                self.call_id.0,
+                codec_name(src_codec),
+                codec_name(dst_codec)
+            );
+
+            let pt_map = self.config.transcoding_config.payload_type_map;
+            let new_transcoder = forge_transcoder::RtpTranscoder::new(src_codec, dst_codec, pt_map)
+                .map_err(|e| ForgeError::Internal(format!("Failed to create transcoder: {}", e)))?;
+
+            *transcoder = Some(new_transcoder);
+        }
+
+        Ok(())
+    }
+
+    /// Initialize transcoder for B → A if needed
+    pub async fn ensure_transcoder_b_to_a(
+        &self,
+        src_codec: forge_codecs::AudioCodecType,
+        dst_codec: forge_codecs::AudioCodecType,
+    ) -> Result<()> {
+        if !self.config.transcoding_config.enable_transcoding {
+            return Ok(());
+        }
+
+        if src_codec == dst_codec {
+            return Ok(()); // No transcoding needed
+        }
+
+        let mut transcoder = self.transcoder_b_to_a.lock().await;
+        if transcoder.is_none() {
+            tracing::info!(
+                "Initializing transcoder for session {} B→A: {} → {}",
+                self.call_id.0,
+                codec_name(src_codec),
+                codec_name(dst_codec)
+            );
+
+            let pt_map = self.config.transcoding_config.payload_type_map;
+            let new_transcoder = forge_transcoder::RtpTranscoder::new(src_codec, dst_codec, pt_map)
+                .map_err(|e| ForgeError::Internal(format!("Failed to create transcoder: {}", e)))?;
+
+            *transcoder = Some(new_transcoder);
+        }
+
+        Ok(())
     }
 
     /// Activate XDP fast path for this session
@@ -750,6 +860,16 @@ impl Drop for MediaSession {
                 }
             });
         }
+    }
+}
+
+/// Helper function to get codec name for logging
+fn codec_name(codec: forge_codecs::AudioCodecType) -> &'static str {
+    match codec {
+        forge_codecs::AudioCodecType::PCMU => "G.711 µ-law",
+        forge_codecs::AudioCodecType::PCMA => "G.711 A-law",
+        forge_codecs::AudioCodecType::Opus => "Opus",
+        forge_codecs::AudioCodecType::PCM => "PCM",
     }
 }
 

@@ -2,13 +2,11 @@
 //!
 //! Manages multi-party audio conferences with mixing and recording
 
-use crate::{
-    AudioFormat, ConferenceError, Result,
-};
-use forge_mixer::AudioMixer;
-use forge_recorder::AudioRecorder;
+use crate::{AudioFormat, ConferenceError, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
+use forge_mixer::AudioMixer;
+use forge_recorder::{AudioRecorder, PlaybackSource};
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
@@ -67,7 +65,10 @@ impl ConferenceRoom {
 
     /// Remove a participant from the room
     pub fn remove_participant(&self, participant_id: &str) -> Result<()> {
-        info!("Removing participant {} from room {}", participant_id, self.id);
+        info!(
+            "Removing participant {} from room {}",
+            participant_id, self.id
+        );
         Ok(self.mixer.remove_participant(participant_id)?)
     }
 
@@ -109,12 +110,18 @@ impl ConferenceRoom {
     /// # Arguments
     /// * `output_path` - Path where the recording will be saved
     /// * `format` - Optional format override (uses room's format if None)
-    pub async fn start_recording<P: AsRef<Path>>(&self, output_path: P, format: Option<AudioFormat>) -> Result<()> {
+    pub async fn start_recording<P: AsRef<Path>>(
+        &self,
+        output_path: P,
+        format: Option<AudioFormat>,
+    ) -> Result<()> {
         let path = output_path.as_ref();
         let recording_format = format.unwrap_or(self.format);
 
-        info!("Starting recording for room {} to {:?} with codec {:?}",
-              self.id, path, recording_format.codec);
+        info!(
+            "Starting recording for room {} to {:?} with codec {:?}",
+            self.id, path, recording_format.codec
+        );
 
         let recorder = AudioRecorder::new(path, recording_format).await?;
         recorder.start()?;
@@ -132,7 +139,10 @@ impl ConferenceRoom {
             recorder.stop()?;
             Ok(())
         } else {
-            Err(ConferenceError::RecordingNotFound(format!("No active recording for room {}", self.id)))
+            Err(ConferenceError::RecordingNotFound(format!(
+                "No active recording for room {}",
+                self.id
+            )))
         }
     }
 
@@ -176,21 +186,61 @@ impl ConferenceRoom {
         output_path: P,
     ) -> Result<()> {
         let path = output_path.as_ref();
-        info!("Starting recording for participant {} in room {} to {:?}",
-              participant_id, self.id, path);
+        info!(
+            "Starting recording for participant {} in room {} to {:?}",
+            participant_id, self.id, path
+        );
 
-        Ok(self.mixer.start_participant_recording(participant_id, path).await?)
+        Ok(self
+            .mixer
+            .start_participant_recording(participant_id, path)
+            .await?)
     }
 
     /// Stop recording for a specific participant
     pub fn stop_participant_recording(&self, participant_id: &str) -> Result<()> {
-        info!("Stopping recording for participant {} in room {}", participant_id, self.id);
+        info!(
+            "Stopping recording for participant {} in room {}",
+            participant_id, self.id
+        );
         Ok(self.mixer.stop_participant_recording(participant_id)?)
     }
 
     /// Check if a participant is currently recording
     pub fn is_participant_recording(&self, participant_id: &str) -> Result<bool> {
         Ok(self.mixer.is_participant_recording(participant_id)?)
+    }
+
+    /// Play an announcement/IVR prompt into the conference.
+    ///
+    /// This loads a local audio file and injects it as a temporary participant so it
+    /// is included in the mixed output.
+    pub async fn play_announcement<P: AsRef<Path>>(&self, audio_path: P) -> Result<()> {
+        const ANNOUNCER_ID: &str = "__forge_announcement__";
+
+        // Ensure announcer participant exists
+        let _ = self
+            .mixer
+            .add_participant(ANNOUNCER_ID.to_string(), Some(1.0));
+
+        let mut playback = PlaybackSource::open(audio_path)
+            .map_err(|e| ConferenceError::RecordingNotFound(format!("Playback failed: {}", e)))?;
+
+        while let Some(chunk) = playback.next_samples(self._frame_size).map_err(|e| {
+            ConferenceError::RecordingNotFound(format!("Playback read failed: {}", e))
+        })? {
+            self.mixer
+                .write_samples(ANNOUNCER_ID, &chunk)
+                .map_err(|e| {
+                    ConferenceError::RecordingNotFound(format!("Playback injection failed: {}", e))
+                })?;
+            // Trigger mixing so recorder (if active) captures the injected audio
+            let _ = self.mix();
+        }
+
+        // Cleanup announcer track
+        let _ = self.mixer.remove_participant(ANNOUNCER_ID);
+        Ok(())
     }
 }
 
@@ -233,11 +283,18 @@ impl ConferenceBridge {
         let room_id = room_id.into();
 
         if self.rooms.contains_key(&room_id) {
-            return Err(ConferenceError::Internal(format!("Room {} already exists", room_id)));
+            return Err(ConferenceError::Internal(format!(
+                "Room {} already exists",
+                room_id
+            )));
         }
 
         let format = format.unwrap_or(self.default_format);
-        let room = Arc::new(ConferenceRoom::new(&room_id, format, self.default_frame_size)?);
+        let room = Arc::new(ConferenceRoom::new(
+            &room_id,
+            format,
+            self.default_frame_size,
+        )?);
 
         self.rooms.insert(room_id.clone(), room.clone());
         info!("Created conference room: {}", room_id);
@@ -250,15 +307,18 @@ impl ConferenceBridge {
         self.rooms
             .get(room_id)
             .map(|r| r.value().clone())
-            .ok_or_else(|| ConferenceError::ConferenceNotFound(format!("Room {} not found", room_id)))
+            .ok_or_else(|| {
+                ConferenceError::ConferenceNotFound(format!("Room {} not found", room_id))
+            })
     }
 
     /// Delete a conference room
     pub fn delete_room(&self, room_id: &str) -> Result<()> {
         info!("Deleting conference room: {}", room_id);
 
-        let (_, room) = self.rooms.remove(room_id)
-            .ok_or_else(|| ConferenceError::ConferenceNotFound(format!("Room {} not found", room_id)))?;
+        let (_, room) = self.rooms.remove(room_id).ok_or_else(|| {
+            ConferenceError::ConferenceNotFound(format!("Room {} not found", room_id))
+        })?;
 
         // Stop recording if active
         if room.is_recording() {
@@ -298,28 +358,21 @@ impl ConferenceBridge {
     }
 
     /// Add a participant to a room
-    pub fn add_participant_to_room(
-        &self,
-        room_id: &str,
-        participant_id: &str,
-    ) -> Result<()> {
+    pub fn add_participant_to_room(&self, room_id: &str, participant_id: &str) -> Result<()> {
         let room = self.get_room(room_id)?;
         room.add_participant(participant_id)
     }
 
     /// Remove a participant from a room
-    pub fn remove_participant_from_room(
-        &self,
-        room_id: &str,
-        participant_id: &str,
-    ) -> Result<()> {
+    pub fn remove_participant_from_room(&self, room_id: &str, participant_id: &str) -> Result<()> {
         let room = self.get_room(room_id)?;
         room.remove_participant(participant_id)
     }
 
     /// Get total number of participants across all rooms
     pub fn total_participants(&self) -> usize {
-        self.rooms.iter()
+        self.rooms
+            .iter()
             .map(|r| r.value().participant_count())
             .sum()
     }

@@ -318,12 +318,24 @@ impl G729Codec {
         (40, 0) // delay, gain
     }
 
-    fn codebook_search(&mut self, _residual: &[i16], _delay: i16, _gain: i16) -> (Vec<u8>, Vec<i16>) {
+    fn codebook_search(
+        &mut self,
+        _residual: &[i16],
+        _delay: i16,
+        _gain: i16,
+    ) -> (Vec<u8>, Vec<i16>) {
         // TODO: Algebraic codebook search
         (vec![0; 4], vec![0; 2]) // indices, gains
     }
 
-    fn pack_bitstream(&self, _lsf: Vec<u8>, _delay: i16, _gain: i16, _indices: Vec<u8>, _gains: Vec<i16>) -> Vec<u8> {
+    fn pack_bitstream(
+        &self,
+        _lsf: Vec<u8>,
+        _delay: i16,
+        _gain: i16,
+        _indices: Vec<u8>,
+        _gains: Vec<i16>,
+    ) -> Vec<u8> {
         // TODO: Pack parameters into 80-bit frame
         vec![0; ENCODED_FRAME_SIZE]
     }
@@ -344,7 +356,13 @@ impl G729Codec {
         vec![0.0; 10]
     }
 
-    fn reconstruct_excitation(&mut self, _delay: i16, _gain: i16, _indices: &[u8], _gains: &[i16]) -> Vec<i16> {
+    fn reconstruct_excitation(
+        &mut self,
+        _delay: i16,
+        _gain: i16,
+        _indices: &[u8],
+        _gains: &[i16],
+    ) -> Vec<i16> {
         // TODO: Reconstruct excitation from pitch and codebook
         vec![0; FRAME_SIZE]
     }

@@ -250,14 +250,20 @@ impl Rfc2833Detector {
     }
 
     /// Process RFC 2833 payload with RTP timestamp
-    pub fn process_with_timestamp(&mut self, data: &[u8], timestamp: u32) -> Result<Vec<DtmfEvent>> {
+    pub fn process_with_timestamp(
+        &mut self,
+        data: &[u8],
+        timestamp: u32,
+    ) -> Result<Vec<DtmfEvent>> {
         let event = Rfc2833Event::from_bytes(data)?;
 
         let mut events = Vec::new();
 
         if let Some(digit) = event.digit() {
             // Check if this is a new event
-            let is_new = self.last_event.map_or(true, |(last_digit, _)| last_digit != digit);
+            let is_new = self
+                .last_event
+                .map_or(true, |(last_digit, _)| last_digit != digit);
 
             if is_new && event.duration() == 0 {
                 // Start of new event
@@ -413,10 +419,22 @@ mod tests {
     #[test]
     fn test_all_dtmf_digits() {
         for digit in [
-            DtmfDigit::Zero, DtmfDigit::One, DtmfDigit::Two, DtmfDigit::Three,
-            DtmfDigit::Four, DtmfDigit::Five, DtmfDigit::Six, DtmfDigit::Seven,
-            DtmfDigit::Eight, DtmfDigit::Nine, DtmfDigit::Star, DtmfDigit::Hash,
-            DtmfDigit::A, DtmfDigit::B, DtmfDigit::C, DtmfDigit::D,
+            DtmfDigit::Zero,
+            DtmfDigit::One,
+            DtmfDigit::Two,
+            DtmfDigit::Three,
+            DtmfDigit::Four,
+            DtmfDigit::Five,
+            DtmfDigit::Six,
+            DtmfDigit::Seven,
+            DtmfDigit::Eight,
+            DtmfDigit::Nine,
+            DtmfDigit::Star,
+            DtmfDigit::Hash,
+            DtmfDigit::A,
+            DtmfDigit::B,
+            DtmfDigit::C,
+            DtmfDigit::D,
         ] {
             let event = Rfc2833Event::for_digit(digit, false, 160);
             assert_eq!(event.digit(), Some(digit));

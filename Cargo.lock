@@ -790,6 +790,7 @@ dependencies = [
  "forge-engine",
  "forge-media-processor",
  "forge-rtp",
+ "forge-siprec",
  "forge-storage",
  "lazy_static",
  "metrics 0.21.1",
@@ -801,6 +802,7 @@ dependencies = [
  "tower 0.4.13",
  "tower-http 0.5.2",
  "tracing",
+ "uuid",
  "validator",
 ]
 
@@ -1076,7 +1078,9 @@ dependencies = [
 name = "forge-siprec"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
  "forge-core",
+ "forge-recorder",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

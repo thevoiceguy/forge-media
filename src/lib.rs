@@ -35,54 +35,48 @@
 
 // Re-export core types
 pub use forge_core::{
+    ApiConfig,
+    AudioCodec,
+    AudioFrame,
+
+    AudioMixer,
+    AudioProcessor,
+    AudioSample,
     // Types
     CallId,
-    RoomId,
-    ParticipantId,
+    Codec,
+    CodecConfig,
+    Decoder,
+    // Traits
+    Encoder,
+    EngineConfig,
+    EventBus,
+    // Config
+    ForgeConfig,
+    // Errors
+    ForgeError,
+    // Events
+    ForgeEvent,
+    InterfaceConfig,
+
+    IpVersionConfig,
     LegIdentifier,
     MediaDirection,
     MediaType,
-    AudioCodec,
-    CodecConfig,
-    SessionState,
-    RecordingId,
-    IpVersionConfig,
-    Transport,
-
-    // Config
-    ForgeConfig,
-    EngineConfig,
-    ApiConfig,
+    ParticipantId,
     PortRange,
-    InterfaceConfig,
-
-    // Errors
-    ForgeError,
+    RecordingId,
+    Resampler,
     Result,
 
-    // Traits
-    Encoder,
-    Decoder,
-    Codec,
-    AudioProcessor,
-    AudioMixer,
-    Resampler,
-    AudioSample,
-    AudioFrame,
-
-    // Events
-    ForgeEvent,
-    EventBus,
+    RoomId,
+    SessionState,
+    Transport,
 };
 
 // Re-export RTP types
 pub use forge_rtp::{
-    RtpHeader,
-    RtpPacket,
-    RtpExtension,
-    RtcpPacketType,
-    SrtpProfile,
-    JitterBuffer,
+    JitterBuffer, RtcpPacketType, RtpExtension, RtpHeader, RtpPacket, SrtpProfile,
 };
 
 // Main engine (to be implemented)
@@ -107,6 +101,7 @@ pub use forge_rtp::{
 /// ```
 pub struct ForgeEngine {
     config: ForgeConfig,
+    event_bus: std::sync::Arc<EventBus>,
 }
 
 impl ForgeEngine {
@@ -125,13 +120,21 @@ impl ForgeEngine {
     /// # }
     /// ```
     pub async fn new(config: ForgeConfig) -> Result<Self> {
-        // TODO: Initialize all subsystems
-        Ok(Self { config })
+        // Initialize event bus for broadcasting media events (sessions, SIPREC, etc.)
+        let event_bus = std::sync::Arc::new(EventBus::new());
+
+        // TODO: Initialize all subsystems, wiring event_bus where needed
+        Ok(Self { config, event_bus })
     }
 
     /// Get the engine configuration
     pub fn config(&self) -> &ForgeConfig {
         &self.config
+    }
+
+    /// Subscribe to engine events (sessions, SIPREC, DTMF, etc.)
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<ForgeEvent> {
+        self.event_bus.subscribe()
     }
 
     // TODO: Add session management methods

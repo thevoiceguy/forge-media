@@ -3,9 +3,9 @@
 //! Combines multiple audio streams into a single mixed output
 
 use crate::{AudioFormat, MixerError, Result};
-use forge_recorder::AudioRecorder;
 use bytes::Bytes;
 use dashmap::DashMap;
+use forge_recorder::AudioRecorder;
 use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::path::Path;
@@ -48,7 +48,9 @@ impl ParticipantBuffer {
     }
 
     fn drain_samples(&mut self, count: usize) -> Vec<i16> {
-        self.samples.drain(..count.min(self.samples.len())).collect()
+        self.samples
+            .drain(..count.min(self.samples.len()))
+            .collect()
     }
 
     fn available_samples(&self) -> usize {
@@ -68,12 +70,18 @@ impl ParticipantBuffer {
             recorder.stop()?;
             Ok(())
         } else {
-            Err(MixerError::RecordingNotFound("No active recording for participant".to_string()))
+            Err(MixerError::RecordingNotFound(
+                "No active recording for participant".to_string(),
+            ))
         }
     }
 
     fn is_recording(&self) -> bool {
-        self.recorder.lock().as_ref().map(|r| r.is_recording()).unwrap_or(false)
+        self.recorder
+            .lock()
+            .as_ref()
+            .map(|r| r.is_recording())
+            .unwrap_or(false)
     }
 }
 
@@ -97,10 +105,15 @@ impl AudioMixer {
     /// * `frame_size` - Frame size in samples for mixing operations
     pub fn new(format: AudioFormat, frame_size: usize) -> Result<Self> {
         if frame_size == 0 {
-            return Err(MixerError::InvalidFormat("Frame size must be > 0".to_string()));
+            return Err(MixerError::InvalidFormat(
+                "Frame size must be > 0".to_string(),
+            ));
         }
 
-        info!("Creating audio mixer with format: {:?}, frame_size: {}", format, frame_size);
+        info!(
+            "Creating audio mixer with format: {:?}, frame_size: {}",
+            format, frame_size
+        );
 
         Ok(Self {
             participants: Arc::new(DashMap::new()),
@@ -129,7 +142,8 @@ impl AudioMixer {
     pub fn remove_participant(&self, id: &str) -> Result<()> {
         info!("Removing participant {}", id);
 
-        self.participants.remove(id)
+        self.participants
+            .remove(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
         Ok(())
     }
@@ -140,7 +154,9 @@ impl AudioMixer {
     /// * `id` - Participant identifier
     /// * `samples` - PCM audio samples (16-bit signed integers)
     pub fn write_samples(&self, id: &str, samples: &[i16]) -> Result<()> {
-        let mut participant = self.participants.get_mut(id)
+        let mut participant = self
+            .participants
+            .get_mut(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         participant.push_samples(samples);
@@ -173,7 +189,9 @@ impl AudioMixer {
         }
 
         // Check if any participant has enough samples
-        let has_data = self.participants.iter()
+        let has_data = self
+            .participants
+            .iter()
             .any(|p| p.available_samples() >= self.frame_size);
 
         if !has_data {
@@ -201,17 +219,23 @@ impl AudioMixer {
         // Apply auto-gain to prevent clipping
         let output: Vec<i16> = if self.auto_gain && num_participants > 1 {
             let gain = 1.0 / (num_participants as f32).sqrt();
-            mixed.iter()
+            mixed
+                .iter()
                 .map(|&s| ((s as f32 * gain).clamp(-32768.0, 32767.0)) as i16)
                 .collect()
         } else {
             // Just clamp without gain adjustment
-            mixed.iter()
+            mixed
+                .iter()
                 .map(|&s| s.clamp(-32768, 32767) as i16)
                 .collect()
         };
 
-        debug!("Mixed {} samples from {} participants", output.len(), num_participants);
+        debug!(
+            "Mixed {} samples from {} participants",
+            output.len(),
+            num_participants
+        );
         Ok(Some(output))
     }
 
@@ -224,7 +248,9 @@ impl AudioMixer {
         }
 
         // Check if any other participant has enough samples
-        let has_data = self.participants.iter()
+        let has_data = self
+            .participants
+            .iter()
             .filter(|p| p.key() != exclude_id)
             .any(|p| p.available_samples() >= self.frame_size);
 
@@ -261,23 +287,31 @@ impl AudioMixer {
         // Apply auto-gain
         let output: Vec<i16> = if self.auto_gain && num_mixed > 1 {
             let gain = 1.0 / (num_mixed as f32).sqrt();
-            mixed.iter()
+            mixed
+                .iter()
                 .map(|&s| ((s as f32 * gain).clamp(-32768.0, 32767.0)) as i16)
                 .collect()
         } else {
-            mixed.iter()
+            mixed
+                .iter()
                 .map(|&s| s.clamp(-32768, 32767) as i16)
                 .collect()
         };
 
-        debug!("Mixed {} samples from {} participants (excluding {})",
-               output.len(), num_mixed, exclude_id);
+        debug!(
+            "Mixed {} samples from {} participants (excluding {})",
+            output.len(),
+            num_mixed,
+            exclude_id
+        );
         Ok(Some(output))
     }
 
     /// Set gain for a specific participant
     pub fn set_gain(&self, id: &str, gain: f32) -> Result<()> {
-        let mut participant = self.participants.get_mut(id)
+        let mut participant = self
+            .participants
+            .get_mut(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         participant.gain = gain.clamp(0.0, 1.0);
@@ -298,14 +332,14 @@ impl AudioMixer {
 
     /// Get list of participant IDs
     pub fn participants(&self) -> Vec<String> {
-        self.participants.iter()
-            .map(|p| p.key().clone())
-            .collect()
+        self.participants.iter().map(|p| p.key().clone()).collect()
     }
 
     /// Clear all buffered audio for a participant
     pub fn clear_buffer(&self, id: &str) -> Result<()> {
-        let mut participant = self.participants.get_mut(id)
+        let mut participant = self
+            .participants
+            .get_mut(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         participant.samples.clear();
@@ -323,17 +357,29 @@ impl AudioMixer {
     /// # Arguments
     /// * `id` - Participant identifier
     /// * `path` - Output file path for the recording
-    pub async fn start_participant_recording<P: AsRef<Path>>(&self, id: &str, path: P) -> Result<()> {
-        let participant = self.participants.get(id)
+    pub async fn start_participant_recording<P: AsRef<Path>>(
+        &self,
+        id: &str,
+        path: P,
+    ) -> Result<()> {
+        let participant = self
+            .participants
+            .get(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
-        info!("Starting recording for participant {} to {:?}", id, path.as_ref());
+        info!(
+            "Starting recording for participant {} to {:?}",
+            id,
+            path.as_ref()
+        );
         participant.start_recording(path, *self.format.read()).await
     }
 
     /// Stop recording for a specific participant
     pub fn stop_participant_recording(&self, id: &str) -> Result<()> {
-        let participant = self.participants.get(id)
+        let participant = self
+            .participants
+            .get(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         info!("Stopping recording for participant {}", id);
@@ -342,7 +388,9 @@ impl AudioMixer {
 
     /// Check if a participant is currently recording
     pub fn is_participant_recording(&self, id: &str) -> Result<bool> {
-        let participant = self.participants.get(id)
+        let participant = self
+            .participants
+            .get(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         Ok(participant.is_recording())

@@ -158,7 +158,12 @@ impl Resampler {
 }
 
 /// Calculate the expected output length for a given input length
-pub fn calculate_output_length(input_len: usize, src_rate: u32, dst_rate: u32, channels: u16) -> usize {
+pub fn calculate_output_length(
+    input_len: usize,
+    src_rate: u32,
+    dst_rate: u32,
+    channels: u16,
+) -> usize {
     let input_frames = input_len / channels as usize;
     let output_frames = ((input_frames as f64 * dst_rate as f64) / src_rate as f64).ceil() as usize;
     output_frames * channels as usize

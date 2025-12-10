@@ -38,9 +38,9 @@ struct CallState {
 
 #[derive(Debug, Clone, PartialEq)]
 enum CallStateEnum {
-    Ringing,   // INVITE sent to callee, waiting for answer
-    Answered,  // Callee sent 200 OK
-    Active,    // ACK received, RTP flowing
+    Ringing,  // INVITE sent to callee, waiting for answer
+    Answered, // Callee sent 200 OK
+    Active,   // ACK received, RTP flowing
 }
 
 /// Application state
@@ -92,8 +92,8 @@ async fn main() -> Result<()> {
     let socket = Arc::new(UdpSocket::bind(sip_bind).await?);
     info!("✓ SIP listening on {}", sip_bind);
 
-    let local_uri = SipUri::parse(&format!("sip:forge@{}", local_ip))
-        .context("Failed to parse local URI")?;
+    let local_uri =
+        SipUri::parse(&format!("sip:forge@{}", local_ip)).context("Failed to parse local URI")?;
     let uas = Arc::new(UserAgentServer::new(local_uri.clone(), local_uri));
 
     let state = Arc::new(AppState {
@@ -143,7 +143,10 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
             state_clone.registrations.retain(|_k, v| v.expires_at > now);
         }
     });
@@ -197,7 +200,8 @@ async fn handle_request(state: Arc<AppState>, req: Request, from: SocketAddr) ->
 
 async fn handle_response(state: Arc<AppState>, resp: Response, _from: SocketAddr) -> Result<()> {
     // Extract Call-ID from response
-    let call_id = resp.headers
+    let call_id = resp
+        .headers
         .get("Call-ID")
         .map(|v| v.to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -211,7 +215,10 @@ async fn handle_response(state: Arc<AppState>, resp: Response, _from: SocketAddr
         }
     };
 
-    info!("← {} from {} → forwarding to {}", resp.start.code, call_state.callee, call_state.caller);
+    info!(
+        "← {} from {} → forwarding to {}",
+        resp.start.code, call_state.callee, call_state.caller
+    );
 
     // For 200 OK responses, rewrite SDP and Contact header to point to Forge/server
     let mut modified_resp = resp.clone();
@@ -224,7 +231,10 @@ async fn handle_response(state: Arc<AppState>, resp: Response, _from: SocketAddr
             call_state.forge_session.rtp_port,
         );
 
-        info!("  Rewriting SDP: IP={}, RTP port={}", state.local_ip, call_state.forge_session.rtp_port);
+        info!(
+            "  Rewriting SDP: IP={}, RTP port={}",
+            state.local_ip, call_state.forge_session.rtp_port
+        );
 
         // Update response body
         modified_resp.body = rewritten_sdp.into_bytes().into();
@@ -232,19 +242,26 @@ async fn handle_response(state: Arc<AppState>, resp: Response, _from: SocketAddr
         // Update Content-Length header
         let body_len = modified_resp.body.len();
         modified_resp.headers.remove("Content-Length");
-        modified_resp.headers.push("Content-Length".into(), body_len.to_string().into());
+        modified_resp
+            .headers
+            .push("Content-Length".into(), body_len.to_string().into());
 
         // Rewrite Contact header to point to server
         // This ensures ACK is routed through us instead of directly to callee
         let server_contact = format!("<sip:{}@{}:5060>", call_state.callee, state.local_ip);
         info!("  Rewriting Contact: {}", server_contact);
         modified_resp.headers.remove("Contact");
-        modified_resp.headers.push("Contact".into(), server_contact.into());
+        modified_resp
+            .headers
+            .push("Contact".into(), server_contact.into());
     }
 
     // Forward response to caller
     let resp_bytes = serialize_response(&modified_resp);
-    state.socket.send_to(&resp_bytes, call_state.caller_addr).await?;
+    state
+        .socket
+        .send_to(&resp_bytes, call_state.caller_addr)
+        .await?;
 
     // If 200 OK, mark call as Answered
     if resp.start.code == 200 {
@@ -271,7 +288,10 @@ async fn handle_register(state: Arc<AppState>, req: Request, from: SocketAddr) -
         info!("✓ User '{}' unregistered", username);
     } else {
         // Register
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         state.registrations.insert(
             username.clone(),
             Registration {
@@ -289,7 +309,8 @@ async fn handle_register(state: Arc<AppState>, req: Request, from: SocketAddr) -
     if let Some(contact_hdr) = req.headers.get("Contact") {
         resp.headers.push("Contact".into(), contact_hdr.clone());
     }
-    resp.headers.push("Expires".into(), expires.to_string().into());
+    resp.headers
+        .push("Expires".into(), expires.to_string().into());
 
     send_response(&state, resp, from).await?;
 
@@ -363,12 +384,20 @@ async fn handle_invite(state: Arc<AppState>, req: Request, from: SocketAddr) -> 
     // Update Content-Length
     let body_len = callee_invite.body.len();
     callee_invite.headers.remove("Content-Length");
-    callee_invite.headers.push("Content-Length".into(), body_len.to_string().into());
+    callee_invite
+        .headers
+        .push("Content-Length".into(), body_len.to_string().into());
 
     // Forward INVITE to callee
-    info!("→ Forwarding INVITE to {} (RTP port {})", callee, forge_session.rtp_port);
+    info!(
+        "→ Forwarding INVITE to {} (RTP port {})",
+        callee, forge_session.rtp_port
+    );
     let invite_bytes = serialize_request(&callee_invite);
-    state.socket.send_to(&invite_bytes, callee_reg.remote_addr).await?;
+    state
+        .socket
+        .send_to(&invite_bytes, callee_reg.remote_addr)
+        .await?;
     info!("✓ {} phone should be ringing", callee);
 
     Ok(())
@@ -390,7 +419,10 @@ async fn handle_ack(state: Arc<AppState>, req: Request) -> Result<()> {
     // Forward ACK to callee
     info!("→ Forwarding ACK to {}", call_state.callee);
     let ack_bytes = serialize_request(&req);
-    state.socket.send_to(&ack_bytes, call_state.callee_addr).await?;
+    state
+        .socket
+        .send_to(&ack_bytes, call_state.callee_addr)
+        .await?;
 
     // Start Forge RTP forwarding
     info!("Starting RTP forwarding...");
@@ -398,7 +430,10 @@ async fn handle_ack(state: Arc<AppState>, req: Request) -> Result<()> {
         error!("Failed to start Forge session: {}", e);
     } else {
         info!("✓ RTP forwarding ACTIVE");
-        info!("  Both {} and {} sending RTP to port {}", call_state.caller, call_state.callee, call_state.forge_session.rtp_port);
+        info!(
+            "  Both {} and {} sending RTP to port {}",
+            call_state.caller, call_state.callee, call_state.forge_session.rtp_port
+        );
 
         // Mark call as Active
         state.calls.alter(&call_id, |_, mut cs| {
@@ -528,7 +563,11 @@ fn extract_username(req: &Request) -> String {
 fn extract_request_user(req: &Request) -> String {
     // Extract username from Request-URI
     if let Some(sip_uri) = req.start.uri.as_sip() {
-        sip_uri.user.as_ref().map(|u| u.to_string()).unwrap_or_else(|| "unknown".to_string())
+        sip_uri
+            .user
+            .as_ref()
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
     } else {
         "unknown".to_string()
     }

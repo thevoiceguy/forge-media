@@ -76,6 +76,7 @@ pub struct AppState {
     pub conference_bridge: Arc<forge_conference_processor::ConferenceBridge>,
     pub storage_manager: Arc<tokio::sync::Mutex<forge_storage::StorageManager>>,
     pub recording_base_dir: std::path::PathBuf,
+    pub prompts_base_dir: std::path::PathBuf,
 }
 
 impl AppState {
@@ -84,15 +85,15 @@ impl AppState {
         metrics_handle: Arc<super::prometheus::MetricsHandle>,
         conference_bridge: Arc<forge_conference_processor::ConferenceBridge>,
         recording_base_dir: std::path::PathBuf,
+        prompts_base_dir: std::path::PathBuf,
     ) -> Self {
         // Create default storage manager
-        let storage_manager = Arc::new(tokio::sync::Mutex::new(
-            forge_storage::StorageManager::new(
+        let storage_manager =
+            Arc::new(tokio::sync::Mutex::new(forge_storage::StorageManager::new(
                 &recording_base_dir,
                 std::time::Duration::from_secs(7 * 24 * 3600),
                 0,
-            )
-        ));
+            )));
 
         Self {
             session_manager,
@@ -100,6 +101,7 @@ impl AppState {
             conference_bridge,
             storage_manager,
             recording_base_dir,
+            prompts_base_dir,
         }
     }
 }
@@ -121,7 +123,8 @@ async fn create_session(
     );
 
     // Validate request
-    request.validate()
+    request
+        .validate()
         .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
 
     // Parse or generate IDs
@@ -147,7 +150,11 @@ async fn create_session(
     let custom_config = if let Some(tos) = request.tos {
         let mut config = forge_engine::MediaSessionConfig::default();
         config.socket_config.tos = tos;
-        tracing::debug!("Creating session with custom TOS: 0x{:02X} (DSCP=0x{:02X})", tos, tos >> 2);
+        tracing::debug!(
+            "Creating session with custom TOS: 0x{:02X} (DSCP=0x{:02X})",
+            tos,
+            tos >> 2
+        );
         Some(config)
     } else {
         None
@@ -183,7 +190,12 @@ async fn create_session(
         participant_b: None,
     };
 
-    tracing::info!("Session created: {} on ports {}/{}", response.call_id, ports.rtp_port, ports.rtcp_port);
+    tracing::info!(
+        "Session created: {} on ports {}/{}",
+        response.call_id,
+        ports.rtp_port,
+        ports.rtcp_port
+    );
 
     Ok(created(response))
 }
@@ -424,14 +436,18 @@ mod tests {
 
         // First create a session
         let call_id = CallId("test-get-123".to_string());
-        state.session_manager.create_session(
-            call_id.clone(),
-            ParticipantId::generate(),
-            ParticipantId::generate(),
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        state
+            .session_manager
+            .create_session(
+                call_id.clone(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         let app = routes().with_state(state);
 
@@ -454,14 +470,18 @@ mod tests {
 
         // First create a session
         let call_id = CallId("test-delete-123".to_string());
-        state.session_manager.create_session(
-            call_id.clone(),
-            ParticipantId::generate(),
-            ParticipantId::generate(),
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        state
+            .session_manager
+            .create_session(
+                call_id.clone(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         let app = routes().with_state(state);
 

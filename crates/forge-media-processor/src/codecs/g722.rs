@@ -237,13 +237,18 @@ impl G722Codec {
             let upper_code = (byte >> 6) & 0x03;
 
             // Decode lower band
-            let lower_samples = Self::decode_subband(lower_code, &mut self.decoder_state.lower_band);
+            let lower_samples =
+                Self::decode_subband(lower_code, &mut self.decoder_state.lower_band);
 
             // Decode upper band
-            let upper_samples = Self::decode_subband(upper_code, &mut self.decoder_state.upper_band);
+            let upper_samples =
+                Self::decode_subband(upper_code, &mut self.decoder_state.upper_band);
 
             // Combine sub-bands using QMF synthesis
-            let samples = self.decoder_state.qmf_state.synthesize(&lower_samples, &upper_samples);
+            let samples = self
+                .decoder_state
+                .qmf_state
+                .synthesize(&lower_samples, &upper_samples);
             decoded.extend_from_slice(&samples);
         }
 

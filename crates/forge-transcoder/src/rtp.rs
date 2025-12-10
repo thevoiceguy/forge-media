@@ -3,7 +3,7 @@
 //! Provides utilities for transcoding RTP audio packets, handling
 //! frame buffering, timestamp adjustments, and codec detection.
 
-use crate::{AudioFormat, Result, Transcoder, TranscoderError};
+use crate::{AudioFormat, Result, Transcoder};
 use forge_codecs::AudioCodecType;
 use std::collections::VecDeque;
 
@@ -173,11 +173,7 @@ mod tests {
     #[test]
     fn test_rtp_transcoder_create() {
         let pt_map = PayloadTypeMap::default();
-        let transcoder = RtpTranscoder::new(
-            AudioCodecType::PCMU,
-            AudioCodecType::PCMA,
-            pt_map,
-        );
+        let transcoder = RtpTranscoder::new(AudioCodecType::PCMU, AudioCodecType::PCMA, pt_map);
         assert!(transcoder.is_ok());
 
         let transcoder = transcoder.unwrap();
@@ -189,18 +185,12 @@ mod tests {
     fn test_rtp_transcoder_needs_transcoding() {
         let pt_map = PayloadTypeMap::default();
 
-        let transcoder = RtpTranscoder::new(
-            AudioCodecType::PCMU,
-            AudioCodecType::PCMA,
-            pt_map,
-        ).unwrap();
+        let transcoder =
+            RtpTranscoder::new(AudioCodecType::PCMU, AudioCodecType::PCMA, pt_map).unwrap();
         assert!(transcoder.needs_transcoding());
 
-        let transcoder = RtpTranscoder::new(
-            AudioCodecType::PCMU,
-            AudioCodecType::PCMU,
-            pt_map,
-        ).unwrap();
+        let transcoder =
+            RtpTranscoder::new(AudioCodecType::PCMU, AudioCodecType::PCMU, pt_map).unwrap();
         assert!(!transcoder.needs_transcoding());
     }
 

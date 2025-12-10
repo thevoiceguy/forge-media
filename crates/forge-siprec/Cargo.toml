@@ -8,6 +8,8 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
+forge-recorder = { path = "../forge-recorder" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+dashmap = { workspace = true }

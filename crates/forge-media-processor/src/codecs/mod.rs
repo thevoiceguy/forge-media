@@ -59,8 +59,9 @@ pub fn create_codec(format: &AudioFormat) -> Result<Box<dyn AudioCodec>> {
             };
             Ok(Box::new(opus::OpusCodec::with_config(config)?))
         }
-        _ => Err(MediaError::InvalidFormat(
-            format!("Unsupported codec: {:?}", format.codec),
-        )),
+        _ => Err(MediaError::InvalidFormat(format!(
+            "Unsupported codec: {:?}",
+            format.codec
+        ))),
     }
 }

@@ -4,10 +4,11 @@ use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
-use std::path::{Path as FsPath, PathBuf};
 use validator::Validate;
+use uuid::Uuid;
 
 use crate::error::{ApiError, ApiResult};
 use crate::response::{created, no_content, success, ApiSuccess};
@@ -35,6 +36,13 @@ pub struct StartRecordingRequest {
     /// Audio codec for recording (optional, defaults to "pcm" for WAV)
     /// Supported values: "pcm" (WAV), "opus" (requires opus feature)
     pub codec: Option<String>,
+}
+
+/// Request to play an announcement into a conference
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct PlayAnnouncementRequest {
+    #[validate(length(min = 1, max = 1024))]
+    pub prompt: String,
 }
 
 /// Conference room information response
@@ -76,14 +84,39 @@ pub struct RecordingListResponse {
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/conferences", get(list_rooms).post(create_room))
-        .route("/v1/conferences/:room_id", get(get_room).delete(delete_room))
-        .route("/v1/conferences/:room_id/participants", post(add_participant))
-        .route("/v1/conferences/:room_id/participants/:participant_id", delete(remove_participant))
-        .route("/v1/conferences/:room_id/recording", post(start_recording).delete(stop_recording))
-        .route("/v1/conferences/:room_id/participants/:participant_id/recording", post(start_participant_recording_handler))
-        .route("/v1/conferences/:room_id/participants/:participant_id/recording", delete(stop_participant_recording_handler))
+        .route(
+            "/v1/conferences/:room_id",
+            get(get_room).delete(delete_room),
+        )
+        .route(
+            "/v1/conferences/:room_id/participants",
+            post(add_participant),
+        )
+        .route(
+            "/v1/conferences/:room_id/participants/:participant_id",
+            delete(remove_participant),
+        )
+        .route(
+            "/v1/conferences/:room_id/recording",
+            post(start_recording).delete(stop_recording),
+        )
+        .route(
+            "/v1/conferences/:room_id/participants/:participant_id/recording",
+            post(start_participant_recording_handler),
+        )
+        .route(
+            "/v1/conferences/:room_id/participants/:participant_id/recording",
+            delete(stop_participant_recording_handler),
+        )
+        .route(
+            "/v1/conferences/:room_id/announcement",
+            post(play_announcement),
+        )
         .route("/v1/recordings", get(list_recordings))
-        .route("/v1/recordings/:id", get(get_recording).delete(delete_recording))
+        .route(
+            "/v1/recordings/:id",
+            get(get_recording).delete(delete_recording),
+        )
 }
 
 /// List all conference rooms
@@ -133,11 +166,13 @@ async fn create_room(
     tracing::info!("API request to create conference room");
 
     // Validate request
-    request.validate()
+    request
+        .validate()
         .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
 
     // Create room
-    let room = state.conference_bridge
+    let room = state
+        .conference_bridge
         .create_room(&request.room_id, None)
         .map_err(|e| ApiError::Internal(format!("Failed to create room: {}", e)))?;
 
@@ -161,7 +196,8 @@ async fn get_room(
 ) -> ApiResult<Json<ApiSuccess<RoomResponse>>> {
     tracing::info!("API request to get conference room");
 
-    let room = state.conference_bridge
+    let room = state
+        .conference_bridge
         .get_room(&room_id)
         .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
 
@@ -185,7 +221,8 @@ async fn delete_room(
 ) -> ApiResult<axum::response::Response> {
     tracing::info!("API request to delete conference room");
 
-    state.conference_bridge
+    state
+        .conference_bridge
         .delete_room(&room_id)
         .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
 
@@ -204,13 +241,49 @@ async fn add_participant(
     tracing::info!("API request to add participant to conference room");
 
     // Validate request
-    request.validate()
+    request
+        .validate()
         .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
 
     // Add participant
-    state.conference_bridge
+    state
+        .conference_bridge
         .add_participant_to_room(&room_id, &request.participant_id)
         .map_err(|e| ApiError::Internal(format!("Failed to add participant: {}", e)))?;
+
+    Ok(no_content())
+}
+
+/// Play an announcement prompt into a conference room
+///
+/// POST /v1/conferences/:room_id/announcement
+#[tracing::instrument(skip(state, request), fields(room_id = %room_id, prompt = ?request.prompt))]
+async fn play_announcement(
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<String>,
+    Json(request): Json<PlayAnnouncementRequest>,
+) -> ApiResult<axum::response::Response> {
+    tracing::info!("API request to play announcement into conference room");
+
+    // Validate request
+    request
+        .validate()
+        .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
+
+    // Resolve prompt path inside configured prompts directory
+    let prompt_path = resolve_prompt_path(&state.prompts_base_dir, &request.prompt)
+        .map_err(ApiError::InvalidRequest)?;
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Play announcement
+    room.play_announcement(prompt_path)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to play announcement: {}", e)))?;
 
     Ok(no_content())
 }
@@ -225,7 +298,8 @@ async fn remove_participant(
 ) -> ApiResult<axum::response::Response> {
     tracing::info!("API request to remove participant from conference room");
 
-    state.conference_bridge
+    state
+        .conference_bridge
         .remove_participant_from_room(&room_id, &participant_id)
         .map_err(|e| ApiError::Internal(format!("Failed to remove participant: {}", e)))?;
 
@@ -244,11 +318,13 @@ async fn start_recording(
     tracing::info!("API request to start recording conference room");
 
     // Validate request
-    request.validate()
+    request
+        .validate()
         .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
 
     // Get room
-    let room = state.conference_bridge
+    let room = state
+        .conference_bridge
         .get_room(&room_id)
         .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
 
@@ -258,7 +334,9 @@ async fn start_recording(
             .ok_or_else(|| ApiError::InvalidRequest(format!("Invalid codec: {}", codec_str)))?;
 
         // Get room's current format and override codec
-        let room_format = state.conference_bridge.get_room(&room_id)
+        let room_format = state
+            .conference_bridge
+            .get_room(&room_id)
             .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?
             .format();
 
@@ -279,6 +357,19 @@ async fn start_recording(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to start recording: {}", e)))?;
 
+    // Register recording metadata
+    let recording_id = Uuid::new_v4().to_string();
+    state
+        .storage_manager
+        .lock()
+        .await
+        .register_recording(forge_storage::RecordingInfo::new(
+            recording_id,
+            output_path,
+            room_id.clone(),
+            None,
+        ));
+
     Ok(no_content())
 }
 
@@ -293,13 +384,23 @@ async fn stop_recording(
     tracing::info!("API request to stop recording conference room");
 
     // Get room
-    let room = state.conference_bridge
+    let room = state
+        .conference_bridge
         .get_room(&room_id)
         .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
 
     // Stop recording
     room.stop_recording()
         .map_err(|e| ApiError::Internal(format!("Failed to stop recording: {}", e)))?;
+
+    // Finalize recording metadata
+    state
+        .storage_manager
+        .lock()
+        .await
+        .finalize_room_recording(&room_id)
+        .await
+        .map_err(|e| ApiError::RecordingNotFound(format!("Recording not found: {}", e)))?;
 
     Ok(no_content())
 }
@@ -312,7 +413,11 @@ async fn start_participant_recording_handler(
     State(_state): State<Arc<AppState>>,
     Path((room_id, participant_id)): Path<(String, String)>,
 ) -> ApiResult<axum::response::Response> {
-    tracing::info!("API request to start participant recording for {} in {}", participant_id, room_id);
+    tracing::info!(
+        "API request to start participant recording for {} in {}",
+        participant_id,
+        room_id
+    );
 
     // TODO: Implement participant recording
     // Currently returns a stub response
@@ -328,7 +433,11 @@ async fn stop_participant_recording_handler(
     State(_state): State<Arc<AppState>>,
     Path((room_id, participant_id)): Path<(String, String)>,
 ) -> ApiResult<axum::response::Response> {
-    tracing::info!("API request to stop participant recording for {} in {}", participant_id, room_id);
+    tracing::info!(
+        "API request to stop participant recording for {} in {}",
+        participant_id,
+        room_id
+    );
 
     // TODO: Implement stop participant recording
     // Currently returns a stub response
@@ -346,7 +455,8 @@ async fn list_recordings(
     tracing::info!("API request to list recordings");
 
     let storage = state.storage_manager.lock().await;
-    let recordings: Vec<RecordingResponse> = storage.list_recordings()
+    let recordings: Vec<RecordingResponse> = storage
+        .list_recordings()
         .iter()
         .map(|r| recording_info_to_response(r))
         .collect();
@@ -370,8 +480,9 @@ async fn get_recording(
     tracing::info!("API request to get recording info");
 
     let storage = state.storage_manager.lock().await;
-    let recording = storage.get_recording(&recording_id)
-        .ok_or_else(|| ApiError::RecordingNotFound(format!("Recording {} not found", recording_id)))?;
+    let recording = storage.get_recording(&recording_id).ok_or_else(|| {
+        ApiError::RecordingNotFound(format!("Recording {} not found", recording_id))
+    })?;
 
     let response = recording_info_to_response(recording);
 
@@ -388,7 +499,10 @@ async fn delete_recording(
 ) -> ApiResult<axum::response::Response> {
     tracing::info!("API request to delete recording");
 
-    state.storage_manager.lock().await
+    state
+        .storage_manager
+        .lock()
+        .await
         .delete_recording(&recording_id)
         .await
         .map_err(|e| ApiError::RecordingNotFound(format!("Recording not found: {}", e)))?;
@@ -402,14 +516,16 @@ fn recording_info_to_response(info: &forge_storage::RecordingInfo) -> RecordingR
         id: info.id.clone(),
         room_id: info.room_id.clone(),
         participant_id: info.participant_id.clone(),
-        started_at: info.started_at.duration_since(UNIX_EPOCH)
+        started_at: info
+            .started_at
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs().to_string())
             .unwrap_or_else(|_| "unknown".to_string()),
-        ended_at: info.ended_at.and_then(|t|
+        ended_at: info.ended_at.and_then(|t| {
             t.duration_since(UNIX_EPOCH)
                 .ok()
                 .map(|d| d.as_secs().to_string())
-        ),
+        }),
         size_bytes: info.size_bytes,
         duration_secs: info.duration_secs,
     }
@@ -430,7 +546,9 @@ fn resolve_recording_path(base_dir: &FsPath, requested: &str) -> Result<PathBuf,
             Component::Normal(c) => sanitized.push(c),
             Component::CurDir => {}
             Component::ParentDir => {
-                return Err("output_path cannot traverse outside the recording base directory".to_string());
+                return Err(
+                    "output_path cannot traverse outside the recording base directory".to_string(),
+                );
             }
             _ => {
                 return Err("absolute paths are not allowed for output_path".to_string());
@@ -452,6 +570,34 @@ fn resolve_recording_path(base_dir: &FsPath, requested: &str) -> Result<PathBuf,
     Ok(sanitized)
 }
 
+/// Resolve a prompt path against the prompts directory.
+/// Rejects traversal and requires the file to exist.
+fn resolve_prompt_path(base_dir: &FsPath, requested: &str) -> Result<PathBuf, String> {
+    use std::path::Component;
+
+    if requested.trim().is_empty() {
+        return Err("prompt path cannot be empty".to_string());
+    }
+
+    let mut sanitized = PathBuf::from(base_dir);
+    for comp in FsPath::new(requested).components() {
+        match comp {
+            Component::Normal(c) => sanitized.push(c),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err("prompt path cannot traverse outside the prompts directory".to_string());
+            }
+            _ => return Err("absolute paths are not allowed for prompt path".to_string()),
+        }
+    }
+
+    if !sanitized.exists() {
+        return Err(format!("prompt file not found at {:?}", sanitized));
+    }
+
+    Ok(sanitized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,18 +606,21 @@ mod tests {
     use tower::ServiceExt;
 
     fn create_test_state() -> Arc<AppState> {
-        let bridge = Arc::new(forge_conference_processor::ConferenceBridge::new(
-            forge_media_processor::AudioFormat::pcm_mono(), 480
-        ).unwrap());
-        let session_manager = forge_engine::SessionManager::new(
-            Default::default(), None
+        let bridge = Arc::new(
+            forge_conference_processor::ConferenceBridge::new(
+                forge_media_processor::AudioFormat::pcm_mono(),
+                480,
+            )
+            .unwrap(),
         );
+        let session_manager = forge_engine::SessionManager::new(Default::default(), None);
         let metrics_handle = Arc::new(crate::routes::prometheus::MetricsHandle::init());
         Arc::new(AppState::new(
             session_manager,
             metrics_handle,
             bridge,
             std::env::temp_dir().join("forge-test-recordings"),
+            std::env::temp_dir().join("forge-test-prompts"),
         ))
     }
 

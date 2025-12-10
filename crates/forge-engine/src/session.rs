@@ -1,7 +1,7 @@
 //! Media session management for two-party calls
 
-use forge_core::{CallId, ParticipantId, ForgeError, Result, ForgeEvent, EventBus};
-use forge_rtp::{PortPool, PortPair, RtpSocketPair, RtpSocketConfig};
+use forge_core::{CallId, EventBus, ForgeError, ForgeEvent, ParticipantId, Result};
+use forge_rtp::{PortPair, PortPool, RtpSocketConfig, RtpSocketPair};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 #[cfg(all(target_os = "linux", feature = "xdp"))]
-use forge_kernel::{XdpManager, ForwardKey, ForwardValue};
+use forge_kernel::{ForwardKey, ForwardValue, XdpManager};
 
 /// DTMF detection configuration
 #[derive(Debug, Clone)]
@@ -532,7 +532,10 @@ impl MediaSession {
 
         // Check if already active
         if self.xdp_active.load(Ordering::Relaxed) {
-            tracing::debug!("XDP fast path already active for session {}", self.call_id.0);
+            tracing::debug!(
+                "XDP fast path already active for session {}",
+                self.call_id.0
+            );
             return Ok(());
         }
 
@@ -584,7 +587,7 @@ impl MediaSession {
             src_ip: a_ip,
             src_port: a_port,
             dst_port: rtp_port_be,
-            dst_ip: 0, // Will be filled by XDP program (our local IP)
+            dst_ip: 0,    // Will be filled by XDP program (our local IP)
             protocol: 17, // UDP
             _padding: [0; 3],
         };
@@ -597,7 +600,9 @@ impl MediaSession {
             last_seen: 0,
         };
 
-        xdp_manager.insert_forward_rule(key_a_to_b, value_a_to_b).await
+        xdp_manager
+            .insert_forward_rule(key_a_to_b, value_a_to_b)
+            .await
             .map_err(|e| ForgeError::Internal(format!("XDP insert forward rule failed: {}", e)))?;
 
         // Rule 2: B -> A (packets from B forwarded to A)
@@ -618,7 +623,9 @@ impl MediaSession {
             last_seen: 0,
         };
 
-        xdp_manager.insert_forward_rule(key_b_to_a, value_b_to_a).await
+        xdp_manager
+            .insert_forward_rule(key_b_to_a, value_b_to_a)
+            .await
             .map_err(|e| ForgeError::Internal(format!("XDP insert forward rule failed: {}", e)))?;
 
         self.xdp_active.store(true, Ordering::Relaxed);
@@ -691,9 +698,13 @@ impl MediaSession {
             _padding: [0; 3],
         };
 
-        xdp_manager.remove_forward_rule(&key_a_to_b).await
+        xdp_manager
+            .remove_forward_rule(&key_a_to_b)
+            .await
             .map_err(|e| ForgeError::Internal(format!("XDP remove forward rule failed: {}", e)))?;
-        xdp_manager.remove_forward_rule(&key_b_to_a).await
+        xdp_manager
+            .remove_forward_rule(&key_b_to_a)
+            .await
             .map_err(|e| ForgeError::Internal(format!("XDP remove forward rule failed: {}", e)))?;
 
         self.xdp_active.store(false, Ordering::Relaxed);
@@ -726,7 +737,8 @@ impl MediaSession {
         }
 
         // Start forwarding task
-        let forwarding_handle = crate::forwarding::ForwardingEngine::start_forwarding(Arc::clone(self)).await?;
+        let forwarding_handle =
+            crate::forwarding::ForwardingEngine::start_forwarding(Arc::clone(self)).await?;
         self.forwarding_tasks.lock().await.push(forwarding_handle);
 
         Ok(())
@@ -1046,11 +1058,18 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "socket creation should fail when port is already bound");
+        assert!(
+            result.is_err(),
+            "socket creation should fail when port is already bound"
+        );
 
         // Give the guard's spawned deallocation task time to complete
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        assert_eq!(port_pool.allocated_count().await, 0, "ports should be returned to pool");
+        assert_eq!(
+            port_pool.allocated_count().await,
+            0,
+            "ports should be returned to pool"
+        );
     }
 }

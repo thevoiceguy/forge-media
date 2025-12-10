@@ -4,8 +4,8 @@
 //! To use Forge as a library in your project, see the crate documentation.
 
 use anyhow::Result;
+use forge_api::{server::ApiServerConfig, ApiServer};
 use forge_media::{ForgeConfig, ForgeEngine};
-use forge_api::{ApiServer, server::ApiServerConfig};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -42,10 +42,19 @@ async fn main() -> Result<()> {
         rate_limit_requests_per_window: config.api.rate_limit_requests_per_window,
         rate_limit_window_secs: config.api.rate_limit_window_secs,
         enable_https: config.api.enable_https,
-        https_bind: config.api.https_bind.as_ref().map(|s| s.parse()).transpose()?,
+        https_bind: config
+            .api
+            .https_bind
+            .as_ref()
+            .map(|s| s.parse())
+            .transpose()?,
         tls_cert: config.api.tls_cert.clone(),
         tls_key: config.api.tls_key.clone(),
         recording_base_dir: config.api.recording_base_dir.clone(),
+        prompts_base_dir: config.api.prompts_base_dir.clone(),
+        siprec_enabled: config.api.siprec.enabled,
+        siprec_output_dir: config.api.siprec.output_dir.clone(),
+        siprec_format: config.api.siprec.format.clone(),
         xdp_enabled: config.engine.xdp.enabled,
         xdp_interface: config.engine.xdp.interface.clone(),
         xdp_mode: format!("{:?}", config.engine.xdp.mode).to_lowercase(),

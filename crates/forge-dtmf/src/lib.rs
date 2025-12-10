@@ -16,15 +16,15 @@
 //! assert_eq!(event.digit(), Some(DtmfDigit::Five));
 //! ```
 
-pub mod rfc2833;
-pub mod inband;
-pub mod detector;
 pub mod dedup;
+pub mod detector;
+pub mod inband;
+pub mod rfc2833;
 
-pub use rfc2833::{Rfc2833Event, Rfc2833Generator, Rfc2833Detector};
-pub use inband::{InbandDetector, GoertzelDetector};
-pub use detector::{DtmfDetector, DtmfEvent, DtmfDigit, DtmfEventType, DtmfMethod};
 pub use dedup::DtmfDeduplicator;
+pub use detector::{DtmfDetector, DtmfDigit, DtmfEvent, DtmfEventType, DtmfMethod};
+pub use inband::{GoertzelDetector, InbandDetector};
+pub use rfc2833::{Rfc2833Detector, Rfc2833Event, Rfc2833Generator};
 
 use thiserror::Error;
 

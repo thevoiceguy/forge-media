@@ -18,7 +18,7 @@
 #[cfg(feature = "opus")]
 use audiopus::coder::{Decoder, Encoder};
 #[cfg(feature = "opus")]
-use audiopus::{Channels, SampleRate as OpusSampleRate, Application, Bitrate};
+use audiopus::{Application, Bitrate, Channels, SampleRate as OpusSampleRate};
 
 use crate::AudioCodec;
 use crate::{AudioFormat, CodecError, Result};
@@ -104,30 +104,34 @@ impl OpusConfig {
     pub fn validate(&self) -> Result<()> {
         // Validate sample rate
         if ![8000, 12000, 16000, 24000, 48000].contains(&self.sample_rate) {
-            return Err(CodecError::InvalidFormat(
-                format!("Opus sample rate must be 8, 12, 16, 24, or 48 kHz, got {}", self.sample_rate)
-            ));
+            return Err(CodecError::InvalidFormat(format!(
+                "Opus sample rate must be 8, 12, 16, 24, or 48 kHz, got {}",
+                self.sample_rate
+            )));
         }
 
         // Validate channels
         if self.channels != 1 && self.channels != 2 {
-            return Err(CodecError::InvalidFormat(
-                format!("Opus supports 1 or 2 channels, got {}", self.channels)
-            ));
+            return Err(CodecError::InvalidFormat(format!(
+                "Opus supports 1 or 2 channels, got {}",
+                self.channels
+            )));
         }
 
         // Validate frame duration
         if ![2, 5, 10, 20, 40, 60].contains(&self.frame_duration_ms) {
-            return Err(CodecError::InvalidFormat(
-                format!("Opus frame duration must be 2.5, 5, 10, 20, 40, or 60 ms, got {}", self.frame_duration_ms)
-            ));
+            return Err(CodecError::InvalidFormat(format!(
+                "Opus frame duration must be 2.5, 5, 10, 20, 40, or 60 ms, got {}",
+                self.frame_duration_ms
+            )));
         }
 
         // Validate bitrate
         if self.bitrate < 6000 || self.bitrate > 510000 {
-            return Err(CodecError::InvalidFormat(
-                format!("Opus bitrate must be between 6 and 510 kbit/s, got {}", self.bitrate)
-            ));
+            return Err(CodecError::InvalidFormat(format!(
+                "Opus bitrate must be between 6 and 510 kbit/s, got {}",
+                self.bitrate
+            )));
         }
 
         Ok(())
@@ -173,7 +177,8 @@ impl OpusCodec {
         let mut encoder = Encoder::new(sample_rate, channels, application)
             .map_err(|e| CodecError::Encoding(format!("Failed to create Opus encoder: {:?}", e)))?;
 
-        encoder.set_bitrate(Bitrate::Bits(config.bitrate as i32))
+        encoder
+            .set_bitrate(Bitrate::Bits(config.bitrate as i32))
             .map_err(|e| CodecError::Encoding(format!("Failed to set bitrate: {:?}", e)))?;
 
         let decoder = Decoder::new(sample_rate, channels)
@@ -191,7 +196,9 @@ impl OpusCodec {
         // Opus can encode variable-length frames, allocate max size
         let mut output = vec![0u8; 4000]; // Max Opus frame size
 
-        let encoded_len = self.encoder.encode(pcm, &mut output)
+        let encoded_len = self
+            .encoder
+            .encode(pcm, &mut output)
             .map_err(|e| CodecError::Encoding(format!("Opus encoding failed: {:?}", e)))?;
 
         output.truncate(encoded_len);
@@ -203,7 +210,9 @@ impl OpusCodec {
         let frame_size = self.config.frame_size();
         let mut output = vec![0i16; frame_size];
 
-        let decoded_len = self.decoder.decode(Some(encoded), &mut output, false)
+        let decoded_len = self
+            .decoder
+            .decode(Some(encoded), &mut output, false)
             .map_err(|e| CodecError::Decoding(format!("Opus decoding failed: {:?}", e)))?;
 
         output.truncate(decoded_len);
@@ -279,13 +288,13 @@ pub struct OpusCodec;
 impl OpusCodec {
     pub fn new() -> Result<Self> {
         Err(CodecError::InvalidFormat(
-            "Opus support not enabled. Compile with --features opus".to_string()
+            "Opus support not enabled. Compile with --features opus".to_string(),
         ))
     }
 
     pub fn with_config(_config: OpusConfig) -> Result<Self> {
         Err(CodecError::InvalidFormat(
-            "Opus support not enabled. Compile with --features opus".to_string()
+            "Opus support not enabled. Compile with --features opus".to_string(),
         ))
     }
 }
@@ -306,13 +315,13 @@ impl AudioCodec for OpusCodec {
 
     fn encode(&mut self, _pcm: &[i16]) -> Result<Vec<u8>> {
         Err(CodecError::InvalidFormat(
-            "Opus support not enabled. Compile with --features opus".to_string()
+            "Opus support not enabled. Compile with --features opus".to_string(),
         ))
     }
 
     fn decode(&mut self, _encoded: &[u8]) -> Result<Vec<i16>> {
         Err(CodecError::InvalidFormat(
-            "Opus support not enabled. Compile with --features opus".to_string()
+            "Opus support not enabled. Compile with --features opus".to_string(),
         ))
     }
 

@@ -8,7 +8,7 @@ use aya::{
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// XDP operating mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +72,10 @@ impl XdpManager {
     /// available (not compiled yet), it will create a stub manager that can be used
     /// for API compatibility but won't actually load XDP.
     pub async fn new(interface: &str, mode: XdpMode) -> Result<Self> {
-        info!("Initializing XDP on interface {} with mode {:?}", interface, mode);
+        info!(
+            "Initializing XDP on interface {} with mode {:?}",
+            interface, mode
+        );
 
         let mut manager = Self {
             interface: interface.to_string(),
@@ -146,7 +149,10 @@ impl XdpManager {
             .attach(&self.interface, self.mode.to_flags())
             .map_err(|e| Error::XdpAttachFailed(format!("Failed to attach: {}", e)))?;
 
-        info!("XDP program attached to interface {} successfully", self.interface);
+        info!(
+            "XDP program attached to interface {} successfully",
+            self.interface
+        );
 
         *self.bpf.write().await = Some(bpf);
         self.loaded = true;
@@ -181,7 +187,10 @@ impl XdpManager {
             .attach(&self.interface, self.mode.to_flags())
             .map_err(|e| Error::XdpAttachFailed(format!("Failed to attach: {}", e)))?;
 
-        info!("XDP program attached to interface {} successfully", self.interface);
+        info!(
+            "XDP program attached to interface {} successfully",
+            self.interface
+        );
 
         *self.bpf.write().await = Some(bpf);
         self.loaded = true;
@@ -205,7 +214,9 @@ impl XdpManager {
     }
 
     /// Get access to the forward map for inserting/deleting rules
-    pub async fn forward_map(&self) -> Result<Option<BpfHashMap<&mut aya::maps::MapData, ForwardKey, ForwardValue>>> {
+    pub async fn forward_map(
+        &self,
+    ) -> Result<Option<BpfHashMap<&mut aya::maps::MapData, ForwardKey, ForwardValue>>> {
         let bpf_lock = self.bpf.read().await;
 
         if let Some(bpf) = bpf_lock.as_ref() {

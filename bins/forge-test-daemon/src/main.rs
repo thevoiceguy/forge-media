@@ -68,7 +68,10 @@ async fn main() -> Result<()> {
         }
         Err(e) => {
             error!("✗ Failed to connect to Forge API: {}", e);
-            error!("Make sure Forge Media Engine is running on {}", config.forge_api_url);
+            error!(
+                "Make sure Forge Media Engine is running on {}",
+                config.forge_api_url
+            );
             return Err(e.into());
         }
     }
@@ -147,7 +150,10 @@ async fn main() -> Result<()> {
         Ok(session_list) => {
             info!("✓ Active sessions: {}", session_list.len());
             for session in session_list {
-                info!("  - {}: RTP={}, state={}", session.call_id, session.rtp_port, session.state);
+                info!(
+                    "  - {}: RTP={}, state={}",
+                    session.call_id, session.rtp_port, session.state
+                );
             }
         }
         Err(e) => {

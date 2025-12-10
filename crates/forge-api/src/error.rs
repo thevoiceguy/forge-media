@@ -56,9 +56,9 @@ impl ApiError {
     /// Get the HTTP status code for this error
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::SessionNotFound(_)
-            | Self::RoomNotFound(_)
-            | Self::RecordingNotFound(_) => StatusCode::NOT_FOUND,
+            Self::SessionNotFound(_) | Self::RoomNotFound(_) | Self::RecordingNotFound(_) => {
+                StatusCode::NOT_FOUND
+            }
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,

@@ -30,7 +30,7 @@
 //! let opus_data = transcoder.transcode(&g711_data).unwrap();
 //! ```
 
-use crate::{AudioFormat, TranscoderError, Result};
+use crate::{AudioFormat, Result, TranscoderError};
 use forge_codecs::{self as codecs, AudioCodec, AudioCodecType};
 use forge_resampler::Resampler;
 
@@ -217,11 +217,13 @@ impl Transcoder {
 }
 
 /// Builder for creating transcoders with custom configurations
+#[allow(dead_code)]
 pub struct TranscoderBuilder {
     src_format: AudioFormat,
     dst_format: AudioFormat,
 }
 
+#[allow(dead_code)]
 impl TranscoderBuilder {
     /// Create a new transcoder builder
     pub fn new(src_format: AudioFormat, dst_format: AudioFormat) -> Self {

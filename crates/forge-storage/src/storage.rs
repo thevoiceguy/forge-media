@@ -2,7 +2,7 @@
 //!
 //! Manages recording metadata, retention policies, and automatic cleanup
 
-use crate::{StorageError, Result};
+use crate::{Result, StorageError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -61,6 +61,15 @@ impl RecordingInfo {
             self.size_bytes = metadata.len();
         }
 
+        // Update duration based on wall-clock
+        if let Ok(elapsed) = self
+            .ended_at
+            .unwrap_or_else(SystemTime::now)
+            .duration_since(self.started_at)
+        {
+            self.duration_secs = elapsed.as_secs_f64();
+        }
+
         Ok(())
     }
 
@@ -91,6 +100,8 @@ impl RecordingInfo {
 pub struct StorageManager {
     /// Recording metadata index
     recordings: HashMap<String, RecordingInfo>,
+    /// Active room-level recordings (room_id -> recording_id)
+    active_room_recordings: HashMap<String, String>,
     /// Base directory for recordings
     _base_dir: PathBuf,
     /// Retention period (recordings older than this will be deleted)
@@ -113,6 +124,7 @@ impl StorageManager {
     ) -> Self {
         Self {
             recordings: HashMap::new(),
+            active_room_recordings: HashMap::new(),
             _base_dir: base_dir.as_ref().to_path_buf(),
             retention_period,
             max_storage_bytes,
@@ -122,18 +134,40 @@ impl StorageManager {
     /// Register a new recording
     pub fn register_recording(&mut self, info: RecordingInfo) {
         debug!("Registering recording: {}", info.id);
+        if info.participant_id.is_none() {
+            self.active_room_recordings
+                .insert(info.room_id.clone(), info.id.clone());
+        }
         self.recordings.insert(info.id.clone(), info);
     }
 
     /// Finalize a recording
     pub async fn finalize_recording(&mut self, id: &str) -> Result<()> {
-        let recording = self.recordings.get_mut(id)
-            .ok_or_else(|| StorageError::RecordingNotFound(format!("Recording {} not found", id)))?;
+        let recording = self.recordings.get_mut(id).ok_or_else(|| {
+            StorageError::RecordingNotFound(format!("Recording {} not found", id))
+        })?;
 
         recording.finalize().await?;
-        info!("Finalized recording {}: {} bytes, {:.2}s",
-              id, recording.size_bytes, recording.duration_secs);
+        if recording.participant_id.is_none() {
+            self.active_room_recordings.remove(&recording.room_id);
+        }
+        info!(
+            "Finalized recording {}: {} bytes, {:.2}s",
+            id, recording.size_bytes, recording.duration_secs
+        );
         Ok(())
+    }
+
+    /// Finalize an active room recording using the room id
+    pub async fn finalize_room_recording(&mut self, room_id: &str) -> Result<()> {
+        if let Some(id) = self.active_room_recordings.get(room_id).cloned() {
+            self.finalize_recording(&id).await
+        } else {
+            Err(StorageError::RecordingNotFound(format!(
+                "No active recording for room {}",
+                room_id
+            )))
+        }
     }
 
     /// Get recording info
@@ -164,8 +198,9 @@ impl StorageManager {
 
     /// Delete a recording
     pub async fn delete_recording(&mut self, id: &str) -> Result<()> {
-        let recording = self.recordings.remove(id)
-            .ok_or_else(|| StorageError::RecordingNotFound(format!("Recording {} not found", id)))?;
+        let recording = self.recordings.remove(id).ok_or_else(|| {
+            StorageError::RecordingNotFound(format!("Recording {} not found", id))
+        })?;
 
         recording.delete().await?;
         info!("Deleted recording {}", id);
@@ -182,7 +217,8 @@ impl StorageManager {
         let mut deleted_count = 0;
 
         // Find recordings to delete
-        let to_delete: Vec<String> = self.recordings
+        let to_delete: Vec<String> = self
+            .recordings
             .values()
             .filter(|r| {
                 // Only delete completed recordings
@@ -227,11 +263,14 @@ impl StorageManager {
             return Ok(0); // Within limits
         }
 
-        info!("Storage limit exceeded: {} / {} bytes, cleaning up...",
-              total_storage, self.max_storage_bytes);
+        info!(
+            "Storage limit exceeded: {} / {} bytes, cleaning up...",
+            total_storage, self.max_storage_bytes
+        );
 
         // Collect (id, size, end_time) tuples to avoid holding references
-        let mut completed: Vec<(String, u64, SystemTime)> = self.recordings
+        let mut completed: Vec<(String, u64, SystemTime)> = self
+            .recordings
             .values()
             .filter(|r| r.ended_at.is_some())
             .map(|r| (r.id.clone(), r.size_bytes, r.ended_at.unwrap()))
@@ -257,7 +296,10 @@ impl StorageManager {
             }
         }
 
-        info!("Deleted {} recordings to enforce storage limits", deleted_count);
+        info!(
+            "Deleted {} recordings to enforce storage limits",
+            deleted_count
+        );
         Ok(deleted_count)
     }
 }
@@ -267,7 +309,7 @@ impl Default for StorageManager {
         Self::new(
             "/tmp/forge-recordings",
             Duration::from_secs(7 * 24 * 3600), // 7 days
-            0, // Unlimited
+            0,                                  // Unlimited
         )
     }
 }
@@ -298,11 +340,8 @@ mod tests {
     #[test]
     fn test_storage_manager() {
         let temp_dir = TempDir::new().unwrap();
-        let mut manager = StorageManager::new(
-            temp_dir.path(),
-            Duration::from_secs(3600),
-            1_000_000,
-        );
+        let mut manager =
+            StorageManager::new(temp_dir.path(), Duration::from_secs(3600), 1_000_000);
 
         let path = temp_dir.path().join("test.wav");
         let info = RecordingInfo::new("rec-1", path, "room-1", None);

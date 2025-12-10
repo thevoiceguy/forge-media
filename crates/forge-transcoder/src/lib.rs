@@ -4,12 +4,12 @@
 
 use thiserror::Error;
 
-mod transcoder;
 pub mod rtp;
+mod transcoder;
 
 pub use forge_codecs::AudioFormat;
+pub use rtp::{PayloadTypeMap, RtpTranscoder};
 pub use transcoder::Transcoder;
-pub use rtp::{RtpTranscoder, PayloadTypeMap};
 
 /// Transcoder error types
 #[derive(Error, Debug)]

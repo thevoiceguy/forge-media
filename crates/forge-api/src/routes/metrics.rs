@@ -64,10 +64,7 @@ async fn get_metrics(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
     let active_sessions = state.session_manager.session_count();
 
     // Get port pool stats
-    let (allocated, available) = state
-        .session_manager
-        .port_pool_stats()
-        .await;
+    let (allocated, available) = state.session_manager.port_pool_stats().await;
     let capacity = allocated + available;
     let utilization_percent = if capacity > 0 {
         (allocated as f64 / capacity as f64) * 100.0

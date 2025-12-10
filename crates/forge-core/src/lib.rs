@@ -11,14 +11,14 @@
 //! - [`traits`] - Core traits for codecs and audio processing
 //! - [`events`] - Event system for state change notifications
 
-pub mod types;
-pub mod error;
 pub mod config;
-pub mod traits;
+pub mod error;
 pub mod events;
+pub mod traits;
+pub mod types;
 
-pub use types::*;
-pub use error::*;
 pub use config::*;
-pub use traits::*;
+pub use error::*;
 pub use events::*;
+pub use traits::*;
+pub use types::*;

@@ -17,7 +17,10 @@ fn main() {
 
     if ebpf_path.exists() {
         eprintln!("✓ Found pre-compiled eBPF program: ebpf/rtp_forward.o");
-        eprintln!("  Size: {} bytes", std::fs::metadata(&ebpf_path).unwrap().len());
+        eprintln!(
+            "  Size: {} bytes",
+            std::fs::metadata(&ebpf_path).unwrap().len()
+        );
 
         // Tell the Rust compiler where to find it for include_bytes! (use absolute path)
         println!("cargo:rustc-env=EBPF_OBJECT_PATH={}", ebpf_path.display());

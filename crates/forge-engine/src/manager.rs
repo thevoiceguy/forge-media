@@ -2,7 +2,7 @@
 
 use crate::session::{MediaSession, MediaSessionConfig};
 use dashmap::DashMap;
-use forge_core::{CallId, ParticipantId, ForgeError, Result, EventBus};
+use forge_core::{CallId, EventBus, ForgeError, ParticipantId, Result};
 use forge_rtp::{PortPool, PortPoolConfig};
 use metrics::gauge;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -103,7 +103,10 @@ impl SessionManager {
                 }
                 Err(e) => {
                     if xdp_config.fallback {
-                        tracing::warn!("Failed to initialize XDP, falling back to userspace: {}", e);
+                        tracing::warn!(
+                            "Failed to initialize XDP, falling back to userspace: {}",
+                            e
+                        );
                         None
                     } else {
                         tracing::error!("Failed to initialize XDP: {}", e);
@@ -234,7 +237,9 @@ impl SessionManager {
 
     /// Get an existing session by call ID
     pub fn get_session(&self, call_id: &CallId) -> Option<Arc<MediaSession>> {
-        self.sessions.get(call_id).map(|entry| Arc::clone(entry.value()))
+        self.sessions
+            .get(call_id)
+            .map(|entry| Arc::clone(entry.value()))
     }
 
     /// List all active sessions
@@ -411,7 +416,14 @@ mod tests {
         let participant_b = ParticipantId::generate();
 
         let session = manager
-            .create_session(call_id.clone(), participant_a, participant_b, None, None, None)
+            .create_session(
+                call_id.clone(),
+                participant_a,
+                participant_b,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
 
@@ -438,7 +450,14 @@ mod tests {
 
         // Create session
         manager
-            .create_session(call_id.clone(), participant_a, participant_b, None, None, None)
+            .create_session(
+                call_id.clone(),
+                participant_a,
+                participant_b,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(manager.session_count(), 1);
@@ -470,7 +489,14 @@ mod tests {
 
         // Create session with short timeout
         manager
-            .create_session(call_id.clone(), participant_a, participant_b, None, None, None)
+            .create_session(
+                call_id.clone(),
+                participant_a,
+                participant_b,
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(manager.session_count(), 1);
@@ -500,14 +526,17 @@ mod tests {
         // First run
         manager.start_monitoring().await;
         let call_id = CallId::generate();
-        manager.create_session(
-            call_id.clone(),
-            ParticipantId::generate(),
-            ParticipantId::generate(),
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        manager
+            .create_session(
+                call_id.clone(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         assert_eq!(manager.session_count(), 0, "session should be cleaned up");
@@ -516,17 +545,24 @@ mod tests {
         // Second run after stop should still work
         manager.start_monitoring().await;
         let call_id2 = CallId::generate();
-        manager.create_session(
-            call_id2.clone(),
-            ParticipantId::generate(),
-            ParticipantId::generate(),
-            None,
-            None,
-            None,
-        ).await.unwrap();
+        manager
+            .create_session(
+                call_id2.clone(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        assert_eq!(manager.session_count(), 0, "session should be cleaned up after restart");
+        assert_eq!(
+            manager.session_count(),
+            0,
+            "session should be cleaned up after restart"
+        );
         manager.stop_monitoring().await;
     }
 }

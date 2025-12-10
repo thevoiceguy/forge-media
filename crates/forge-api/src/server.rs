@@ -1,21 +1,22 @@
 //! API server implementation
 
 use crate::middleware;
-use crate::routes::{self, sessions::AppState, prometheus::MetricsHandle};
-use axum::Router;
+use crate::routes::{self, prometheus::MetricsHandle, sessions::AppState};
 use axum::middleware as axum_middleware;
 use axum::Extension;
-use axum_server::tls_rustls::{RustlsConfig, bind_rustls};
+use axum::Router;
+use axum_server::tls_rustls::{bind_rustls, RustlsConfig};
+use forge_core::EventBus;
 use forge_engine::{SessionManager, SessionManagerConfig};
 use forge_rtp::PortPoolConfig;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use std::path::PathBuf;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tower::ServiceBuilder;
-use tracing::{info, error};
+use tracing::{error, info};
 
 /// API server configuration
 #[derive(Debug, Clone)]
@@ -33,6 +34,10 @@ pub struct ApiServerConfig {
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub recording_base_dir: PathBuf,
+    pub prompts_base_dir: PathBuf,
+    pub siprec_enabled: bool,
+    pub siprec_output_dir: PathBuf,
+    pub siprec_format: forge_core::AudioFormat,
     pub xdp_enabled: bool,
     pub xdp_interface: String,
     pub xdp_mode: String,
@@ -54,6 +59,10 @@ impl Default for ApiServerConfig {
             tls_cert: None,
             tls_key: None,
             recording_base_dir: PathBuf::from("/var/lib/forge/recordings"),
+            prompts_base_dir: PathBuf::from("/var/lib/forge/prompts"),
+            siprec_enabled: false,
+            siprec_output_dir: PathBuf::from("/var/lib/forge/siprec"),
+            siprec_format: forge_core::AudioFormat::pcm_mono(),
             xdp_enabled: false,
             xdp_interface: "lo".to_string(),
             xdp_mode: "generic".to_string(),
@@ -67,6 +76,8 @@ pub struct ApiServer {
     state: Arc<AppState>,
     auth_config: middleware::auth::AuthConfig,
     rate_limiter: middleware::RateLimiter,
+    #[allow(dead_code)]
+    siprec_manager: Option<forge_siprec::SiprecManager>,
 }
 
 impl ApiServer {
@@ -84,6 +95,9 @@ impl ApiServer {
             port_pool_config,
             ..Default::default()
         };
+
+        // Event bus for inter-component notifications
+        let event_bus = Arc::new(EventBus::new());
 
         // Create session manager with XDP if enabled
         let session_manager = {
@@ -104,12 +118,14 @@ impl ApiServer {
                         fallback: true,
                     };
 
-                    info!("Initializing XDP on interface {} with mode {:?}",
-                          xdp_config.interface, xdp_config.mode);
+                    info!(
+                        "Initializing XDP on interface {} with mode {:?}",
+                        xdp_config.interface, xdp_config.mode
+                    );
 
-                    SessionManager::new_with_xdp(session_manager_config, xdp_config, None).await
+                    SessionManager::new_with_xdp(session_manager_config, xdp_config, Some(event_bus.clone())).await
                 } else {
-                    SessionManager::new(session_manager_config, None)
+                    SessionManager::new(session_manager_config, Some(event_bus.clone()))
                 }
             }
 
@@ -118,7 +134,7 @@ impl ApiServer {
                 if config.xdp_enabled {
                     info!("XDP requested but not available on this platform or not compiled with 'xdp' feature");
                 }
-                SessionManager::new(session_manager_config, None)
+                SessionManager::new(session_manager_config, Some(event_bus.clone()))
             }
         };
 
@@ -127,20 +143,45 @@ impl ApiServer {
             forge_conference_processor::ConferenceBridge::new(
                 forge_media_processor::AudioFormat::pcm_mono(),
                 480, // 10ms frame at 48kHz
-            ).expect("Failed to create conference bridge")
+            )
+            .expect("Failed to create conference bridge"),
         );
         info!("✓ Conference bridge initialized");
+
+        // Start SIPREC manager if enabled
+        let siprec_manager = if config.siprec_enabled {
+            info!(
+                "✓ SIPREC enabled; writing captures to {:?}",
+                config.siprec_output_dir
+            );
+            Some(forge_siprec::SiprecManager::start(
+                forge_siprec::SiprecManagerConfig {
+                    output_dir: config.siprec_output_dir.clone(),
+                    format: config.siprec_format,
+                    auth_token: None,
+                },
+                event_bus.clone(),
+            ))
+        } else {
+            None
+        };
 
         // Validate recording base directory
         Self::validate_recording_dir(&config.recording_base_dir)
             .expect("Invalid recording base directory");
-        info!("✓ Recording directory validated: {:?}", config.recording_base_dir);
+        info!(
+            "✓ Recording directory validated: {:?}",
+            config.recording_base_dir
+        );
 
         // Validate CORS origins if CORS is enabled
         if config.enable_cors && !config.allowed_origins.is_empty() {
             Self::validate_cors_origins(&config.allowed_origins)
                 .expect("Invalid CORS origin configuration");
-            info!("✓ CORS origins validated: {} origins", config.allowed_origins.len());
+            info!(
+                "✓ CORS origins validated: {} origins",
+                config.allowed_origins.len()
+            );
         }
 
         let state = Arc::new(AppState::new(
@@ -148,6 +189,7 @@ impl ApiServer {
             metrics_handle,
             conference_bridge,
             config.recording_base_dir.clone(),
+            config.prompts_base_dir.clone(),
         ));
         let auth_config = middleware::auth::AuthConfig::new(config.auth_tokens.clone());
         let rate_limiter = middleware::RateLimiter::new(
@@ -160,6 +202,7 @@ impl ApiServer {
             state,
             auth_config,
             rate_limiter,
+            siprec_manager,
         }
     }
 
@@ -231,20 +274,19 @@ impl ApiServer {
             return Ok(None);
         }
 
-        let cert = self
-            .config
-            .tls_cert
-            .clone()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "TLS cert path not configured"))?;
-        let key = self
-            .config
-            .tls_key
-            .clone()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "TLS key path not configured"))?;
+        let cert = self.config.tls_cert.clone().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "TLS cert path not configured")
+        })?;
+        let key = self.config.tls_key.clone().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "TLS key path not configured")
+        })?;
 
-        let config = RustlsConfig::from_pem_file(cert, key)
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to load TLS config: {}", e)))?;
+        let config = RustlsConfig::from_pem_file(cert, key).await.map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to load TLS config: {}", e),
+            )
+        })?;
 
         Ok(Some(config))
     }
@@ -260,7 +302,9 @@ impl ApiServer {
             .layer(Extension(self.rate_limiter.clone()))
             .layer(Extension(self.auth_config.clone()))
             .layer(axum_middleware::from_fn(middleware::auth::auth_middleware))
-            .layer(axum_middleware::from_fn(middleware::rate_limit::rate_limit_middleware))
+            .layer(axum_middleware::from_fn(
+                middleware::rate_limit::rate_limit_middleware,
+            ))
             .layer(middleware::tracing_layer());
 
         router = router.layer(middleware_stack);
@@ -291,9 +335,18 @@ impl ApiServer {
         // Log available endpoints for HTTP
         info!("✓ HTTP server listening on {}", self.config.bind_addr);
         info!("  Health check: http://{}/health", self.config.bind_addr);
-        info!("  Sessions API: http://{}/v1/sessions", self.config.bind_addr);
-        info!("  Metrics (JSON): http://{}/v1/metrics", self.config.bind_addr);
-        info!("  Metrics (Prometheus): http://{}/metrics/prometheus", self.config.bind_addr);
+        info!(
+            "  Sessions API: http://{}/v1/sessions",
+            self.config.bind_addr
+        );
+        info!(
+            "  Metrics (JSON): http://{}/v1/metrics",
+            self.config.bind_addr
+        );
+        info!(
+            "  Metrics (Prometheus): http://{}/metrics/prometheus",
+            self.config.bind_addr
+        );
 
         let http_server = {
             let router = router.clone();
@@ -309,16 +362,16 @@ impl ApiServer {
 
         // Optionally start HTTPS
         if let Some(tls) = tls_config {
-            let https_addr = self
-                .config
-                .https_bind
-                .unwrap_or(self.config.bind_addr);
+            let https_addr = self.config.https_bind.unwrap_or(self.config.bind_addr);
 
             info!("✓ HTTPS server listening on {}", https_addr);
             info!("  Health check: https://{}/health", https_addr);
             info!("  Sessions API: https://{}/v1/sessions", https_addr);
             info!("  Metrics (JSON): https://{}/v1/metrics", https_addr);
-            info!("  Metrics (Prometheus): https://{}/metrics/prometheus", https_addr);
+            info!(
+                "  Metrics (Prometheus): https://{}/metrics/prometheus",
+                https_addr
+            );
 
             let https = async move {
                 bind_rustls(https_addr, tls)
@@ -357,9 +410,18 @@ impl ApiServer {
 
         info!("✓ API server listening on {}", self.config.bind_addr);
         info!("  Health check: http://{}/health", self.config.bind_addr);
-        info!("  Sessions API: http://{}/v1/sessions", self.config.bind_addr);
-        info!("  Metrics (JSON): http://{}/v1/metrics", self.config.bind_addr);
-        info!("  Metrics (Prometheus): http://{}/metrics", self.config.bind_addr);
+        info!(
+            "  Sessions API: http://{}/v1/sessions",
+            self.config.bind_addr
+        );
+        info!(
+            "  Metrics (JSON): http://{}/v1/metrics",
+            self.config.bind_addr
+        );
+        info!(
+            "  Metrics (Prometheus): http://{}/metrics",
+            self.config.bind_addr
+        );
 
         let shutdown_notify = Arc::new(Notify::new());
         let shutdown_task = shutdown_notify.clone();
@@ -385,10 +447,7 @@ impl ApiServer {
         };
 
         let result = if let Some(tls) = tls_config {
-            let https_addr = self
-                .config
-                .https_bind
-                .unwrap_or(self.config.bind_addr);
+            let https_addr = self.config.https_bind.unwrap_or(self.config.bind_addr);
 
             info!("✓ HTTPS server listening on {}", https_addr);
             let https_router = router.clone().into_make_service();

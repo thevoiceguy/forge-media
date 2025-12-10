@@ -14,7 +14,7 @@ use core::mem;
 struct EthHdr {
     dst_mac: [u8; 6],
     src_mac: [u8; 6],
-    eth_type: u16,  // Network byte order
+    eth_type: u16, // Network byte order
 }
 
 /// IPv4 header (simplified)
@@ -45,11 +45,11 @@ struct UdpHdr {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ForwardKey {
-    pub src_ip: u32,      // Source IP (network byte order)
-    pub src_port: u16,    // Source port (network byte order)
-    pub dst_port: u16,    // Destination port (our RTP port)
-    pub dst_ip: u32,      // Destination IP (our IP)
-    pub protocol: u8,     // UDP = 17
+    pub src_ip: u32,   // Source IP (network byte order)
+    pub src_port: u16, // Source port (network byte order)
+    pub dst_port: u16, // Destination port (our RTP port)
+    pub dst_ip: u32,   // Destination IP (our IP)
+    pub protocol: u8,  // UDP = 17
     pub _padding: [u8; 3],
 }
 
@@ -57,11 +57,11 @@ pub struct ForwardKey {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ForwardValue {
-    pub dest_ip: u32,     // Where to forward (network byte order)
-    pub dest_port: u16,   // Destination port
-    pub src_ip: u32,      // Our source IP for reply
-    pub src_port: u16,    // Our source port for reply
-    pub last_seen: u64,   // Timestamp (nanoseconds)
+    pub dest_ip: u32,   // Where to forward (network byte order)
+    pub dest_port: u16, // Destination port
+    pub src_ip: u32,    // Our source IP for reply
+    pub src_port: u16,  // Our source port for reply
+    pub last_seen: u64, // Timestamp (nanoseconds)
 }
 
 /// Statistics per session
@@ -94,13 +94,11 @@ pub struct Event {
 
 /// Forward map: 5-tuple → forward destination
 #[map]
-static FORWARD_MAP: HashMap<ForwardKey, ForwardValue> =
-    HashMap::with_max_entries(10000, 0);
+static FORWARD_MAP: HashMap<ForwardKey, ForwardValue> = HashMap::with_max_entries(10000, 0);
 
 /// Statistics map: session ID → stats
 #[map]
-static STATS_MAP: HashMap<u32, SessionStats> =
-    HashMap::with_max_entries(10000, 0);
+static STATS_MAP: HashMap<u32, SessionStats> = HashMap::with_max_entries(10000, 0);
 
 /// Event ring buffer for userspace communication
 #[map]
@@ -173,9 +171,7 @@ fn try_forward(ctx: &XdpContext) -> Result<u32, ()> {
     };
 
     // Lookup in forward map
-    let forward_value = unsafe {
-        FORWARD_MAP.get(&key)
-    };
+    let forward_value = unsafe { FORWARD_MAP.get(&key) };
 
     if let Some(fwd) = forward_value {
         // Found a forwarding rule - rewrite headers and forward
@@ -195,7 +191,7 @@ fn try_forward(ctx: &XdpContext) -> Result<u32, ()> {
             // TODO: Recalculate checksums
             // For now, rely on hardware offload or disable checksum validation
             // In production, we should calculate incremental checksum updates
-            (*ip_mut).check = 0;  // Let hardware recalculate
+            (*ip_mut).check = 0; // Let hardware recalculate
             (*udp_mut).check = 0; // Let hardware recalculate
         }
 
@@ -206,7 +202,12 @@ fn try_forward(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     // No forwarding rule found - send event and pass to userspace for learning
-    send_event(EventType::UnknownSource, unsafe { (*ip).saddr }, src_port, dst_port);
+    send_event(
+        EventType::UnknownSource,
+        unsafe { (*ip).saddr },
+        src_port,
+        dst_port,
+    );
 
     Ok(xdp_action::XDP_PASS)
 }

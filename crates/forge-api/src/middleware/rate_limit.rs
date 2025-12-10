@@ -53,9 +53,10 @@ impl RateLimiter {
         // Cleanup old entries every 5 minutes
         if now.duration_since(state.last_cleanup) > Duration::from_secs(300) {
             state.clients.retain(|_, client_state| {
-                client_state.requests.iter().any(|&req_time| {
-                    now.duration_since(req_time) < self.window_duration
-                })
+                client_state
+                    .requests
+                    .iter()
+                    .any(|&req_time| now.duration_since(req_time) < self.window_duration)
             });
             state.last_cleanup = now;
         }
@@ -66,9 +67,9 @@ impl RateLimiter {
         });
 
         // Remove expired requests
-        client_state.requests.retain(|&req_time| {
-            now.duration_since(req_time) < self.window_duration
-        });
+        client_state
+            .requests
+            .retain(|&req_time| now.duration_since(req_time) < self.window_duration);
 
         // Check if limit exceeded
         if client_state.requests.len() >= self.requests_per_window {

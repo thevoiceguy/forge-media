@@ -141,13 +141,11 @@ impl DtmfDeduplicator {
 
     /// Find duplicate event in recent events
     fn find_duplicate(&self, event: &DtmfEvent, now: Instant) -> Option<usize> {
-        self.recent_events
-            .iter()
-            .position(|recent| {
-                recent.digit == event.digit
-                    && recent.event_type == event.event_type
-                    && now.duration_since(recent.timestamp) < self.dedup_window
-            })
+        self.recent_events.iter().position(|recent| {
+            recent.digit == event.digit
+                && recent.event_type == event.event_type
+                && now.duration_since(recent.timestamp) < self.dedup_window
+        })
     }
 
     /// Track a new event
@@ -217,7 +215,8 @@ mod tests {
         let mut dedup = DtmfDeduplicator::new();
 
         // Inband arrives first
-        let inband_event = DtmfEvent::new(DtmfDigit::Five, DtmfEventType::Start, DtmfMethod::Inband);
+        let inband_event =
+            DtmfEvent::new(DtmfDigit::Five, DtmfEventType::Start, DtmfMethod::Inband);
         assert!(dedup.should_publish(&inband_event));
 
         // RFC 2833 arrives shortly after - should replace and publish
@@ -225,7 +224,8 @@ mod tests {
         assert!(dedup.should_publish(&rfc_event));
 
         // Another inband should now be suppressed
-        let inband_event2 = DtmfEvent::new(DtmfDigit::Five, DtmfEventType::Start, DtmfMethod::Inband);
+        let inband_event2 =
+            DtmfEvent::new(DtmfDigit::Five, DtmfEventType::Start, DtmfMethod::Inband);
         assert!(!dedup.should_publish(&inband_event2));
     }
 
@@ -245,7 +245,8 @@ mod tests {
     fn test_dedup_different_event_types() {
         let mut dedup = DtmfDeduplicator::new();
 
-        let start_event = DtmfEvent::new(DtmfDigit::Five, DtmfEventType::Start, DtmfMethod::Rfc2833);
+        let start_event =
+            DtmfEvent::new(DtmfDigit::Five, DtmfEventType::Start, DtmfMethod::Rfc2833);
         let end_event = DtmfEvent::new(DtmfDigit::Five, DtmfEventType::End, DtmfMethod::Rfc2833);
 
         // Different event types should both be published

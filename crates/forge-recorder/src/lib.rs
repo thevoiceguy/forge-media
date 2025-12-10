@@ -4,9 +4,11 @@
 
 use thiserror::Error;
 
+mod playback;
 mod recorder;
 
 pub use forge_core::{AudioCodec, AudioFormat};
+pub use playback::PlaybackSource;
 pub use recorder::AudioRecorder;
 
 /// Recorder error types
@@ -15,8 +17,20 @@ pub enum RecorderError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("Audio format error: {0}")]
+    WavError(#[from] hound::Error),
+
     #[error("Audio encoding error: {0}")]
     Encoding(String),
+
+    #[error("Unsupported codec: {0}")]
+    UnsupportedCodec(String),
+
+    #[error("Recorder already started")]
+    AlreadyRecording,
+
+    #[error("Recorder not started")]
+    NotRecording,
 
     #[error("Invalid audio format: {0}")]
     InvalidFormat(String),

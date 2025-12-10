@@ -16,12 +16,12 @@ pub enum DtmfDigit {
     Seven,
     Eight,
     Nine,
-    Star,      // *
-    Hash,      // #
-    A,         // Extended digit A
-    B,         // Extended digit B
-    C,         // Extended digit C
-    D,         // Extended digit D
+    Star, // *
+    Hash, // #
+    A,    // Extended digit A
+    B,    // Extended digit B
+    C,    // Extended digit C
+    D,    // Extended digit D
 }
 
 impl DtmfDigit {
@@ -44,7 +44,10 @@ impl DtmfDigit {
             13 => Ok(DtmfDigit::B),
             14 => Ok(DtmfDigit::C),
             15 => Ok(DtmfDigit::D),
-            _ => Err(DtmfError::InvalidDigit(format!("Invalid event code: {}", code))),
+            _ => Err(DtmfError::InvalidDigit(format!(
+                "Invalid event code: {}",
+                code
+            ))),
         }
     }
 

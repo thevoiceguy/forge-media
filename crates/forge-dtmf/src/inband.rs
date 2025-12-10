@@ -80,6 +80,7 @@ impl GoertzelFilter {
 /// Goertzel-based DTMF detector
 pub struct GoertzelDetector {
     /// Sample rate
+    #[allow(dead_code)]
     sample_rate: u32,
     /// Low frequency filters
     low_filters: Vec<GoertzelFilter>,
@@ -383,11 +384,26 @@ mod tests {
 
     #[test]
     fn test_frequency_mapping() {
-        assert_eq!(GoertzelDetector::map_frequencies(0, 0).unwrap(), DtmfDigit::One);
-        assert_eq!(GoertzelDetector::map_frequencies(1, 1).unwrap(), DtmfDigit::Five);
-        assert_eq!(GoertzelDetector::map_frequencies(3, 1).unwrap(), DtmfDigit::Zero);
-        assert_eq!(GoertzelDetector::map_frequencies(3, 0).unwrap(), DtmfDigit::Star);
-        assert_eq!(GoertzelDetector::map_frequencies(3, 2).unwrap(), DtmfDigit::Hash);
+        assert_eq!(
+            GoertzelDetector::map_frequencies(0, 0).unwrap(),
+            DtmfDigit::One
+        );
+        assert_eq!(
+            GoertzelDetector::map_frequencies(1, 1).unwrap(),
+            DtmfDigit::Five
+        );
+        assert_eq!(
+            GoertzelDetector::map_frequencies(3, 1).unwrap(),
+            DtmfDigit::Zero
+        );
+        assert_eq!(
+            GoertzelDetector::map_frequencies(3, 0).unwrap(),
+            DtmfDigit::Star
+        );
+        assert_eq!(
+            GoertzelDetector::map_frequencies(3, 2).unwrap(),
+            DtmfDigit::Hash
+        );
     }
 
     #[test]

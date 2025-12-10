@@ -35,10 +35,7 @@ impl AuthConfig {
 }
 
 /// Public endpoints that don't require authentication
-const PUBLIC_ENDPOINTS: &[&str] = &[
-    "/health",
-    "/metrics/prometheus",
-];
+const PUBLIC_ENDPOINTS: &[&str] = &["/health", "/metrics/prometheus"];
 
 /// Simple bearer-token authorization middleware
 pub async fn auth_middleware(
@@ -73,10 +70,7 @@ pub async fn auth_middleware(
             }
         }
 
-        Err((
-            StatusCode::UNAUTHORIZED,
-            "Missing or invalid bearer token",
-        ))
+        Err((StatusCode::UNAUTHORIZED, "Missing or invalid bearer token"))
     } else {
         // If no config is present, allow by default (should not happen in normal operation)
         Ok(next.run(request).await)
@@ -90,27 +84,51 @@ mod tests {
     #[test]
     fn test_auth_config_is_enabled() {
         let config_empty = AuthConfig::new(Vec::<String>::new());
-        assert!(!config_empty.is_enabled(), "Empty config should not be enabled");
+        assert!(
+            !config_empty.is_enabled(),
+            "Empty config should not be enabled"
+        );
 
         let config_with_token = AuthConfig::new(vec!["token"]);
-        assert!(config_with_token.is_enabled(), "Config with token should be enabled");
+        assert!(
+            config_with_token.is_enabled(),
+            "Config with token should be enabled"
+        );
     }
 
     #[test]
     fn test_auth_config_validates_tokens() {
         let config = AuthConfig::new(vec!["valid-token-1", "valid-token-2"]);
 
-        assert!(config.is_valid("valid-token-1"), "Should accept valid token 1");
-        assert!(config.is_valid("valid-token-2"), "Should accept valid token 2");
-        assert!(!config.is_valid("invalid-token"), "Should reject invalid token");
+        assert!(
+            config.is_valid("valid-token-1"),
+            "Should accept valid token 1"
+        );
+        assert!(
+            config.is_valid("valid-token-2"),
+            "Should accept valid token 2"
+        );
+        assert!(
+            !config.is_valid("invalid-token"),
+            "Should reject invalid token"
+        );
         assert!(!config.is_valid(""), "Should reject empty token");
     }
 
     #[test]
     fn test_public_endpoints_list() {
-        assert!(PUBLIC_ENDPOINTS.contains(&"/health"), "Health endpoint should be public");
-        assert!(PUBLIC_ENDPOINTS.contains(&"/metrics/prometheus"), "Metrics endpoint should be public");
-        assert!(!PUBLIC_ENDPOINTS.contains(&"/v1/sessions"), "Sessions endpoint should not be public");
+        assert!(
+            PUBLIC_ENDPOINTS.contains(&"/health"),
+            "Health endpoint should be public"
+        );
+        assert!(
+            PUBLIC_ENDPOINTS.contains(&"/metrics/prometheus"),
+            "Metrics endpoint should be public"
+        );
+        assert!(
+            !PUBLIC_ENDPOINTS.contains(&"/v1/sessions"),
+            "Sessions endpoint should not be public"
+        );
     }
 
     #[test]

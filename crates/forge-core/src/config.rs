@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
+use crate::types::AudioFormat;
 
 /// Main Forge configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +212,14 @@ pub struct ApiConfig {
     /// Base directory for recordings (all recording paths are constrained within this directory)
     #[serde(default = "default_recording_base_dir")]
     pub recording_base_dir: std::path::PathBuf,
+
+    /// Base directory for playback prompts/announcements
+    #[serde(default = "default_prompts_base_dir")]
+    pub prompts_base_dir: std::path::PathBuf,
+
+    /// SIPREC configuration
+    #[serde(default)]
+    pub siprec: SiprecConfig,
 }
 
 impl Default for ApiConfig {
@@ -228,6 +237,8 @@ impl Default for ApiConfig {
             rate_limit_requests_per_window: default_rate_limit_requests(),
             rate_limit_window_secs: default_rate_limit_window_secs(),
             recording_base_dir: default_recording_base_dir(),
+            prompts_base_dir: default_prompts_base_dir(),
+            siprec: SiprecConfig::default(),
         }
     }
 }
@@ -254,4 +265,42 @@ fn default_rate_limit_window_secs() -> u64 {
 
 fn default_recording_base_dir() -> std::path::PathBuf {
     "/var/lib/forge/recordings".into()
+}
+
+fn default_prompts_base_dir() -> std::path::PathBuf {
+    "/var/lib/forge/prompts".into()
+}
+
+/// SIPREC (compliance recording) configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SiprecConfig {
+    /// Enable SIPREC captures
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Output directory for SIPREC recordings
+    #[serde(default = "default_siprec_output_dir")]
+    pub output_dir: PathBuf,
+
+    /// Audio format to use for captures
+    #[serde(default = "default_siprec_audio_format")]
+    pub format: AudioFormat,
+}
+
+impl Default for SiprecConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            output_dir: default_siprec_output_dir(),
+            format: default_siprec_audio_format(),
+        }
+    }
+}
+
+fn default_siprec_output_dir() -> PathBuf {
+    "/var/lib/forge/siprec".into()
+}
+
+fn default_siprec_audio_format() -> AudioFormat {
+    AudioFormat::pcm_mono()
 }

@@ -15,7 +15,9 @@ impl ForwardingEngine {
     ///
     /// This spawns a task that continuously receives RTP packets from the socket
     /// and forwards them to the appropriate participant.
-    pub async fn start_forwarding(session: Arc<MediaSession>) -> Result<tokio::task::JoinHandle<()>> {
+    pub async fn start_forwarding(
+        session: Arc<MediaSession>,
+    ) -> Result<tokio::task::JoinHandle<()>> {
         // Verify session is in correct state
         let state = session.state().await;
         if state != SessionState::Active {
@@ -49,7 +51,10 @@ impl ForwardingEngine {
             // Check if session is still active
             let state = session.state().await;
             if state != SessionState::Active {
-                tracing::info!("Session {} no longer active, stopping forwarding", call_id.0);
+                tracing::info!(
+                    "Session {} no longer active, stopping forwarding",
+                    call_id.0
+                );
                 break;
             }
 
@@ -180,18 +185,23 @@ impl ForwardingEngine {
 
         // G.711 (payload types 0=PCMU, 8=PCMA) or Opus (configurable, typically 111)
         if ((payload_type == 0 || payload_type == 8) || payload_type == opus_pt)
-            && session.dtmf_config().enable_inband {
+            && session.dtmf_config().enable_inband
+        {
             // Decode audio to PCM samples for DTMF detection
             let pcm_samples: Vec<i16> = if payload_type == 0 {
                 // PCMU (µ-law)
-                packet.payload.iter().map(|&byte| {
-                    forge_codecs::g711::decode_ulaw(byte)
-                }).collect()
+                packet
+                    .payload
+                    .iter()
+                    .map(|&byte| forge_codecs::g711::decode_ulaw(byte))
+                    .collect()
             } else if payload_type == 8 {
                 // PCMA (A-law)
-                packet.payload.iter().map(|&byte| {
-                    forge_codecs::g711::decode_alaw(byte)
-                }).collect()
+                packet
+                    .payload
+                    .iter()
+                    .map(|&byte| forge_codecs::g711::decode_alaw(byte))
+                    .collect()
             } else if payload_type == opus_pt {
                 // Opus - decode using the Opus decoder
                 #[cfg(feature = "opus")]
@@ -212,9 +222,7 @@ impl ForwardingEngine {
                 }
                 #[cfg(not(feature = "opus"))]
                 {
-                    tracing::trace!(
-                        "Opus DTMF detection disabled: opus feature not enabled"
-                    );
+                    tracing::trace!("Opus DTMF detection disabled: opus feature not enabled");
                     // Skip DTMF detection, continue with normal forwarding
                     Vec::new()
                 }
@@ -228,44 +236,40 @@ impl ForwardingEngine {
                 counter!("forge_dtmf_inband_packets_processed_total", 1);
                 let mut detector = session.inband_detector().lock().await;
                 match detector.process_samples(&pcm_samples) {
-                Ok(events) => {
-                    // Check deduplication before publishing
-                    let mut dedup = session.dtmf_dedup().lock().await;
-                    for event in events {
-                        if dedup.should_publish(&event) {
-                            tracing::info!(
-                                "Inband DTMF detected for session {}: {} ({:?})",
-                                call_id.0,
-                                event.digit,
-                                event.event_type
-                            );
+                    Ok(events) => {
+                        // Check deduplication before publishing
+                        let mut dedup = session.dtmf_dedup().lock().await;
+                        for event in events {
+                            if dedup.should_publish(&event) {
+                                tracing::info!(
+                                    "Inband DTMF detected for session {}: {} ({:?})",
+                                    call_id.0,
+                                    event.digit,
+                                    event.event_type
+                                );
 
-                            // Record metrics
-                            counter!("forge_dtmf_events_total", 1, "method" => "inband", "digit" => format!("{}", event.digit));
-                            counter!("forge_dtmf_inband_events_total", 1, "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type));
+                                // Record metrics
+                                counter!("forge_dtmf_events_total", 1, "method" => "inband", "digit" => format!("{}", event.digit));
+                                counter!("forge_dtmf_inband_events_total", 1, "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type));
 
-                            // Publish event to EventBus
-                            if let Some(bus) = session.event_bus() {
-                                bus.publish(event.to_forge_event(call_id.clone()));
+                                // Publish event to EventBus
+                                if let Some(bus) = session.event_bus() {
+                                    bus.publish(event.to_forge_event(call_id.clone()));
+                                }
+                            } else {
+                                tracing::debug!(
+                                    "Inband DTMF suppressed (duplicate) for session {}: {}",
+                                    call_id.0,
+                                    event.digit
+                                );
+                                counter!("forge_dtmf_duplicates_suppressed_total", 1, "method" => "inband", "digit" => format!("{}", event.digit));
                             }
-                        } else {
-                            tracing::debug!(
-                                "Inband DTMF suppressed (duplicate) for session {}: {}",
-                                call_id.0,
-                                event.digit
-                            );
-                            counter!("forge_dtmf_duplicates_suppressed_total", 1, "method" => "inband", "digit" => format!("{}", event.digit));
                         }
                     }
+                    Err(e) => {
+                        tracing::trace!("Inband DTMF processing for session {}: {}", call_id.0, e);
+                    }
                 }
-                Err(e) => {
-                    tracing::trace!(
-                        "Inband DTMF processing for session {}: {}",
-                        call_id.0,
-                        e
-                    );
-                }
-            }
             }
             // Note: Continue with normal forwarding (inband detection is passive)
         }
@@ -346,7 +350,15 @@ impl ForwardingEngine {
 
         // Transcode if needed (different codecs between participants)
         let packet = if session.transcoding_config().enable_transcoding {
-            Self::handle_transcoding(session, &sender, &receiver, participant_a, participant_b, packet).await
+            Self::handle_transcoding(
+                session,
+                &sender,
+                &receiver,
+                participant_a,
+                participant_b,
+                packet,
+            )
+            .await
         } else {
             packet
         };
@@ -415,7 +427,10 @@ impl ForwardingEngine {
         let src_codec = match pt_map.to_codec(src_pt) {
             Some(codec) => codec,
             None => {
-                tracing::trace!("Unknown source codec for PT {}, skipping transcoding", src_pt);
+                tracing::trace!(
+                    "Unknown source codec for PT {}, skipping transcoding",
+                    src_pt
+                );
                 return packet;
             }
         };
@@ -423,7 +438,10 @@ impl ForwardingEngine {
         let dst_codec = match pt_map.to_codec(dst_pt) {
             Some(codec) => codec,
             None => {
-                tracing::trace!("Unknown destination codec for PT {}, skipping transcoding", dst_pt);
+                tracing::trace!(
+                    "Unknown destination codec for PT {}, skipping transcoding",
+                    dst_pt
+                );
                 return packet;
             }
         };
@@ -455,11 +473,15 @@ impl ForwardingEngine {
                         packet.payload = transcoded_payload.clone().into();
 
                         // Update payload type in header (preserve marker bit)
-                        packet.header.marker_payload_type = (packet.header.marker_payload_type & 0x80) | dst_pt;
+                        packet.header.marker_payload_type =
+                            (packet.header.marker_payload_type & 0x80) | dst_pt;
 
                         // Record transcoding metrics
                         counter!("forge_transcoding_packets_total", 1);
-                        counter!("forge_transcoding_bytes_total", transcoded_payload.len() as u64);
+                        counter!(
+                            "forge_transcoding_bytes_total",
+                            transcoded_payload.len() as u64
+                        );
 
                         tracing::trace!(
                             "Transcoded packet: {} → {} ({} bytes → {} bytes)",
@@ -509,8 +531,14 @@ impl ForwardingEngine {
                 match &rtcp_packet {
                     forge_rtp::rtcp::RtcpPacket::SenderReport(sr) => {
                         // Record sender statistics
-                        counter!("forge_rtcp_sender_packets_total", sr.sender_packet_count as u64);
-                        counter!("forge_rtcp_sender_bytes_total", sr.sender_octet_count as u64);
+                        counter!(
+                            "forge_rtcp_sender_packets_total",
+                            sr.sender_packet_count as u64
+                        );
+                        counter!(
+                            "forge_rtcp_sender_bytes_total",
+                            sr.sender_octet_count as u64
+                        );
 
                         // Process reception report blocks
                         for block in &sr.report_blocks {
@@ -551,16 +579,18 @@ impl ForwardingEngine {
                         || rtp_addr.port() == source_addr.port())
                 {
                     // From A, forward to B
-                    b.remote_addr.map(|addr| {
-                        std::net::SocketAddr::new(addr.ip(), addr.port() + 1)
-                    })
+                    b.remote_addr
+                        .map(|addr| std::net::SocketAddr::new(addr.ip(), addr.port() + 1))
                 } else if let Some(rtp_addr_b) = b.remote_addr {
                     if rtp_addr_b.ip() == source_addr.ip()
                         && (rtp_addr_b.port() + 1 == source_addr.port()
                             || rtp_addr_b.port() == source_addr.port())
                     {
                         // From B, forward to A
-                        Some(std::net::SocketAddr::new(rtp_addr.ip(), rtp_addr.port() + 1))
+                        Some(std::net::SocketAddr::new(
+                            rtp_addr.ip(),
+                            rtp_addr.port() + 1,
+                        ))
                     } else {
                         tracing::debug!(
                             "Received RTCP from unknown source {} for session {}",
@@ -599,7 +629,11 @@ impl ForwardingEngine {
                     e
                 );
             } else {
-                tracing::trace!("Forwarded RTCP packet for session {} to {}", call_id.0, addr);
+                tracing::trace!(
+                    "Forwarded RTCP packet for session {} to {}",
+                    call_id.0,
+                    addr
+                );
 
                 // Record sent metrics
                 counter!("forge_rtcp_packets_sent_total", 1);
@@ -645,7 +679,10 @@ impl ForwardingEngine {
         // fraction_lost is expressed as a fixed-point number with 8-bit fraction (0-255 = 0-100%)
         let packet_loss_fraction = (block.fraction_lost as f64) / 256.0;
         gauge!("forge_rtcp_packet_loss_fraction", packet_loss_fraction);
-        gauge!("forge_rtcp_packets_lost_total", block.cumulative_lost as f64);
+        gauge!(
+            "forge_rtcp_packets_lost_total",
+            block.cumulative_lost as f64
+        );
 
         // Record jitter (in timestamp units)
         gauge!("forge_rtcp_jitter", block.jitter as f64);

@@ -1,10 +1,10 @@
 //! API middleware
 
-pub mod rate_limit;
 pub mod auth;
+pub mod rate_limit;
 
 use axum::http::HeaderValue;
-use tower_http::cors::{Any, CorsLayer, AllowOrigin};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
@@ -17,7 +17,9 @@ pub use rate_limit::RateLimiter;
 pub fn cors_layer(origins: &[String]) -> CorsLayer {
     // Allow any origin if explicitly configured
     if origins.iter().any(|o| o == "*") {
-        tracing::warn!("CORS configured with wildcard origin; this is not recommended for production");
+        tracing::warn!(
+            "CORS configured with wildcard origin; this is not recommended for production"
+        );
         return CorsLayer::permissive();
     }
 
@@ -33,9 +35,7 @@ pub fn cors_layer(origins: &[String]) -> CorsLayer {
     // Access-Control-Allow-Origin header.
     if allowed.is_empty() {
         tracing::info!("CORS enabled but no valid origins configured; cross-origin requests will be blocked by browsers");
-        CorsLayer::new()
-            .allow_methods(Any)
-            .allow_headers(Any)
+        CorsLayer::new().allow_methods(Any).allow_headers(Any)
     } else {
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(allowed))
@@ -45,7 +45,9 @@ pub fn cors_layer(origins: &[String]) -> CorsLayer {
 }
 
 /// Create tracing/logging layer for request logging
-pub fn tracing_layer() -> TraceLayer<tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>> {
+pub fn tracing_layer(
+) -> TraceLayer<tower_http::classify::SharedClassifier<tower_http::classify::ServerErrorsAsFailures>>
+{
     TraceLayer::new_for_http()
         .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
         .on_response(DefaultOnResponse::new().level(Level::INFO))

@@ -13,6 +13,7 @@ forge-rtp = { path = "../forge-rtp" }
 forge-media-processor = { path = "../forge-media-processor" }
 forge-storage = { path = "../forge-storage" }
 forge-conference-processor = { path = "../forge-conference-processor" }
+forge-siprec = { path = "../forge-siprec" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -39,6 +40,7 @@ thiserror = { workspace = true }
 chrono = { workspace = true }
 lazy_static = "1.5"
 validator = { workspace = true }
+uuid = { workspace = true }
 
 [features]
 xdp = ["forge-engine/xdp"]

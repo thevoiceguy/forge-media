@@ -243,6 +243,28 @@ impl ConferenceRoom {
         let _ = self.mixer.remove_participant(ANNOUNCER_ID);
         Ok(())
     }
+
+    /// Get metadata for a specific participant
+    pub fn get_participant_metadata(
+        &self,
+        participant_id: &str,
+    ) -> Result<forge_mixer::ParticipantMetadata> {
+        Ok(self.mixer.get_participant_metadata(participant_id)?)
+    }
+
+    /// Set the state for a specific participant
+    pub fn set_participant_state(
+        &self,
+        participant_id: &str,
+        state: forge_mixer::ParticipantState,
+    ) -> Result<()> {
+        Ok(self.mixer.set_participant_state(participant_id, state)?)
+    }
+
+    /// Get metadata for all participants in the room
+    pub fn get_all_participant_metadata(&self) -> Vec<forge_mixer::ParticipantMetadata> {
+        self.mixer.get_all_participant_metadata()
+    }
 }
 
 /// Conference bridge for managing multiple conference rooms

@@ -7,7 +7,7 @@ use thiserror::Error;
 mod mixer;
 
 pub use forge_core::AudioFormat;
-pub use mixer::{AudioMixer, ParticipantId};
+pub use mixer::{AudioMixer, ParticipantId, ParticipantMetadata, ParticipantState};
 
 /// Mixer error types
 #[derive(Error, Debug)]

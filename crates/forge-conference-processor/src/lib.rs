@@ -8,6 +8,7 @@ mod conference;
 
 pub use conference::{ConferenceBridge, ConferenceRoom, RoomId};
 pub use forge_core::AudioFormat;
+pub use forge_mixer::{ParticipantMetadata, ParticipantState};
 
 /// Conference error types
 #[derive(Error, Debug)]

@@ -55,6 +55,31 @@ pub struct PlayAnnouncementRequest {
     pub prompt: String,
 }
 
+/// Request to update participant state
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct UpdateParticipantStateRequest {
+    /// New state: "active", "muted", or "on_hold"
+    #[validate(length(min = 1, max = 32))]
+    pub state: String,
+}
+
+/// Participant metadata response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ParticipantMetadataResponse {
+    pub id: String,
+    pub join_time_ms: u128,
+    pub state: String,
+    pub gain: f32,
+    pub is_recording: bool,
+    pub packets_received: u64,
+}
+
+/// List of participant metadata response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ParticipantMetadataListResponse {
+    pub participants: Vec<ParticipantMetadataResponse>,
+    pub count: usize,
+}
 
 /// Conference room information response
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,8 +129,20 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(add_participant),
         )
         .route(
+            "/v1/conferences/:room_id/participants/metadata",
+            get(get_all_participants_metadata),
+        )
+        .route(
             "/v1/conferences/:room_id/participants/:participant_id",
             delete(remove_participant),
+        )
+        .route(
+            "/v1/conferences/:room_id/participants/:participant_id/metadata",
+            get(get_participant_metadata),
+        )
+        .route(
+            "/v1/conferences/:room_id/participants/:participant_id/state",
+            axum::routing::put(update_participant_state),
         )
         .route(
             "/v1/conferences/:room_id/recording",
@@ -684,6 +721,169 @@ fn resolve_prompt_path(base_dir: &FsPath, requested: &str) -> Result<PathBuf, St
     }
 
     Ok(sanitized)
+}
+
+/// Get metadata for a specific participant
+///
+/// GET /v1/conferences/:room_id/participants/:participant_id/metadata
+#[tracing::instrument(skip(state), fields(room_id = %room_id, participant_id = %participant_id))]
+async fn get_participant_metadata(
+    State(state): State<Arc<AppState>>,
+    Path((room_id, participant_id)): Path<(String, String)>,
+) -> ApiResult<Json<ApiSuccess<ParticipantMetadataResponse>>> {
+    tracing::info!(
+        "API request to get metadata for participant {} in room {}",
+        participant_id,
+        room_id
+    );
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Get participant metadata
+    let metadata = room
+        .get_participant_metadata(&participant_id)
+        .map_err(|e| {
+            let err_msg = e.to_string();
+            if err_msg.contains("not found") || err_msg.contains("Participant") {
+                ApiError::InvalidRequest(format!(
+                    "Participant {} not found in room {}",
+                    participant_id, room_id
+                ))
+            } else {
+                ApiError::Internal(format!("Failed to get participant metadata: {}", e))
+            }
+        })?;
+
+    // Convert to response
+    let state_str = match metadata.state {
+        forge_conference_processor::ParticipantState::Active => "active",
+        forge_conference_processor::ParticipantState::Muted => "muted",
+        forge_conference_processor::ParticipantState::OnHold => "on_hold",
+    };
+
+    let response = ParticipantMetadataResponse {
+        id: metadata.id,
+        join_time_ms: metadata.join_time.elapsed().as_millis(),
+        state: state_str.to_string(),
+        gain: metadata.gain,
+        is_recording: metadata.is_recording,
+        packets_received: metadata.packets_received,
+    };
+
+    Ok(Json(success(response)))
+}
+
+/// Get metadata for all participants in a room
+///
+/// GET /v1/conferences/:room_id/participants/metadata
+#[tracing::instrument(skip(state), fields(room_id = %room_id))]
+async fn get_all_participants_metadata(
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<String>,
+) -> ApiResult<Json<ApiSuccess<ParticipantMetadataListResponse>>> {
+    tracing::info!(
+        "API request to get metadata for all participants in room {}",
+        room_id
+    );
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Get all participant metadata
+    let metadata_list = room.get_all_participant_metadata();
+
+    // Convert to response
+    let participants: Vec<ParticipantMetadataResponse> = metadata_list
+        .into_iter()
+        .map(|metadata| {
+            let state_str = match metadata.state {
+                forge_conference_processor::ParticipantState::Active => "active",
+                forge_conference_processor::ParticipantState::Muted => "muted",
+                forge_conference_processor::ParticipantState::OnHold => "on_hold",
+            };
+
+            ParticipantMetadataResponse {
+                id: metadata.id,
+                join_time_ms: metadata.join_time.elapsed().as_millis(),
+                state: state_str.to_string(),
+                gain: metadata.gain,
+                is_recording: metadata.is_recording,
+                packets_received: metadata.packets_received,
+            }
+        })
+        .collect();
+
+    let count = participants.len();
+    let response = ParticipantMetadataListResponse {
+        participants,
+        count,
+    };
+
+    Ok(Json(success(response)))
+}
+
+/// Update participant state
+///
+/// PUT /v1/conferences/:room_id/participants/:participant_id/state
+#[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = %participant_id))]
+async fn update_participant_state(
+    State(state): State<Arc<AppState>>,
+    Path((room_id, participant_id)): Path<(String, String)>,
+    Json(request): Json<UpdateParticipantStateRequest>,
+) -> ApiResult<axum::response::Response> {
+    tracing::info!(
+        "API request to update state for participant {} in room {} to {}",
+        participant_id,
+        room_id,
+        request.state
+    );
+
+    // Validate request
+    request
+        .validate()
+        .map_err(|e| ApiError::InvalidRequest(format!("Validation error: {}", e)))?;
+
+    // Parse state
+    let state_enum = match request.state.to_lowercase().as_str() {
+        "active" => forge_conference_processor::ParticipantState::Active,
+        "muted" => forge_conference_processor::ParticipantState::Muted,
+        "on_hold" | "onhold" => forge_conference_processor::ParticipantState::OnHold,
+        _ => {
+            return Err(ApiError::InvalidRequest(format!(
+                "Invalid state '{}'. Must be 'active', 'muted', or 'on_hold'",
+                request.state
+            )))
+        }
+    };
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Update participant state
+    room.set_participant_state(&participant_id, state_enum)
+        .map_err(|e| {
+            let err_msg = e.to_string();
+            if err_msg.contains("not found") || err_msg.contains("Participant") {
+                ApiError::InvalidRequest(format!(
+                    "Participant {} not found in room {}",
+                    participant_id, room_id
+                ))
+            } else {
+                ApiError::Internal(format!("Failed to update participant state: {}", e))
+            }
+        })?;
+
+    Ok(no_content())
 }
 
 #[cfg(test)]

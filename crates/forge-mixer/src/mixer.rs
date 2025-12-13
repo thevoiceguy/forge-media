@@ -10,10 +10,39 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 /// Unique identifier for a participant in the mixer
 pub type ParticipantId = String;
+
+/// Participant state in the conference
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticipantState {
+    /// Participant is active and can send/receive audio
+    Active,
+    /// Participant is muted (not sending audio)
+    Muted,
+    /// Participant is on hold (not sending or receiving audio)
+    OnHold,
+}
+
+/// Metadata about a participant in the mixer
+#[derive(Debug, Clone)]
+pub struct ParticipantMetadata {
+    /// Participant ID
+    pub id: String,
+    /// Time when participant joined
+    pub join_time: Instant,
+    /// Current participant state
+    pub state: ParticipantState,
+    /// Audio gain level (0.0 to 1.0)
+    pub gain: f32,
+    /// Whether participant is currently being recorded
+    pub is_recording: bool,
+    /// Number of audio packets received from this participant
+    pub packets_received: u64,
+}
 
 /// Audio buffer for a single participant
 struct ParticipantBuffer {
@@ -23,6 +52,12 @@ struct ParticipantBuffer {
     gain: f32,
     /// Optional recorder for this participant
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
+    /// Time when participant joined
+    join_time: Instant,
+    /// Current participant state
+    state: ParticipantState,
+    /// Number of packets received from this participant
+    packets_received: u64,
 }
 
 impl ParticipantBuffer {
@@ -31,11 +66,15 @@ impl ParticipantBuffer {
             samples: VecDeque::new(),
             gain: gain.clamp(0.0, 1.0),
             recorder: Arc::new(Mutex::new(None)),
+            join_time: Instant::now(),
+            state: ParticipantState::Active,
+            packets_received: 0,
         }
     }
 
     fn push_samples(&mut self, samples: &[i16]) {
         self.samples.extend(samples);
+        self.packets_received += 1;
 
         // Write to recorder if recording
         if let Some(recorder) = self.recorder.lock().as_ref() {
@@ -397,6 +436,63 @@ impl AudioMixer {
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
         Ok(participant.is_recording())
+    }
+
+    /// Get metadata for a specific participant
+    ///
+    /// # Arguments
+    /// * `id` - Participant identifier
+    ///
+    /// # Returns
+    /// ParticipantMetadata containing all tracking information
+    pub fn get_participant_metadata(&self, id: &str) -> Result<ParticipantMetadata> {
+        let participant = self
+            .participants
+            .get(id)
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
+
+        Ok(ParticipantMetadata {
+            id: id.to_string(),
+            join_time: participant.join_time,
+            state: participant.state,
+            gain: participant.gain,
+            is_recording: participant.is_recording(),
+            packets_received: participant.packets_received,
+        })
+    }
+
+    /// Set the state for a specific participant
+    ///
+    /// # Arguments
+    /// * `id` - Participant identifier
+    /// * `state` - New state (Active, Muted, or OnHold)
+    pub fn set_participant_state(&self, id: &str, state: ParticipantState) -> Result<()> {
+        let mut participant = self
+            .participants
+            .get_mut(id)
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
+
+        participant.state = state;
+        info!("Set participant {} state to {:?}", id, state);
+        Ok(())
+    }
+
+    /// Get metadata for all participants
+    ///
+    /// # Returns
+    /// Vec of ParticipantMetadata for all active participants
+    pub fn get_all_participant_metadata(&self) -> Vec<ParticipantMetadata> {
+        self.participants
+            .iter()
+            .map(|entry| ParticipantMetadata {
+                id: entry.key().clone(),
+                join_time: entry.value().join_time,
+                state: entry.value().state,
+                gain: entry.value().gain,
+                is_recording: entry.value().is_recording(),
+                packets_received: entry.value().packets_received,
+            })
+            .collect()
     }
 }
 

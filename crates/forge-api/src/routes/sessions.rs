@@ -21,8 +21,19 @@ pub struct CreateSessionRequest {
     pub participant_a: Option<String>,
     #[validate(length(min = 1, max = 256))]
     pub participant_b: Option<String>,
+    /// Legacy SDP field (for backward compatibility)
     #[validate(length(max = 65536))]
     pub sdp: Option<String>,
+    /// SDP offer from remote endpoint (for negotiation)
+    #[validate(length(max = 65536))]
+    pub sdp_offer: Option<String>,
+    /// Local IP address to use in SDP answer (required if sdp_offer is provided)
+    #[validate(length(min = 7, max = 45))] // IPv4 min: "1.1.1.1", IPv6 max
+    pub local_address: Option<String>,
+    /// SDP profile to use for capabilities (defaults to "audio-only")
+    /// Valid values: "audio-only", "audio-opus", "audio-all"
+    #[validate(length(min = 1, max = 64))]
+    pub sdp_profile: Option<String>,
     #[validate(length(min = 1, max = 256))]
     pub from_tag: Option<String>,
     #[validate(length(min = 1, max = 256))]
@@ -45,6 +56,10 @@ pub struct SessionResponse {
     pub rtp_port: u16,
     pub rtcp_port: u16,
     pub sdp: Option<String>,
+    /// Negotiated SDP answer (if sdp_offer was provided in request)
+    pub sdp_answer: Option<String>,
+    /// Negotiated codecs by media type (e.g., {"audio": ["PCMU", "PCMA"]})
+    pub negotiated_codecs: Option<std::collections::HashMap<String, Vec<String>>>,
     pub from_tag: Option<String>,
     pub to_tag: Option<String>,
     pub participant_a: Option<ParticipantStats>,
@@ -127,6 +142,97 @@ async fn create_session(
         .validate()
         .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
 
+    // SDP negotiation (if sdp_offer is provided)
+    let sdp_negotiation_result = if let Some(ref offer_text) = request.sdp_offer {
+        // Validate that local_address is provided
+        let local_addr = request
+            .local_address
+            .as_ref()
+            .ok_or_else(|| {
+                ApiError::InvalidRequest(
+                    "local_address is required when sdp_offer is provided".to_string(),
+                )
+            })?;
+
+        // Load SDP profile
+        let profile_name = request.sdp_profile.as_deref().unwrap_or("audio-only");
+        let profile = match profile_name {
+            "audio-only" => forge_sdp::profiles::SdpProfile::audio_only(),
+            "audio-opus" => forge_sdp::profiles::SdpProfile::audio_opus(),
+            "audio-all" => forge_sdp::profiles::SdpProfile::audio_all(),
+            _ => {
+                return Err(ApiError::InvalidRequest(format!(
+                    "Unknown SDP profile: {}. Valid values: audio-only, audio-opus, audio-all",
+                    profile_name
+                )));
+            }
+        };
+
+        tracing::debug!("Using SDP profile: {}", profile.name);
+
+        // Parse SDP offer
+        use forge_sdp::SessionDescriptionExt;
+        let offer = forge_sdp::SessionDescription::from_str(offer_text).map_err(|e| {
+            ApiError::InvalidRequest(format!("Invalid SDP offer: {}", e))
+        })?;
+
+        // Generate local capabilities (use a placeholder port, will be updated after session creation)
+        let local_caps = profile.with_local_addr(local_addr, 10000);
+
+        // Negotiate answer
+        let answer =
+            forge_sdp::SessionDescription::negotiate_answer(&offer, &local_caps, local_addr)
+                .map_err(|e| match e {
+                    forge_sdp::SdpError::NoCommonCodec => ApiError::NotAcceptable(
+                        "No common codec found between offer and local capabilities".to_string(),
+                    ),
+                    _ => ApiError::InvalidRequest(format!("SDP negotiation failed: {}", e)),
+                })?;
+
+        // Extract negotiated codecs and build ParticipantCodecConfig
+        let mut negotiated_codecs = std::collections::HashMap::new();
+        let codec_config = if let Some(audio_media) = answer.find_media(forge_sdp::MediaType::Audio) {
+            let codecs = forge_sdp::helpers::extract_codecs(audio_media);
+            let codec_names: Vec<String> = codecs
+                .iter()
+                .filter(|c| !c.is_dtmf()) // Exclude DTMF from list
+                .map(|c| c.encoding_name.clone())
+                .collect();
+            if !codec_names.is_empty() {
+                negotiated_codecs.insert("audio".to_string(), codec_names);
+            }
+
+            // Get primary codec for session configuration
+            if let Some(primary) = forge_sdp::helpers::extract_primary_codec(audio_media) {
+                if let Some(audio_codec) = primary.to_audio_codec() {
+                    Some(forge_engine::ParticipantCodecConfig {
+                        payload_type: primary.payload_type,
+                        codec: audio_codec,
+                        clock_rate: primary.clock_rate,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Serialize answer
+        let answer_text = forge_sdp::serialize::serialize_sdp(&answer);
+
+        tracing::info!(
+            "SDP negotiation successful: negotiated {:?}",
+            negotiated_codecs
+        );
+
+        Some((answer_text, negotiated_codecs, codec_config))
+    } else {
+        None
+    };
+
     // Parse or generate IDs
     let call_id = if let Some(id) = request.call_id {
         CallId(id)
@@ -160,23 +266,66 @@ async fn create_session(
         None
     };
 
-    // Create session
-    let session = state
-        .session_manager
-        .create_session_with_config(
-            call_id.clone(),
-            participant_a,
-            participant_b,
-            request.sdp.clone(),
-            request.from_tag.clone(),
-            request.to_tag.clone(),
-            custom_config,
-        )
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to create session: {}", e)))?;
+    // Create session (with codecs if negotiated)
+    let session = if let Some((_, _, Some(codec_config))) = &sdp_negotiation_result {
+        // Create session with negotiated codec configuration
+        // Both participants use the same negotiated codec in a 2-party call
+        state
+            .session_manager
+            .create_session_with_codecs(
+                call_id.clone(),
+                participant_a,
+                participant_b,
+                codec_config.clone(),
+                codec_config.clone(),
+                request.sdp.clone(),
+                request.from_tag.clone(),
+                request.to_tag.clone(),
+                custom_config,
+            )
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to create session: {}", e)))?
+    } else {
+        // Create session with default codec (PCMU)
+        state
+            .session_manager
+            .create_session_with_config(
+                call_id.clone(),
+                participant_a,
+                participant_b,
+                request.sdp.clone(),
+                request.from_tag.clone(),
+                request.to_tag.clone(),
+                custom_config,
+            )
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to create session: {}", e)))?
+    };
 
     let ports = session.ports();
     let session_state = session.state().await;
+
+    // Extract SDP answer and negotiated codecs from negotiation result
+    // Update SDP answer with actual allocated ports
+    let (sdp_answer, negotiated_codecs) = if let Some((answer_text, codecs, _)) = sdp_negotiation_result {
+        // Parse the answer to update ports
+        use forge_sdp::SessionDescriptionExt;
+        let mut answer = forge_sdp::SessionDescription::from_str(&answer_text)
+            .map_err(|e| ApiError::Internal(format!("Failed to parse generated SDP answer: {}", e)))?;
+
+        // Update connection and media port with actual allocated port
+        if let Some(audio_media) = answer.find_media_mut(forge_sdp::MediaType::Audio) {
+            audio_media.port = ports.rtp_port;
+        }
+
+        // Connection address is already set from negotiation, port is in media line
+
+        // Re-serialize with updated ports
+        let updated_answer = forge_sdp::serialize::serialize_sdp(&answer);
+        (Some(updated_answer), Some(codecs))
+    } else {
+        (None, None)
+    };
 
     let response = SessionResponse {
         call_id: call_id.0,
@@ -184,6 +333,8 @@ async fn create_session(
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
         sdp: session.sdp().map(|s| s.to_string()),
+        sdp_answer,
+        negotiated_codecs,
         from_tag: session.from_tag().map(|t| t.to_string()),
         to_tag: session.to_tag().map(|t| t.to_string()),
         participant_a: None,
@@ -227,6 +378,8 @@ async fn get_session(
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
         sdp: session.sdp().map(|s| s.to_string()),
+        sdp_answer: None,
+        negotiated_codecs: None,
         from_tag: session.from_tag().map(|t| t.to_string()),
         to_tag: session.to_tag().map(|t| t.to_string()),
         participant_a: Some(ParticipantStats {
@@ -291,6 +444,8 @@ async fn list_sessions(
             rtp_port: ports.rtp_port,
             rtcp_port: ports.rtcp_port,
             sdp: session.sdp().map(|s| s.to_string()),
+            sdp_answer: None,
+            negotiated_codecs: None,
             from_tag: session.from_tag().map(|t| t.to_string()),
             to_tag: session.to_tag().map(|t| t.to_string()),
             participant_a: None,
@@ -339,6 +494,8 @@ async fn start_session(
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
         sdp: session.sdp().map(|s| s.to_string()),
+        sdp_answer: None, // Will be populated in Sprint 2.2
+        negotiated_codecs: None, // Will be populated in Sprint 2.2
         from_tag: session.from_tag().map(|t| t.to_string()),
         to_tag: session.to_tag().map(|t| t.to_string()),
         participant_a: None,

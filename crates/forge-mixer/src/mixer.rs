@@ -367,12 +367,15 @@ impl AudioMixer {
             .get(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
+        // Copy format before await to ensure RwLockReadGuard is dropped
+        let format = *self.format.read();
+
         info!(
             "Starting recording for participant {} to {:?}",
             id,
             path.as_ref()
         );
-        participant.start_recording(path, *self.format.read()).await
+        participant.start_recording(path, format).await
     }
 
     /// Stop recording for a specific participant

@@ -170,6 +170,35 @@ impl StorageManager {
         }
     }
 
+    /// Finalize an active participant recording
+    ///
+    /// Finds the active recording for the given participant and finalizes it
+    pub async fn finalize_participant_recording(
+        &mut self,
+        room_id: &str,
+        participant_id: &str,
+    ) -> Result<()> {
+        // Find active participant recording
+        let recording_id = self
+            .recordings
+            .iter()
+            .find(|(_, r)| {
+                r.room_id == room_id
+                    && r.participant_id.as_deref() == Some(participant_id)
+                    && r.ended_at.is_none()
+            })
+            .map(|(id, _)| id.clone());
+
+        if let Some(id) = recording_id {
+            self.finalize_recording(&id).await
+        } else {
+            Err(StorageError::RecordingNotFound(format!(
+                "No active recording for participant {} in room {}",
+                participant_id, room_id
+            )))
+        }
+    }
+
     /// Get recording info
     pub fn get_recording(&self, id: &str) -> Option<&RecordingInfo> {
         self.recordings.get(id)

@@ -78,6 +78,27 @@ impl Default for MediaSessionConfig {
     }
 }
 
+/// Codec configuration for a participant
+#[derive(Debug, Clone)]
+pub struct ParticipantCodecConfig {
+    /// RTP payload type
+    pub payload_type: u8,
+    /// Audio codec
+    pub codec: forge_core::AudioCodec,
+    /// Codec clock rate (Hz)
+    pub clock_rate: u32,
+}
+
+impl Default for ParticipantCodecConfig {
+    fn default() -> Self {
+        Self {
+            payload_type: 0, // PCMU
+            codec: forge_core::AudioCodec::PCMU,
+            clock_rate: 8000,
+        }
+    }
+}
+
 /// Participant in a media session
 #[derive(Debug, Clone)]
 pub struct Participant {
@@ -85,8 +106,10 @@ pub struct Participant {
     pub id: ParticipantId,
     /// Remote RTP endpoint (learned via symmetric RTP)
     pub remote_addr: Option<SocketAddr>,
-    /// Codec payload type
+    /// Codec payload type (deprecated - use codec_config.payload_type)
     pub payload_type: u8,
+    /// Codec configuration
+    pub codec_config: ParticipantCodecConfig,
     /// Statistics
     pub stats: ParticipantStats,
 }
@@ -205,17 +228,21 @@ impl MediaSession {
         let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
         port_guard.disarm();
 
+        let default_codec_config = ParticipantCodecConfig::default();
+
         let participant_a = Participant {
             id: participant_a_id,
             remote_addr: None,
-            payload_type: 0, // Default to PCMU
+            payload_type: 0, // Default to PCMU (legacy field)
+            codec_config: default_codec_config.clone(),
             stats: ParticipantStats::default(),
         };
 
         let participant_b = Participant {
             id: participant_b_id,
             remote_addr: None,
-            payload_type: 0, // Default to PCMU
+            payload_type: 0, // Default to PCMU (legacy field)
+            codec_config: default_codec_config,
             stats: ParticipantStats::default(),
         };
 
@@ -272,6 +299,213 @@ impl MediaSession {
         Ok(session)
     }
 
+    /// Create a new media session with specific codec configurations
+    pub async fn new_with_codecs(
+        call_id: CallId,
+        participant_a_id: ParticipantId,
+        participant_b_id: ParticipantId,
+        codec_a: ParticipantCodecConfig,
+        codec_b: ParticipantCodecConfig,
+        port_pool: &Arc<PortPool>,
+        mut config: MediaSessionConfig,
+        event_bus: Option<Arc<EventBus>>,
+        sdp: Option<String>,
+        from_tag: Option<String>,
+        to_tag: Option<String>,
+    ) -> Result<Self> {
+        // Build custom payload type map from negotiated codecs
+        let mut pt_map = forge_transcoder::rtp::PayloadTypeMap::default();
+
+        // Update PT map with negotiated payload types
+        match codec_a.codec {
+            forge_core::AudioCodec::PCMU => pt_map.pcmu = codec_a.payload_type,
+            forge_core::AudioCodec::PCMA => pt_map.pcma = codec_a.payload_type,
+            #[cfg(feature = "opus")]
+            forge_core::AudioCodec::Opus => pt_map.opus = codec_a.payload_type,
+            _ => {} // Other codecs not yet supported in PT map
+        }
+        match codec_b.codec {
+            forge_core::AudioCodec::PCMU => pt_map.pcmu = codec_b.payload_type,
+            forge_core::AudioCodec::PCMA => pt_map.pcma = codec_b.payload_type,
+            #[cfg(feature = "opus")]
+            forge_core::AudioCodec::Opus => pt_map.opus = codec_b.payload_type,
+            _ => {} // Other codecs not yet supported in PT map
+        }
+
+        // Update transcoding config with negotiated PT map
+        config.transcoding_config.payload_type_map = pt_map;
+
+        // Update DTMF config with negotiated Opus PT if applicable
+        #[cfg(feature = "opus")]
+        {
+            if matches!(codec_a.codec, forge_core::AudioCodec::Opus) {
+                config.dtmf_config.opus_payload_type = Some(codec_a.payload_type);
+            } else if matches!(codec_b.codec, forge_core::AudioCodec::Opus) {
+                config.dtmf_config.opus_payload_type = Some(codec_b.payload_type);
+            }
+        }
+
+        tracing::debug!(
+            "Built payload type map for session: PCMU={}, PCMA={}, Opus={}",
+            pt_map.pcmu,
+            pt_map.pcma,
+            pt_map.opus
+        );
+
+        // Allocate ports
+        let ports = port_pool.allocate().await?;
+        let mut port_guard = PortAllocationGuard::new(Arc::clone(port_pool), ports);
+        tracing::info!(
+            "Allocated ports for session {}: RTP={}, RTCP={}",
+            call_id.0,
+            ports.rtp_port,
+            ports.rtcp_port
+        );
+
+        // Create socket pair
+        let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
+        port_guard.disarm();
+
+        let participant_a = Participant {
+            id: participant_a_id,
+            remote_addr: None,
+            payload_type: codec_a.payload_type,
+            codec_config: codec_a,
+            stats: ParticipantStats::default(),
+        };
+
+        let participant_b = Participant {
+            id: participant_b_id,
+            remote_addr: None,
+            payload_type: codec_b.payload_type,
+            codec_config: codec_b,
+            stats: ParticipantStats::default(),
+        };
+
+        let now = Instant::now();
+
+        let session = Self {
+            call_id: call_id.clone(),
+            state: Arc::new(RwLock::new(SessionState::Initializing)),
+            participant_a: Arc::new(RwLock::new(participant_a)),
+            participant_b: Arc::new(RwLock::new(participant_b)),
+            sockets: Arc::new(sockets),
+            ports,
+            port_pool: Arc::clone(port_pool),
+            ports_deallocated: Arc::new(AtomicBool::new(false)),
+            created_at: now,
+            last_activity: Arc::new(RwLock::new(now)),
+            config,
+            event_bus: event_bus.clone(),
+            dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
+            inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
+            dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            #[cfg(feature = "opus")]
+            opus_decoder: Arc::new(Mutex::new({
+                let opus_config = forge_codecs::opus::OpusConfig {
+                    sample_rate: 48000,
+                    channels: 1,
+                    application: forge_codecs::opus::OpusApplication::Voip,
+                    bitrate: 24000,
+                    frame_duration_ms: 20,
+                };
+                forge_codecs::opus::OpusCodec::with_config(opus_config)
+                    .expect("Failed to create Opus decoder for DTMF detection")
+            })),
+            transcoder_a_to_b: Arc::new(Mutex::new(None)),
+            transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
+            sdp,
+            from_tag,
+            to_tag,
+            #[cfg(all(target_os = "linux", feature = "xdp"))]
+            xdp_manager: None,
+            #[cfg(all(target_os = "linux", feature = "xdp"))]
+            xdp_active: Arc::new(AtomicBool::new(false)),
+        };
+
+        // Publish session created event
+        if let Some(bus) = &event_bus {
+            bus.publish(ForgeEvent::SessionCreated {
+                call_id,
+                timestamp: chrono::Utc::now(),
+            });
+        }
+
+        tracing::info!(
+            "Session {} created with codecs: A={:?}@{}Hz, B={:?}@{}Hz",
+            session.call_id.0,
+            session.participant_a.try_read().unwrap().codec_config.codec,
+            session.participant_a.try_read().unwrap().codec_config.clock_rate,
+            session.participant_b.try_read().unwrap().codec_config.codec,
+            session.participant_b.try_read().unwrap().codec_config.clock_rate,
+        );
+
+        // Automatic transcoding initialization on codec mismatch
+        let codec_a = session.participant_a.try_read().unwrap().codec_config.codec;
+        let codec_b = session.participant_b.try_read().unwrap().codec_config.codec;
+
+        if codec_a != codec_b {
+            tracing::info!(
+                "Codec mismatch detected in session {}: A={:?}, B={:?}. Initializing transcoders...",
+                session.call_id.0,
+                codec_a,
+                codec_b
+            );
+
+            // Convert to transcoder codec types
+            if let (Some(transcoder_codec_a), Some(transcoder_codec_b)) = (
+                Self::to_transcoder_codec(codec_a),
+                Self::to_transcoder_codec(codec_b),
+            ) {
+                // Initialize bidirectional transcoders
+                if let Err(e) = session
+                    .ensure_transcoder_a_to_b(transcoder_codec_a, transcoder_codec_b)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to initialize transcoder A→B for session {}: {}",
+                        session.call_id.0,
+                        e
+                    );
+                }
+
+                if let Err(e) = session
+                    .ensure_transcoder_b_to_a(transcoder_codec_b, transcoder_codec_a)
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to initialize transcoder B→A for session {}: {}",
+                        session.call_id.0,
+                        e
+                    );
+                }
+
+                tracing::info!(
+                    "Transcoders initialized for session {}: {:?} ↔ {:?}",
+                    session.call_id.0,
+                    codec_a,
+                    codec_b
+                );
+            } else {
+                tracing::warn!(
+                    "Codec mismatch in session {} but transcoding not available for {:?} ↔ {:?}",
+                    session.call_id.0,
+                    codec_a,
+                    codec_b
+                );
+            }
+        } else {
+            tracing::debug!(
+                "Session {} participants using same codec ({:?}), no transcoding needed",
+                session.call_id.0,
+                codec_a
+            );
+        }
+
+        Ok(session)
+    }
+
     /// Create a new media session with XDP support
     #[cfg(all(target_os = "linux", feature = "xdp"))]
     pub async fn new_with_xdp(
@@ -300,17 +534,21 @@ impl MediaSession {
         let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
         port_guard.disarm();
 
+        let default_codec_config = ParticipantCodecConfig::default();
+
         let participant_a = Participant {
             id: participant_a_id,
             remote_addr: None,
-            payload_type: 0, // Default to PCMU
+            payload_type: 0, // Default to PCMU (legacy field)
+            codec_config: default_codec_config.clone(),
             stats: ParticipantStats::default(),
         };
 
         let participant_b = Participant {
             id: participant_b_id,
             remote_addr: None,
-            payload_type: 0, // Default to PCMU
+            payload_type: 0, // Default to PCMU (legacy field)
+            codec_config: default_codec_config,
             stats: ParticipantStats::default(),
         };
 
@@ -449,6 +687,18 @@ impl MediaSession {
     /// Get transcoder for B → A direction
     pub fn transcoder_b_to_a(&self) -> &Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>> {
         &self.transcoder_b_to_a
+    }
+
+    /// Convert forge_core::AudioCodec to forge_codecs::AudioCodecType
+    fn to_transcoder_codec(codec: forge_core::AudioCodec) -> Option<forge_codecs::AudioCodecType> {
+        match codec {
+            forge_core::AudioCodec::PCMU => Some(forge_codecs::AudioCodecType::PCMU),
+            forge_core::AudioCodec::PCMA => Some(forge_codecs::AudioCodecType::PCMA),
+            forge_core::AudioCodec::Opus => Some(forge_codecs::AudioCodecType::Opus),
+            forge_core::AudioCodec::PCM => Some(forge_codecs::AudioCodecType::PCM),
+            // Codecs not supported by transcoder yet
+            _ => None,
+        }
     }
 
     /// Initialize transcoder for A → B if needed

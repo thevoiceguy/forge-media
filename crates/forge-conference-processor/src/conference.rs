@@ -185,7 +185,8 @@ impl ConferenceRoom {
         participant_id: &str,
         output_path: P,
     ) -> Result<()> {
-        let path = output_path.as_ref();
+        // Convert to owned PathBuf to ensure Send
+        let path = output_path.as_ref().to_path_buf();
         info!(
             "Starting recording for participant {} in room {} to {:?}",
             participant_id, self.id, path

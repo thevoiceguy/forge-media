@@ -38,12 +38,23 @@ pub struct StartRecordingRequest {
     pub codec: Option<String>,
 }
 
+/// Request to start participant recording
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct StartParticipantRecordingRequest {
+    #[validate(length(min = 1, max = 256))]
+    pub participant_id: String,
+    #[validate(length(min = 1, max = 1024))]
+    pub output_path: String,
+    // Note: Participant recordings use the room's audio format
+}
+
 /// Request to play an announcement into a conference
 #[derive(Debug, Serialize, Deserialize, Validate)]
 pub struct PlayAnnouncementRequest {
     #[validate(length(min = 1, max = 1024))]
     pub prompt: String,
 }
+
 
 /// Conference room information response
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,12 +112,8 @@ pub fn routes() -> Router<Arc<AppState>> {
             post(start_recording).delete(stop_recording),
         )
         .route(
-            "/v1/conferences/:room_id/participants/:participant_id/recording",
-            post(start_participant_recording_handler),
-        )
-        .route(
-            "/v1/conferences/:room_id/participants/:participant_id/recording",
-            delete(stop_participant_recording_handler),
+            "/v1/conferences/:room_id/participant-recording",
+            post(start_participant_rec).delete(stop_participant_rec),
         )
         .route(
             "/v1/conferences/:room_id/announcement",
@@ -407,40 +414,121 @@ async fn stop_recording(
 
 /// Start recording for a specific participant
 ///
-/// POST /v1/conferences/:room_id/participants/:participant_id/recording
-#[tracing::instrument(skip(_state), fields(room_id = %room_id, participant_id = %participant_id))]
-async fn start_participant_recording_handler(
-    State(_state): State<Arc<AppState>>,
-    Path((room_id, participant_id)): Path<(String, String)>,
+/// POST /v1/conferences/:room_id/participant-recording
+#[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = %request.participant_id))]
+async fn start_participant_rec(
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<String>,
+    Json(request): Json<StartParticipantRecordingRequest>,
 ) -> ApiResult<axum::response::Response> {
     tracing::info!(
         "API request to start participant recording for {} in {}",
-        participant_id,
+        request.participant_id,
         room_id
     );
 
-    // TODO: Implement participant recording
-    // Currently returns a stub response
+    // Validate request
+    request
+        .validate()
+        .map_err(|e| ApiError::InvalidRequest(format!("Validation error: {}", e)))?;
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Verify participant exists in room
+    if !room.participants().contains(&request.participant_id) {
+        return Err(ApiError::InvalidRequest(format!(
+            "Participant {} not found in room {}",
+            request.participant_id, room_id
+        )));
+    }
+
+    // Resolve output path with security checks
+    let output_path = resolve_recording_path(&state.recording_base_dir, &request.output_path)
+        .map_err(|e| ApiError::InvalidRequest(e))?;
+
+    // Start participant recording
+    room.start_participant_recording(&request.participant_id, &output_path)
+        .await
+        .map_err(|e| {
+            ApiError::Internal(format!(
+                "Failed to start participant recording: {}",
+                e
+            ))
+        })?;
+
+    // Register recording metadata
+    let recording_id = Uuid::new_v4().to_string();
+    state
+        .storage_manager
+        .lock()
+        .await
+        .register_recording(forge_storage::RecordingInfo::new(
+            recording_id,
+            output_path,
+            room_id.clone(),
+            Some(request.participant_id.clone()),
+        ));
 
     Ok(no_content())
 }
 
 /// Stop recording for a specific participant
 ///
-/// DELETE /v1/conferences/:room_id/participants/:participant_id/recording
-#[tracing::instrument(skip(_state), fields(room_id = %room_id, participant_id = %participant_id))]
-async fn stop_participant_recording_handler(
-    State(_state): State<Arc<AppState>>,
-    Path((room_id, participant_id)): Path<(String, String)>,
+/// DELETE /v1/conferences/:room_id/participant-recording
+#[tracing::instrument(skip(state, request), fields(room_id = %room_id))]
+async fn stop_participant_rec(
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<String>,
+    Json(request): Json<serde_json::Value>,
 ) -> ApiResult<axum::response::Response> {
+    // Extract participant_id from JSON body
+    let participant_id = request
+        .get("participant_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::InvalidRequest("participant_id is required".to_string()))?;
+
     tracing::info!(
         "API request to stop participant recording for {} in {}",
         participant_id,
         room_id
     );
 
-    // TODO: Implement stop participant recording
-    // Currently returns a stub response
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Stop participant recording
+    room.stop_participant_recording(participant_id)
+        .map_err(|e| {
+            // Map "not found" errors to 404 instead of 500
+            let err_msg = e.to_string();
+            if err_msg.contains("not found") || err_msg.contains("Participant") {
+                ApiError::InvalidRequest(format!(
+                    "Participant {} not found in room {}",
+                    participant_id, room_id
+                ))
+            } else {
+                ApiError::Internal(format!(
+                    "Failed to stop participant recording: {}",
+                    e
+                ))
+            }
+        })?;
+
+    // Finalize recording metadata
+    state
+        .storage_manager
+        .lock()
+        .await
+        .finalize_participant_recording(&room_id, participant_id)
+        .await
+        .map_err(|e| ApiError::RecordingNotFound(format!("Recording not found: {}", e)))?;
 
     Ok(no_content())
 }

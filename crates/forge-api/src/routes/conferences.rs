@@ -72,6 +72,8 @@ pub struct ParticipantMetadataResponse {
     pub gain: f32,
     pub is_recording: bool,
     pub packets_received: u64,
+    pub is_speaking: bool,
+    pub last_speech_ms: Option<u128>,
 }
 
 /// List of participant metadata response
@@ -772,6 +774,8 @@ async fn get_participant_metadata(
         gain: metadata.gain,
         is_recording: metadata.is_recording,
         packets_received: metadata.packets_received,
+        is_speaking: metadata.is_speaking,
+        last_speech_ms: metadata.last_speech_detected.map(|t| t.elapsed().as_millis()),
     };
 
     Ok(Json(success(response)))
@@ -816,6 +820,8 @@ async fn get_all_participants_metadata(
                 gain: metadata.gain,
                 is_recording: metadata.is_recording,
                 packets_received: metadata.packets_received,
+                is_speaking: metadata.is_speaking,
+                last_speech_ms: metadata.last_speech_detected.map(|t| t.elapsed().as_millis()),
             }
         })
         .collect();

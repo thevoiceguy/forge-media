@@ -42,6 +42,10 @@ pub struct ParticipantMetadata {
     pub is_recording: bool,
     /// Number of audio packets received from this participant
     pub packets_received: u64,
+    /// Whether participant is currently speaking (VAD detected)
+    pub is_speaking: bool,
+    /// Last time speech was detected (None if never)
+    pub last_speech_detected: Option<Instant>,
 }
 
 /// Audio buffer for a single participant
@@ -58,6 +62,14 @@ struct ParticipantBuffer {
     state: ParticipantState,
     /// Number of packets received from this participant
     packets_received: u64,
+    /// Voice Activity Detection state
+    is_speaking: bool,
+    /// Last time speech was detected
+    last_speech_detected: Option<Instant>,
+    /// Consecutive frames above speech threshold
+    speech_frames: u32,
+    /// Consecutive frames below silence threshold
+    silence_frames: u32,
 }
 
 impl ParticipantBuffer {
@@ -69,12 +81,19 @@ impl ParticipantBuffer {
             join_time: Instant::now(),
             state: ParticipantState::Active,
             packets_received: 0,
+            is_speaking: false,
+            last_speech_detected: None,
+            speech_frames: 0,
+            silence_frames: 0,
         }
     }
 
     fn push_samples(&mut self, samples: &[i16]) {
         self.samples.extend(samples);
         self.packets_received += 1;
+
+        // Perform Voice Activity Detection
+        self.update_vad(samples);
 
         // Write to recorder if recording
         if let Some(recorder) = self.recorder.lock().as_ref() {
@@ -83,6 +102,53 @@ impl ParticipantBuffer {
                     warn!("Failed to write samples to participant recorder: {}", e);
                 }
             }
+        }
+    }
+
+    /// Update Voice Activity Detection state based on audio samples
+    fn update_vad(&mut self, samples: &[i16]) {
+        // Calculate RMS (Root Mean Square) energy
+        let energy = if !samples.is_empty() {
+            let sum_squares: f64 = samples.iter().map(|&s| (s as f64).powi(2)).sum();
+            (sum_squares / samples.len() as f64).sqrt()
+        } else {
+            0.0
+        };
+
+        // VAD thresholds (tuned for 16-bit PCM)
+        const SPEECH_THRESHOLD: f64 = 300.0; // Energy above this = potential speech
+        const SILENCE_THRESHOLD: f64 = 200.0; // Energy below this = silence
+        const SPEECH_START_FRAMES: u32 = 3; // Consecutive frames to start speaking
+        const SPEECH_STOP_FRAMES: u32 = 5; // Consecutive frames to stop speaking
+
+        if energy > SPEECH_THRESHOLD {
+            // High energy detected
+            self.speech_frames += 1;
+            self.silence_frames = 0;
+
+            if !self.is_speaking && self.speech_frames >= SPEECH_START_FRAMES {
+                // Transition to speaking
+                self.is_speaking = true;
+                self.last_speech_detected = Some(Instant::now());
+                debug!("Participant started speaking (energy: {:.0})", energy);
+            } else if self.is_speaking {
+                // Update last speech time
+                self.last_speech_detected = Some(Instant::now());
+            }
+        } else if energy < SILENCE_THRESHOLD {
+            // Low energy detected
+            self.silence_frames += 1;
+            self.speech_frames = 0;
+
+            if self.is_speaking && self.silence_frames >= SPEECH_STOP_FRAMES {
+                // Transition to silence
+                self.is_speaking = false;
+                debug!("Participant stopped speaking (energy: {:.0})", energy);
+            }
+        } else {
+            // Energy in middle range - maintain current state but reset counters partially
+            self.speech_frames = self.speech_frames.saturating_sub(1);
+            self.silence_frames = self.silence_frames.saturating_sub(1);
         }
     }
 
@@ -458,6 +524,8 @@ impl AudioMixer {
             gain: participant.gain,
             is_recording: participant.is_recording(),
             packets_received: participant.packets_received,
+            is_speaking: participant.is_speaking,
+            last_speech_detected: participant.last_speech_detected,
         })
     }
 
@@ -491,6 +559,8 @@ impl AudioMixer {
                 gain: entry.value().gain,
                 is_recording: entry.value().is_recording(),
                 packets_received: entry.value().packets_received,
+                is_speaking: entry.value().is_speaking,
+                last_speech_detected: entry.value().last_speech_detected,
             })
             .collect()
     }

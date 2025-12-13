@@ -7,6 +7,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use forge_mixer::AudioMixer;
 use forge_recorder::{AudioRecorder, PlaybackSource};
+use metrics::{counter, gauge, histogram};
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
@@ -60,7 +61,13 @@ impl ConferenceRoom {
     pub fn add_participant<S: Into<String>>(&self, participant_id: S) -> Result<()> {
         let participant_id = participant_id.into();
         info!("Adding participant {} to room {}", participant_id, self.id);
-        Ok(self.mixer.add_participant(participant_id, None)?)
+        self.mixer.add_participant(participant_id, None)?;
+
+        // Update metrics
+        counter!("forge_conference_participants_joined_total", 1, "room_id" => self.id.clone());
+        gauge!("forge_conference_participants_active", self.mixer.participant_count() as f64, "room_id" => self.id.clone());
+
+        Ok(())
     }
 
     /// Remove a participant from the room
@@ -69,7 +76,13 @@ impl ConferenceRoom {
             "Removing participant {} from room {}",
             participant_id, self.id
         );
-        Ok(self.mixer.remove_participant(participant_id)?)
+        self.mixer.remove_participant(participant_id)?;
+
+        // Update metrics
+        counter!("forge_conference_participants_left_total", 1, "room_id" => self.id.clone());
+        gauge!("forge_conference_participants_active", self.mixer.participant_count() as f64, "room_id" => self.id.clone());
+
+        Ok(())
     }
 
     /// Write audio samples from a participant
@@ -86,7 +99,17 @@ impl ConferenceRoom {
     ///
     /// Returns the mixed audio if enough data is available
     pub fn mix(&self) -> Result<Option<Vec<i16>>> {
+        // Start timing mixing operation
+        let mix_start = std::time::Instant::now();
+
         let mixed = self.mixer.mix()?;
+
+        // Record mixing duration if mixing occurred
+        if mixed.is_some() {
+            let mix_duration = mix_start.elapsed();
+            histogram!("forge_conference_mixing_duration_seconds", mix_duration.as_secs_f64(), "room_id" => self.id.clone());
+            counter!("forge_conference_mix_operations_total", 1, "room_id" => self.id.clone());
+        }
 
         // Write to recorder if recording
         if let Some(ref samples) = mixed {
@@ -127,6 +150,11 @@ impl ConferenceRoom {
         recorder.start()?;
 
         *self.recorder.write() = Some(recorder);
+
+        // Update metrics
+        counter!("forge_conference_recordings_started_total", 1, "room_id" => self.id.clone());
+        gauge!("forge_conference_recordings_active", 1.0, "room_id" => self.id.clone());
+
         Ok(())
     }
 
@@ -137,6 +165,11 @@ impl ConferenceRoom {
         let mut recorder_guard = self.recorder.write();
         if let Some(recorder) = recorder_guard.take() {
             recorder.stop()?;
+
+            // Update metrics
+            counter!("forge_conference_recordings_stopped_total", 1, "room_id" => self.id.clone());
+            gauge!("forge_conference_recordings_active", 0.0, "room_id" => self.id.clone());
+
             Ok(())
         } else {
             Err(ConferenceError::RecordingNotFound(format!(
@@ -192,10 +225,16 @@ impl ConferenceRoom {
             participant_id, self.id, path
         );
 
-        Ok(self
-            .mixer
+        self.mixer
             .start_participant_recording(participant_id, path)
-            .await?)
+            .await?;
+
+        // Update metrics
+        counter!("forge_conference_participant_recordings_started_total", 1,
+            "room_id" => self.id.clone(),
+            "participant_id" => participant_id.to_string());
+
+        Ok(())
     }
 
     /// Stop recording for a specific participant
@@ -204,7 +243,14 @@ impl ConferenceRoom {
             "Stopping recording for participant {} in room {}",
             participant_id, self.id
         );
-        Ok(self.mixer.stop_participant_recording(participant_id)?)
+        self.mixer.stop_participant_recording(participant_id)?;
+
+        // Update metrics
+        counter!("forge_conference_participant_recordings_stopped_total", 1,
+            "room_id" => self.id.clone(),
+            "participant_id" => participant_id.to_string());
+
+        Ok(())
     }
 
     /// Check if a participant is currently recording
@@ -322,6 +368,10 @@ impl ConferenceBridge {
         self.rooms.insert(room_id.clone(), room.clone());
         info!("Created conference room: {}", room_id);
 
+        // Update metrics
+        counter!("forge_conference_rooms_created_total", 1);
+        gauge!("forge_conference_rooms_active", self.rooms.len() as f64);
+
         Ok(room)
     }
 
@@ -349,6 +399,10 @@ impl ConferenceBridge {
                 warn!("Error stopping recording for room {}: {}", room_id, e);
             }
         }
+
+        // Update metrics
+        counter!("forge_conference_rooms_deleted_total", 1);
+        gauge!("forge_conference_rooms_active", self.rooms.len() as f64);
 
         Ok(())
     }

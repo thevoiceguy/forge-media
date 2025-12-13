@@ -5,6 +5,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use forge_core::{CallId, ParticipantId};
 use forge_engine::SessionManager;
+use metrics::{counter, histogram};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use validator::Validate;
@@ -149,11 +150,16 @@ async fn create_session(
 
     // SDP negotiation (if sdp_offer is provided)
     let sdp_negotiation_result = if let Some(ref offer_text) = request.sdp_offer {
+        // Start timing SDP negotiation
+        let negotiation_start = std::time::Instant::now();
+        counter!("sdp_negotiation_total", 1);
+
         // Validate that local_address is provided
         let local_addr = request
             .local_address
             .as_ref()
             .ok_or_else(|| {
+                counter!("sdp_negotiation_failures_total", 1, "reason" => "missing_local_address");
                 ApiError::InvalidRequest(
                     "local_address is required when sdp_offer is provided".to_string(),
                 )
@@ -166,6 +172,7 @@ async fn create_session(
             "audio-opus" => forge_sdp::profiles::SdpProfile::audio_opus(),
             "audio-all" => forge_sdp::profiles::SdpProfile::audio_all(),
             _ => {
+                counter!("sdp_negotiation_failures_total", 1, "reason" => "invalid_profile");
                 return Err(ApiError::InvalidRequest(format!(
                     "Unknown SDP profile: {}. Valid values: audio-only, audio-opus, audio-all",
                     profile_name
@@ -178,6 +185,7 @@ async fn create_session(
         // Parse SDP offer
         use forge_sdp::SessionDescriptionExt;
         let offer = forge_sdp::SessionDescription::from_str(offer_text).map_err(|e| {
+            counter!("sdp_negotiation_failures_total", 1, "reason" => "parse_error");
             ApiError::InvalidRequest(format!("Invalid SDP offer: {}", e))
         })?;
 
@@ -188,10 +196,16 @@ async fn create_session(
         let answer =
             forge_sdp::SessionDescription::negotiate_answer(&offer, &local_caps, local_addr)
                 .map_err(|e| match e {
-                    forge_sdp::SdpError::NoCommonCodec => ApiError::NotAcceptable(
-                        "No common codec found between offer and local capabilities".to_string(),
-                    ),
-                    _ => ApiError::InvalidRequest(format!("SDP negotiation failed: {}", e)),
+                    forge_sdp::SdpError::NoCommonCodec => {
+                        counter!("sdp_negotiation_failures_total", 1, "reason" => "no_common_codec");
+                        ApiError::NotAcceptable(
+                            "No common codec found between offer and local capabilities".to_string(),
+                        )
+                    }
+                    _ => {
+                        counter!("sdp_negotiation_failures_total", 1, "reason" => "negotiation_error");
+                        ApiError::InvalidRequest(format!("SDP negotiation failed: {}", e))
+                    }
                 })?;
 
         // Extract negotiated codecs and build ParticipantCodecConfig
@@ -204,7 +218,11 @@ async fn create_session(
                 .map(|c| c.encoding_name.clone())
                 .collect();
             if !codec_names.is_empty() {
-                negotiated_codecs.insert("audio".to_string(), codec_names);
+                negotiated_codecs.insert("audio".to_string(), codec_names.clone());
+                // Record metrics for each negotiated codec
+                for codec_name in &codec_names {
+                    counter!("sdp_codecs_negotiated_total", 1, "codec" => codec_name.clone());
+                }
             }
 
             // Get primary codec for session configuration
@@ -228,9 +246,14 @@ async fn create_session(
         // Serialize answer
         let answer_text = forge_sdp::serialize::serialize_sdp(&answer);
 
+        // Record successful negotiation duration
+        let negotiation_duration = negotiation_start.elapsed();
+        histogram!("sdp_negotiation_duration_seconds", negotiation_duration.as_secs_f64());
+
         tracing::info!(
-            "SDP negotiation successful: negotiated {:?}",
-            negotiated_codecs
+            "SDP negotiation successful: negotiated {:?} in {:?}",
+            negotiated_codecs,
+            negotiation_duration
         );
 
         Some((answer_text, negotiated_codecs, codec_config))

@@ -3,7 +3,7 @@
 use crate::session::{MediaSession, Participant, SessionState};
 use forge_core::{ForgeError, Result};
 use forge_rtp::rtcp::RtcpPacket;
-use metrics::counter;
+use metrics::{counter, histogram};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -466,9 +466,18 @@ impl ForwardingEngine {
         // Transcode the payload
         let mut transcoder_guard = transcoder.lock().await;
         if let Some(ref mut tc) = *transcoder_guard {
+            // Start timing transcoding operation
+            let transcode_start = std::time::Instant::now();
+
             match tc.transcode_rtp_payload(&packet.payload) {
                 Ok(transcoded_payloads) => {
                     if let Some(transcoded_payload) = transcoded_payloads.first() {
+                        // Record successful transcoding duration
+                        let transcode_duration = transcode_start.elapsed();
+                        histogram!("forge_transcoding_duration_seconds", transcode_duration.as_secs_f64(),
+                            "from_codec" => codec_name(src_codec),
+                            "to_codec" => codec_name(dst_codec));
+
                         // Update packet with transcoded payload
                         packet.payload = transcoded_payload.clone().into();
 
@@ -476,25 +485,32 @@ impl ForwardingEngine {
                         packet.header.marker_payload_type =
                             (packet.header.marker_payload_type & 0x80) | dst_pt;
 
-                        // Record transcoding metrics
-                        counter!("forge_transcoding_packets_total", 1);
+                        // Record transcoding metrics with codec labels
+                        counter!("forge_transcoding_packets_total", 1,
+                            "from_codec" => codec_name(src_codec),
+                            "to_codec" => codec_name(dst_codec));
                         counter!(
                             "forge_transcoding_bytes_total",
-                            transcoded_payload.len() as u64
+                            transcoded_payload.len() as u64,
+                            "from_codec" => codec_name(src_codec),
+                            "to_codec" => codec_name(dst_codec)
                         );
 
                         tracing::trace!(
-                            "Transcoded packet: {} → {} ({} bytes → {} bytes)",
+                            "Transcoded packet: {} → {} ({} bytes → {} bytes) in {:?}",
                             codec_name(src_codec),
                             codec_name(dst_codec),
                             packet.payload.len(),
-                            transcoded_payload.len()
+                            transcoded_payload.len(),
+                            transcode_duration
                         );
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Transcoding failed: {}, forwarding original packet", e);
-                    counter!("forge_transcoding_errors_total", 1);
+                    counter!("forge_transcoding_errors_total", 1,
+                        "from_codec" => codec_name(src_codec),
+                        "to_codec" => codec_name(dst_codec));
                 }
             }
         }

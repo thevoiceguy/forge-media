@@ -487,10 +487,12 @@ mod tests {
         let _server = ApiServer::new(config);
     }
 
-    #[test]
-    fn test_router_building() {
-        let config = ApiServerConfig::default();
-        let server = ApiServer::new(config);
+    #[tokio::test]
+    async fn test_router_building() {
+        let mut config = ApiServerConfig::default();
+        config.recording_base_dir = std::env::temp_dir().join("forge-test-recordings");
+        config.prompts_base_dir = std::env::temp_dir().join("forge-test-prompts");
+        let server = ApiServer::new(config).await;
         let _router = server.build_router();
     }
 }

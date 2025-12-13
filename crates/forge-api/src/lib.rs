@@ -4,11 +4,13 @@
 //! and monitoring the Forge media engine.
 
 pub mod error;
+pub mod events;
 pub mod middleware;
 pub mod response;
 pub mod routes;
 pub mod server;
 
 pub use error::{ApiError, ApiErrorResponse, ApiResult};
+pub use events::{ConferenceEvent, EventBus};
 pub use response::{ApiResponse, ApiSuccess};
 pub use server::ApiServer;

@@ -92,6 +92,7 @@ pub struct AppState {
     pub storage_manager: Arc<tokio::sync::Mutex<forge_storage::StorageManager>>,
     pub recording_base_dir: std::path::PathBuf,
     pub prompts_base_dir: std::path::PathBuf,
+    pub event_bus: crate::EventBus,
 }
 
 impl AppState {
@@ -110,6 +111,9 @@ impl AppState {
                 0,
             )));
 
+        // Create event bus for real-time events
+        let event_bus = crate::EventBus::default();
+
         Self {
             session_manager,
             metrics_handle,
@@ -117,6 +121,7 @@ impl AppState {
             storage_manager,
             recording_base_dir,
             prompts_base_dir,
+            event_bus,
         }
     }
 }
@@ -538,6 +543,7 @@ mod tests {
             metrics_handle,
             conference_bridge,
             std::env::temp_dir().join("forge-test-recordings"),
+            std::env::temp_dir().join("forge-test-prompts"),
         ))
     }
 

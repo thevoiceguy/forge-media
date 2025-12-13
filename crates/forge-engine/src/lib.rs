@@ -8,7 +8,10 @@ pub mod session;
 
 pub use forwarding::ForwardingEngine;
 pub use manager::{SessionManager, SessionManagerConfig};
-pub use session::{MediaSession, MediaSessionConfig, Participant, ParticipantStats, SessionState};
+pub use session::{
+    MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig, ParticipantStats,
+    SessionState,
+};
 
 #[cfg(feature = "xdp")]
 pub use forge_kernel::xdp::{XdpManager, XdpMode};

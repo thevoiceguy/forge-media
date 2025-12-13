@@ -33,6 +33,9 @@ pub enum ApiError {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
+    #[error("Not acceptable: {0}")]
+    NotAcceptable(String),
+
     #[error("Internal server error: {0}")]
     Internal(String),
 
@@ -60,6 +63,7 @@ impl ApiError {
                 StatusCode::NOT_FOUND
             }
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            Self::NotAcceptable(_) => StatusCode::NOT_ACCEPTABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Conflict(_) => StatusCode::CONFLICT,
@@ -76,6 +80,7 @@ impl ApiError {
             Self::RoomNotFound(_) => "room_not_found",
             Self::RecordingNotFound(_) => "recording_not_found",
             Self::InvalidRequest(_) => "invalid_request",
+            Self::NotAcceptable(_) => "not_acceptable",
             Self::Internal(_) => "internal_error",
             Self::ServiceUnavailable(_) => "service_unavailable",
             Self::Conflict(_) => "conflict",

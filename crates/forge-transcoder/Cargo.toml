@@ -15,3 +15,7 @@ forge-resampler = { path = "../forge-resampler" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+default = []
+opus = ["forge-codecs/opus"]

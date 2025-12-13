@@ -90,6 +90,9 @@ once_cell = "1.19"
 httpdate = "1.0"
 validator = { version = "0.16", features = ["derive"] }
 
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports"] }
+
 # eBPF/XDP (Linux only)
 aya = { version = "0.12", features = ["async_tokio"] }
 aya-ebpf = "0.1"
@@ -135,6 +138,16 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
+forge-codecs = { path = "crates/forge-codecs" }
+forge-resampler = { path = "crates/forge-resampler" }
+forge-transcoder = { path = "crates/forge-transcoder" }
+
+[[bench]]
+name = "transcoding_bench"
+harness = false
+
 [features]
 default = ["recording", "dtmf"]
 full = [
@@ -148,6 +161,7 @@ full = [
     "ai-stream",
     "ha",
 ]
+opus = ["forge-codecs/opus", "forge-transcoder/opus"]
 recording = ["dep:forge-recording"]
 dtmf = ["dep:forge-dtmf"]
 transcription = ["dep:forge-transcription"]

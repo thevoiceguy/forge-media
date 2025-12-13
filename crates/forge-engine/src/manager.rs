@@ -235,6 +235,74 @@ impl SessionManager {
         Ok(session)
     }
 
+    /// Create a new media session with specific codec configurations
+    #[tracing::instrument(skip(self, codec_a, codec_b, custom_config), fields(call_id = %call_id.0))]
+    pub async fn create_session_with_codecs(
+        &self,
+        call_id: CallId,
+        participant_a: ParticipantId,
+        participant_b: ParticipantId,
+        codec_a: crate::session::ParticipantCodecConfig,
+        codec_b: crate::session::ParticipantCodecConfig,
+        sdp: Option<String>,
+        from_tag: Option<String>,
+        to_tag: Option<String>,
+        custom_config: Option<MediaSessionConfig>,
+    ) -> Result<Arc<MediaSession>> {
+        tracing::debug!(
+            "Creating new media session with codecs: A={:?}@{}Hz, B={:?}@{}Hz",
+            codec_a.codec,
+            codec_a.clock_rate,
+            codec_b.codec,
+            codec_b.clock_rate
+        );
+
+        // Check if session already exists
+        if self.sessions.contains_key(&call_id) {
+            return Err(ForgeError::Internal(format!(
+                "Session {} already exists",
+                call_id.0
+            )));
+        }
+
+        // Use custom config or default
+        let session_config = custom_config.unwrap_or_else(|| self.config.session_config.clone());
+
+        // Create session with codec configurations
+        let session = Arc::new(
+            MediaSession::new_with_codecs(
+                call_id.clone(),
+                participant_a,
+                participant_b,
+                codec_a,
+                codec_b,
+                &self.port_pool,
+                session_config,
+                self.event_bus.clone(),
+                sdp,
+                from_tag,
+                to_tag,
+            )
+            .await?,
+        );
+
+        // Store session
+        self.sessions.insert(call_id.clone(), Arc::clone(&session));
+
+        let session_count = self.sessions.len();
+
+        tracing::info!(
+            "Created session {} with {} active sessions total",
+            call_id.0,
+            session_count
+        );
+
+        // Update metrics
+        gauge!("forge_active_sessions", session_count as f64);
+
+        Ok(session)
+    }
+
     /// Get an existing session by call ID
     pub fn get_session(&self, call_id: &CallId) -> Option<Arc<MediaSession>> {
         self.sessions

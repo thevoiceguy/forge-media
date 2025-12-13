@@ -5,6 +5,7 @@ pub mod health;
 pub mod metrics;
 pub mod prometheus;
 pub mod sessions;
+pub mod websocket;
 
 use axum::Router;
 use std::sync::Arc;
@@ -17,4 +18,5 @@ pub fn create_router() -> Router<Arc<sessions::AppState>> {
         .merge(conferences::routes())
         .merge(metrics::routes())
         .merge(prometheus::routes())
+        .merge(websocket::routes())
 }

@@ -297,6 +297,17 @@ async fn add_participant(
         .add_participant_to_room(&room_id, &request.participant_id)
         .map_err(|e| ApiError::Internal(format!("Failed to add participant: {}", e)))?;
 
+    // Publish ParticipantJoined event
+    let event = crate::ConferenceEvent::ParticipantJoined {
+        room_id: room_id.clone(),
+        participant_id: request.participant_id.clone(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    };
+    state.event_bus.publish(event).await;
+
     Ok(no_content())
 }
 
@@ -348,6 +359,17 @@ async fn remove_participant(
         .conference_bridge
         .remove_participant_from_room(&room_id, &participant_id)
         .map_err(|e| ApiError::Internal(format!("Failed to remove participant: {}", e)))?;
+
+    // Publish ParticipantLeft event
+    let event = crate::ConferenceEvent::ParticipantLeft {
+        room_id: room_id.clone(),
+        participant_id: participant_id.clone(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    };
+    state.event_bus.publish(event).await;
 
     Ok(no_content())
 }
@@ -416,6 +438,16 @@ async fn start_recording(
             None,
         ));
 
+    // Publish RecordingStarted event
+    let event = crate::ConferenceEvent::RecordingStarted {
+        room_id: room_id.clone(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    };
+    state.event_bus.publish(event).await;
+
     Ok(no_content())
 }
 
@@ -447,6 +479,16 @@ async fn stop_recording(
         .finalize_room_recording(&room_id)
         .await
         .map_err(|e| ApiError::RecordingNotFound(format!("Recording not found: {}", e)))?;
+
+    // Publish RecordingStopped event
+    let event = crate::ConferenceEvent::RecordingStopped {
+        room_id: room_id.clone(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    };
+    state.event_bus.publish(event).await;
 
     Ok(no_content())
 }
@@ -512,6 +554,17 @@ async fn start_participant_rec(
             Some(request.participant_id.clone()),
         ));
 
+    // Publish ParticipantRecordingStarted event
+    let event = crate::ConferenceEvent::ParticipantRecordingStarted {
+        room_id: room_id.clone(),
+        participant_id: request.participant_id.clone(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    };
+    state.event_bus.publish(event).await;
+
     Ok(no_content())
 }
 
@@ -568,6 +621,17 @@ async fn stop_participant_rec(
         .finalize_participant_recording(&room_id, participant_id)
         .await
         .map_err(|e| ApiError::RecordingNotFound(format!("Recording not found: {}", e)))?;
+
+    // Publish ParticipantRecordingStopped event
+    let event = crate::ConferenceEvent::ParticipantRecordingStopped {
+        room_id: room_id.clone(),
+        participant_id: participant_id.to_string(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    };
+    state.event_bus.publish(event).await;
 
     Ok(no_content())
 }
@@ -888,6 +952,18 @@ async fn update_participant_state(
                 ApiError::Internal(format!("Failed to update participant state: {}", e))
             }
         })?;
+
+    // Publish ParticipantStateChanged event
+    let event = crate::ConferenceEvent::ParticipantStateChanged {
+        room_id: room_id.clone(),
+        participant_id: participant_id.clone(),
+        state: request.state.clone(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    };
+    state.event_bus.publish(event).await;
 
     Ok(no_content())
 }

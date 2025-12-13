@@ -1,0 +1,38 @@
+[package]
+name = "forge-ice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+
+# Async runtime
+tokio = { workspace = true, features = ["net", "time"] }
+futures = "0.3"
+
+# Serialization
+serde = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Networking
+socket2 = { workspace = true }
+if-addrs = "0.13"
+
+# Random for STUN transaction IDs
+rand = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+hex = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
+hex = "0.4"

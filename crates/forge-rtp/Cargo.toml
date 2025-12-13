@@ -28,6 +28,11 @@ sha2 = { workspace = true }
 
 # Optional DTLS support
 openssl = { version = "0.10", features = ["vendored"], optional = true }
+openssl-sys = { version = "0.9", optional = true }
+foreign-types = { version = "0.3", optional = true }
 
 [features]
-dtls = ["openssl"]
+dtls = ["openssl", "openssl-sys", "foreign-types"]
+
+[dev-dependencies]
+hex = "0.4"

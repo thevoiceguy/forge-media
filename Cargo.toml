@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/forge-core",
     "crates/forge-rtp",
+    "crates/forge-ice",
     "crates/forge-engine",
     "crates/forge-kernel",
     "crates/forge-kernel-ebpf",

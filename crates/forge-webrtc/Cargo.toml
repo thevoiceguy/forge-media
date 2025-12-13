@@ -8,6 +8,15 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
-tokio = { workspace = true }
+forge-rtp = { path = "../forge-rtp", features = ["dtls"] }
+forge-ice = { path = "../forge-ice" }
+forge-sdp = { path = "../forge-sdp", features = ["forge-ice"] }
+tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+dashmap = { workspace = true }
+
+[features]
+default = ["dtls"]
+dtls = ["forge-rtp/dtls"]

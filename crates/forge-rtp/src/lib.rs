@@ -11,7 +11,7 @@ pub mod port_pool;
 pub mod socket;
 
 #[cfg(feature = "dtls")]
-pub mod dtls_srtp;
+pub mod dtls;
 
 pub use rtp::*;
 pub use rtcp::*;

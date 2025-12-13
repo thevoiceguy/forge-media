@@ -44,6 +44,9 @@ pub enum ForgeError {
     #[error("SDP error: {0}")]
     Sdp(String),
 
+    #[error("ICE error: {0}")]
+    Ice(String),
+
     #[error("Transcoding error: {0}")]
     Transcoding(String),
 

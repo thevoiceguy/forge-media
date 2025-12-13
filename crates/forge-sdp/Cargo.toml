@@ -13,3 +13,8 @@ smol_str = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+chrono = { workspace = true }
+forge-ice = { path = "../forge-ice", optional = true }
+
+[features]
+forge-ice = ["dep:forge-ice"]

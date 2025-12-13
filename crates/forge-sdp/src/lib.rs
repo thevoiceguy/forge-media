@@ -34,6 +34,8 @@
 //! ```
 
 pub mod profiles;
+pub mod ice;
+pub mod dtls;
 
 use thiserror::Error;
 
@@ -43,6 +45,12 @@ pub use sip_sdp::{
     MediaType, Origin, Protocol, RtpMap, SessionDescription as SipSessionDescription,
     TimeDescription,
 };
+
+// Re-export ICE attribute helpers
+pub use ice::{IceAttributesExt, MediaIceAttributesExt};
+
+// Re-export DTLS attribute helpers
+pub use dtls::{DtlsAttributesExt, DtlsSetup, MediaDtlsAttributesExt};
 
 /// Forge-specific SDP error types
 #[derive(Error, Debug)]

@@ -149,6 +149,10 @@ forge-transcoder = { path = "crates/forge-transcoder" }
 name = "transcoding_bench"
 harness = false
 
+[[bench]]
+name = "srtp_bench"
+harness = false
+
 [features]
 default = ["recording", "dtmf"]
 full = [

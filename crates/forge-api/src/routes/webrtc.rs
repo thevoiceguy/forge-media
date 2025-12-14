@@ -6,7 +6,7 @@ use axum::{Json, Router};
 use dashmap::DashMap;
 use forge_ice::IceCandidate;
 use forge_webrtc::PeerConnection;
-use metrics::counter;
+use metrics::{counter, gauge, histogram};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use validator::Validate;
@@ -184,7 +184,9 @@ async fn create_connection(
 
     tracing::info!("WebRTC connection created: {}", connection_id);
 
-    counter!("webrtc_connections_active", 1);
+    // Update metrics
+    let active_count = state.webrtc_manager.connection_count();
+    gauge!("forge_webrtc_connections_active", active_count as f64);
 
     Ok(created(response))
 }
@@ -233,6 +235,10 @@ async fn delete_connection(
 
     counter!("webrtc_connections_deleted_total", 1);
 
+    // Update active connections gauge
+    let active_count = state.webrtc_manager.connection_count();
+    gauge!("forge_webrtc_connections_active", active_count as f64);
+
     tracing::info!("WebRTC connection deleted: {}", connection_id);
 
     Ok(no_content())
@@ -259,11 +265,17 @@ async fn set_answer(
         .get_connection(&connection_id)
         .ok_or_else(|| ApiError::ConnectionNotFound(connection_id.clone()))?;
 
+    // Measure time for set_remote_answer (includes ICE checks and DTLS handshake)
+    let start = std::time::Instant::now();
+
     let mut peer_lock = peer.lock().await;
     peer_lock
         .set_remote_answer(&request.sdp_answer)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to set remote answer: {}", e)))?;
+
+    let duration = start.elapsed();
+    histogram!("forge_webrtc_connection_establishment_duration_seconds", duration.as_secs_f64());
 
     let state_str = format!("{:?}", peer_lock.get_state());
 
@@ -305,6 +317,8 @@ async fn add_ice_candidate(
         .add_ice_candidate(candidate)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to add ICE candidate: {}", e)))?;
+
+    counter!("forge_webrtc_ice_candidates_added_total", 1);
 
     tracing::info!("ICE candidate added to connection: {}", connection_id);
 

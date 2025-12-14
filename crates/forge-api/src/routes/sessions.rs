@@ -94,6 +94,7 @@ pub struct AppState {
     pub recording_base_dir: std::path::PathBuf,
     pub prompts_base_dir: std::path::PathBuf,
     pub event_bus: crate::EventBus,
+    pub webrtc_manager: Arc<super::webrtc::WebRtcManager>,
 }
 
 impl AppState {
@@ -115,6 +116,9 @@ impl AppState {
         // Create event bus for real-time events
         let event_bus = crate::EventBus::default();
 
+        // Create WebRTC manager
+        let webrtc_manager = Arc::new(super::webrtc::WebRtcManager::new());
+
         Self {
             session_manager,
             metrics_handle,
@@ -123,6 +127,7 @@ impl AppState {
             recording_base_dir,
             prompts_base_dir,
             event_bus,
+            webrtc_manager,
         }
     }
 }

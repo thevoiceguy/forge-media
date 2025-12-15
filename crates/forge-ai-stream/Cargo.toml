@@ -8,6 +8,25 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = "1.0"
+bytes = { workspace = true }
+
+# WebSocket support
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "stream"] }
+
+# Audio format conversion
+dasp = { version = "0.11", features = ["signal", "interpolate"] }
+base64 = "0.21"
+
+# Async utilities
+async-trait = "0.1"
+dashmap = { workspace = true }
+uuid = { version = "1.0", features = ["v4"] }

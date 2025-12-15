@@ -33,6 +33,9 @@ pub enum ApiError {
     #[error("WebRTC connection not found: {0}")]
     ConnectionNotFound(String),
 
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
@@ -62,7 +65,7 @@ impl ApiError {
     /// Get the HTTP status code for this error
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::SessionNotFound(_) | Self::RoomNotFound(_) | Self::RecordingNotFound(_) | Self::ConnectionNotFound(_) => {
+            Self::SessionNotFound(_) | Self::RoomNotFound(_) | Self::RecordingNotFound(_) | Self::ConnectionNotFound(_) | Self::NotFound(_) => {
                 StatusCode::NOT_FOUND
             }
             Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
@@ -83,6 +86,7 @@ impl ApiError {
             Self::RoomNotFound(_) => "room_not_found",
             Self::RecordingNotFound(_) => "recording_not_found",
             Self::ConnectionNotFound(_) => "connection_not_found",
+            Self::NotFound(_) => "not_found",
             Self::InvalidRequest(_) => "invalid_request",
             Self::NotAcceptable(_) => "not_acceptable",
             Self::Internal(_) => "internal_error",

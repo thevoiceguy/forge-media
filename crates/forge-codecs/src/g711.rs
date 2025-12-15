@@ -144,7 +144,7 @@ lazy_static::lazy_static! {
 }
 
 /// Encode PCM to μ-law
-fn encode_ulaw(pcm: i16) -> u8 {
+pub fn encode_ulaw(pcm: i16) -> u8 {
     let index = ((pcm as i32) + 32768) as usize;
     ULAW_FULL_ENC_TABLE[index]
 }
@@ -155,7 +155,7 @@ pub fn decode_ulaw(ulaw: u8) -> i16 {
 }
 
 /// Encode PCM to A-law
-fn encode_alaw(pcm: i16) -> u8 {
+pub fn encode_alaw(pcm: i16) -> u8 {
     let index = ((pcm as i32) + 32768) as usize;
     ALAW_FULL_ENC_TABLE[index]
 }

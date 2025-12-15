@@ -1098,6 +1098,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.21.0",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -1110,6 +1111,7 @@ dependencies = [
  "chrono",
  "clap",
  "dashmap",
+ "forge-ai-stream",
  "forge-conference-processor",
  "forge-core",
  "forge-engine",
@@ -1193,6 +1195,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "forge-ai-stream",
  "forge-codecs",
  "forge-core",
  "forge-dtmf",
@@ -1201,6 +1204,7 @@ dependencies = [
  "forge-transcoder",
  "metrics 0.21.1",
  "parking_lot",
+ "rand 0.8.5",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

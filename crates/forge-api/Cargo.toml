@@ -1,6 +1,6 @@
 [package]
 name = "forge-api"
-version = "0.1.1"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -17,6 +17,7 @@ forge-conference-processor = { path = "../forge-conference-processor" }
 forge-siprec = { path = "../forge-siprec" }
 forge-webrtc = { path = "../forge-webrtc" }
 forge-ice = { path = "../forge-ice" }
+forge-ai-stream = { path = "../forge-ai-stream" }
 
 # Async runtime
 tokio = { workspace = true }

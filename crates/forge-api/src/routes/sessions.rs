@@ -95,6 +95,7 @@ pub struct AppState {
     pub prompts_base_dir: std::path::PathBuf,
     pub event_bus: crate::EventBus,
     pub webrtc_manager: Arc<super::webrtc::WebRtcManager>,
+    pub ai_session_manager: Arc<forge_engine::AISessionManager>,
 }
 
 impl AppState {
@@ -119,6 +120,9 @@ impl AppState {
         // Create WebRTC manager
         let webrtc_manager = Arc::new(super::webrtc::WebRtcManager::new());
 
+        // Create AI session manager
+        let ai_session_manager = Arc::new(forge_engine::AISessionManager::new());
+
         Self {
             session_manager,
             metrics_handle,
@@ -128,6 +132,7 @@ impl AppState {
             prompts_base_dir,
             event_bus,
             webrtc_manager,
+            ai_session_manager,
         }
     }
 }

@@ -98,12 +98,27 @@ impl ForwardingEngine {
                         }
                     }
                 }
-                // Timeout check (run periodically)
+                // Timeout check and AI audio response handling (run periodically)
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    // Check for timeout
                     if session.is_timed_out().await {
                         tracing::info!("Session {} timed out, stopping forwarding", call_id.0);
                         let _ = session.stop_forwarding().await;
                         break;
+                    }
+
+                    // Check for AI audio responses
+                    if let Some(ai_manager) = session.ai_manager().await {
+                        if let Some(audio_response) = ai_manager.try_recv_audio_response(&call_id).await {
+                            Self::handle_ai_audio_response(
+                                &session,
+                                &sockets,
+                                &participant_a,
+                                &participant_b,
+                                audio_response,
+                            )
+                            .await;
+                        }
                     }
                 }
             }
@@ -234,6 +249,17 @@ impl ForwardingEngine {
             // Process with inband DTMF detector (only if we have samples)
             if !pcm_samples.is_empty() {
                 counter!("forge_dtmf_inband_packets_processed_total", 1);
+
+                // Audio tap for AI integration
+                if let Some(ai_manager) = session.ai_manager().await {
+                    if ai_manager.has_ai(call_id) {
+                        // Send audio samples to AI
+                        if let Err(e) = ai_manager.send_audio(call_id, &pcm_samples).await {
+                            tracing::debug!("Failed to send audio to AI for session {}: {}", call_id.0, e);
+                        }
+                    }
+                }
+
                 let mut detector = session.inband_detector().lock().await;
                 match detector.process_samples(&pcm_samples) {
                     Ok(events) => {
@@ -663,6 +689,202 @@ impl ForwardingEngine {
         }
     }
 
+    /// Handle AI audio response and send to participants
+    async fn handle_ai_audio_response(
+        session: &Arc<MediaSession>,
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        audio_response: crate::ai_integration::AIAudioResponse,
+    ) {
+        let call_id = session.call_id();
+
+        tracing::debug!(
+            "Processing AI audio response for session {}: {} samples @ {}Hz",
+            call_id.0,
+            audio_response.samples.len(),
+            audio_response.sample_rate
+        );
+
+        // AI SSRC (fixed value for AI-generated audio)
+        const AI_SSRC: u32 = 0xA1A1A1A1;
+
+        // Generate a random starting sequence number (would be better to track per session)
+        let base_seq_num: u16 = rand::random();
+
+        // Send AI audio to both participants
+        for (side, participant) in [
+            (Side::A, participant_a),
+            (Side::B, participant_b),
+        ] {
+            let p = participant.read().await;
+
+            // Skip if participant doesn't have a remote address yet
+            let Some(remote_addr) = p.remote_addr else {
+                tracing::debug!(
+                    "Skipping AI audio for participant {:?} - no remote address",
+                    side
+                );
+                continue;
+            };
+
+            let codec = p.codec_config.codec;
+            let payload_type = p.codec_config.payload_type;
+            let clock_rate = p.codec_config.clock_rate;
+
+            tracing::trace!(
+                "Encoding AI audio for participant {:?}: codec={:?}, pt={}, clock_rate={}",
+                side,
+                codec,
+                payload_type,
+                clock_rate
+            );
+
+            // Resample if needed
+            let resampled_samples = if audio_response.sample_rate != clock_rate {
+                Self::resample_audio(
+                    &audio_response.samples,
+                    audio_response.sample_rate,
+                    clock_rate,
+                )
+            } else {
+                audio_response.samples.clone()
+            };
+
+            // Encode audio to codec format
+            let encoded_payload = match codec {
+                forge_core::AudioCodec::PCMU => {
+                    // G.711 µ-law encoding
+                    use bytes::Bytes;
+                    let encoded: Vec<u8> = resampled_samples
+                        .iter()
+                        .map(|&sample| forge_codecs::g711::encode_ulaw(sample))
+                        .collect();
+                    Bytes::from(encoded)
+                }
+                forge_core::AudioCodec::PCMA => {
+                    // G.711 A-law encoding
+                    use bytes::Bytes;
+                    let encoded: Vec<u8> = resampled_samples
+                        .iter()
+                        .map(|&sample| forge_codecs::g711::encode_alaw(sample))
+                        .collect();
+                    Bytes::from(encoded)
+                }
+                forge_core::AudioCodec::Opus => {
+                    #[cfg(feature = "opus")]
+                    {
+                        // Opus encoding
+                        let mut encoder = session.opus_encoder().lock().await;
+                        match encoder.encode(&resampled_samples) {
+                            Ok(encoded) => bytes::Bytes::from(encoded),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to encode AI audio to Opus for session {}: {}",
+                                    call_id.0,
+                                    e
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "opus"))]
+                    {
+                        tracing::warn!(
+                            "Cannot encode AI audio to Opus - opus feature not enabled"
+                        );
+                        continue;
+                    }
+                }
+                _ => {
+                    tracing::warn!(
+                        "Unsupported codec for AI audio: {:?}",
+                        codec
+                    );
+                    continue;
+                }
+            };
+
+            // Calculate RTP timestamp (samples since start)
+            // For simplicity, we use a fixed base timestamp
+            let timestamp: u32 = (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u32)
+                .wrapping_mul(clock_rate / 1000);
+
+            // Create RTP packet
+            let packet = forge_rtp::RtpPacket::build(
+                payload_type,
+                base_seq_num,
+                timestamp,
+                AI_SSRC,
+                encoded_payload.clone(),
+                false, // marker bit
+            );
+
+            // Serialize and send
+            let packet_bytes = packet.to_bytes();
+            let packet_len = packet_bytes.len();
+
+            if let Err(e) = sockets.send_rtp_to(&packet_bytes, remote_addr).await {
+                tracing::error!(
+                    "Failed to send AI audio RTP packet for session {}: {}",
+                    call_id.0,
+                    e
+                );
+            } else {
+                tracing::trace!(
+                    "Sent AI audio RTP packet for session {} to {:?}: {} bytes",
+                    call_id.0,
+                    side,
+                    packet_len
+                );
+
+                // Update statistics
+                drop(p); // Release read lock before acquiring write lock
+                let mut p = participant.write().await;
+                p.stats.packets_sent += 1;
+                p.stats.bytes_sent += packet_len as u64;
+
+                // Record metrics
+                counter!("forge_ai_audio_packets_sent_total", 1);
+                counter!("forge_ai_audio_bytes_sent_total", packet_len as u64);
+            }
+        }
+    }
+
+    /// Simple audio resampling using linear interpolation
+    fn resample_audio(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
+        if from_rate == to_rate {
+            return samples.to_vec();
+        }
+
+        let ratio = from_rate as f64 / to_rate as f64;
+        let output_len = (samples.len() as f64 / ratio).ceil() as usize;
+        let mut output = Vec::with_capacity(output_len);
+
+        for i in 0..output_len {
+            let src_index = (i as f64) * ratio;
+            let src_index_floor = src_index.floor() as usize;
+            let src_index_ceil = (src_index_floor + 1).min(samples.len() - 1);
+            let frac = src_index - src_index_floor as f64;
+
+            if src_index_floor >= samples.len() {
+                break;
+            }
+
+            // Linear interpolation
+            let sample_a = samples[src_index_floor] as f64;
+            let sample_b = samples[src_index_ceil] as f64;
+            let interpolated = sample_a + (sample_b - sample_a) * frac;
+
+            output.push(interpolated.round() as i16);
+        }
+
+        output
+    }
+
     /// Update participant statistics
     async fn update_stats(
         side: &Side,
@@ -781,5 +1003,119 @@ mod tests {
         // Stop forwarding
         session.stop_forwarding().await.unwrap();
         assert_eq!(session.state().await, SessionState::Terminated);
+    }
+
+    #[test]
+    fn test_resample_audio_same_rate() {
+        let samples = vec![100i16, 200, 300, 400, 500];
+        let from_rate = 16000;
+        let to_rate = 16000;
+
+        let resampled = ForwardingEngine::resample_audio(&samples, from_rate, to_rate);
+
+        // Should be identical when rates are the same
+        assert_eq!(resampled.len(), samples.len());
+        assert_eq!(resampled, samples);
+    }
+
+    #[test]
+    fn test_resample_audio_downsample() {
+        let samples = vec![100i16, 200, 300, 400, 500, 600, 700, 800];
+        let from_rate = 16000;
+        let to_rate = 8000;
+
+        let resampled = ForwardingEngine::resample_audio(&samples, from_rate, to_rate);
+
+        // Downsampling from 16kHz to 8kHz should halve the length
+        assert_eq!(resampled.len(), 4);
+        assert!(resampled.len() < samples.len());
+    }
+
+    #[test]
+    fn test_resample_audio_upsample() {
+        let samples = vec![100i16, 200, 300, 400];
+        let from_rate = 8000;
+        let to_rate = 16000;
+
+        let resampled = ForwardingEngine::resample_audio(&samples, from_rate, to_rate);
+
+        // Upsampling from 8kHz to 16kHz should double the length
+        assert_eq!(resampled.len(), 8);
+        assert!(resampled.len() > samples.len());
+    }
+
+    #[test]
+    fn test_resample_audio_empty() {
+        let samples: Vec<i16> = vec![];
+        let from_rate = 16000;
+        let to_rate = 8000;
+
+        let resampled = ForwardingEngine::resample_audio(&samples, from_rate, to_rate);
+
+        assert_eq!(resampled.len(), 0);
+    }
+
+    #[test]
+    fn test_resample_audio_single_sample() {
+        let samples = vec![100i16];
+        let from_rate = 16000;
+        let to_rate = 8000;
+
+        let resampled = ForwardingEngine::resample_audio(&samples, from_rate, to_rate);
+
+        assert_eq!(resampled.len(), 1);
+        // Single sample should be preserved
+        assert_eq!(resampled[0], 100);
+    }
+
+    #[test]
+    fn test_resample_audio_interpolation_quality() {
+        // Test that interpolation produces reasonable values
+        let samples = vec![0i16, 1000];
+        let from_rate = 8000;
+        let to_rate = 16000;
+
+        let resampled = ForwardingEngine::resample_audio(&samples, from_rate, to_rate);
+
+        // Should have 4 samples (doubling)
+        assert_eq!(resampled.len(), 4);
+
+        // First sample should be close to 0
+        assert_eq!(resampled[0], 0);
+
+        // Intermediate samples should be between 0 and 1000
+        assert!(resampled[1] >= 0 && resampled[1] <= 1000);
+        assert!(resampled[2] >= 0 && resampled[2] <= 1000);
+
+        // Last sample should be close to 1000
+        assert_eq!(resampled[3], 1000);
+    }
+
+    #[test]
+    fn test_resample_audio_common_rates() {
+        // Test common telephony sample rate conversions
+        let samples = vec![100i16; 160]; // 20ms at 8kHz
+
+        // 8kHz → 16kHz (common for G.711 → AI)
+        let resampled_16k = ForwardingEngine::resample_audio(&samples, 8000, 16000);
+        assert_eq!(resampled_16k.len(), 320); // 20ms at 16kHz
+
+        // 16kHz → 8kHz (common for AI → G.711)
+        let resampled_8k = ForwardingEngine::resample_audio(&samples, 16000, 8000);
+        assert_eq!(resampled_8k.len(), 80); // 20ms at 8kHz if input was 16kHz
+
+        // 24kHz → 8kHz (OpenAI → G.711)
+        let samples_24k = vec![100i16; 480]; // 20ms at 24kHz
+        let resampled = ForwardingEngine::resample_audio(&samples_24k, 24000, 8000);
+        assert_eq!(resampled.len(), 160); // 20ms at 8kHz
+    }
+
+    #[test]
+    fn test_codec_name_helper() {
+        use forge_codecs::AudioCodecType;
+
+        assert_eq!(codec_name(AudioCodecType::PCMU), "G.711 µ-law");
+        assert_eq!(codec_name(AudioCodecType::PCMA), "G.711 A-law");
+        assert_eq!(codec_name(AudioCodecType::Opus), "Opus");
     }
 }

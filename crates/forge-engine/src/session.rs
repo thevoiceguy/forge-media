@@ -199,6 +199,8 @@ pub struct MediaSession {
     /// Track if XDP fast path is active
     #[cfg(all(target_os = "linux", feature = "xdp"))]
     xdp_active: Arc<AtomicBool>,
+    /// AI session manager for AI integration (optional, uses interior mutability)
+    ai_manager: Arc<RwLock<Option<Arc<crate::ai_integration::AISessionManager>>>>,
 }
 
 impl MediaSession {
@@ -286,6 +288,7 @@ impl MediaSession {
             xdp_manager: None,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
+            ai_manager: Arc::new(RwLock::new(None)),
         };
 
         // Publish session created event
@@ -422,6 +425,7 @@ impl MediaSession {
             xdp_manager: None,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
+            ai_manager: Arc::new(RwLock::new(None)),
         };
 
         // Publish session created event
@@ -590,6 +594,7 @@ impl MediaSession {
             to_tag,
             xdp_manager,
             xdp_active: Arc::new(AtomicBool::new(false)),
+            ai_manager: Arc::new(RwLock::new(None)),
         };
 
         // Publish session created event
@@ -1089,6 +1094,16 @@ impl MediaSession {
     /// Get to-tag (if any)
     pub fn to_tag(&self) -> Option<&str> {
         self.to_tag.as_deref()
+    }
+
+    /// Get a copy of the AI session manager (if set)
+    pub async fn ai_manager(&self) -> Option<Arc<crate::ai_integration::AISessionManager>> {
+        self.ai_manager.read().await.clone()
+    }
+
+    /// Set the AI session manager
+    pub async fn set_ai_manager(&self, manager: Arc<crate::ai_integration::AISessionManager>) {
+        *self.ai_manager.write().await = Some(manager);
     }
 }
 

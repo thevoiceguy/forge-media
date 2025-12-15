@@ -1,6 +1,6 @@
 [package]
 name = "forge-engine"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,6 +12,7 @@ forge-rtp = { path = "../forge-rtp" }
 forge-dtmf = { path = "../forge-dtmf" }
 forge-codecs = { path = "../forge-codecs" }
 forge-transcoder = { path = "../forge-transcoder" }
+forge-ai-stream = { path = "../forge-ai-stream" }
 
 # XDP support (Linux only, optional)
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -25,6 +26,7 @@ dashmap = { workspace = true }
 parking_lot = { workspace = true }
 chrono = { workspace = true }
 bytes = { workspace = true }
+rand = { workspace = true }
 
 [features]
 default = []

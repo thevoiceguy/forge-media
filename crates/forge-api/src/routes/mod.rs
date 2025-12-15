@@ -1,5 +1,6 @@
 //! API routes
 
+pub mod ai;
 pub mod conferences;
 pub mod health;
 pub mod metrics;
@@ -18,6 +19,7 @@ pub fn create_router() -> Router<Arc<sessions::AppState>> {
         .merge(sessions::routes())
         .merge(conferences::routes())
         .merge(webrtc::routes())
+        .merge(ai::routes())
         .merge(metrics::routes())
         .merge(prometheus::routes())
         .merge(websocket::routes())

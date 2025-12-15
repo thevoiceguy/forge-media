@@ -196,6 +196,46 @@ impl OpenAIConnector {
             }
         }
     }
+
+    /// Send a DTMF event to the AI as a text message
+    ///
+    /// This creates a conversation item that notifies the AI that the user pressed a digit.
+    pub async fn send_dtmf_event(&mut self, digit: char, detection_method: &str) -> Result<()> {
+        let ws = self.ws.as_mut().ok_or_else(|| {
+            AIStreamError::Connection("Not connected".to_string())
+        })?;
+
+        // Create a message that the AI can understand
+        let content = format!("[DTMF: User pressed '{}' via {}]", digit, detection_method);
+
+        let msg = json!({
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": content
+                }]
+            }
+        });
+
+        ws.send(Message::Text(msg.to_string()))
+            .await
+            .map_err(|e: tungstenite::Error| AIStreamError::Connection(format!("Failed to send DTMF event: {}", e)))?;
+
+        // Trigger a response from the AI
+        let response_msg = json!({
+            "type": "response.create"
+        });
+
+        ws.send(Message::Text(response_msg.to_string()))
+            .await
+            .map_err(|e: tungstenite::Error| AIStreamError::Connection(format!("Failed to trigger AI response: {}", e)))?;
+
+        self.stats.events_sent += 2;
+        Ok(())
+    }
 }
 
 #[async_trait]

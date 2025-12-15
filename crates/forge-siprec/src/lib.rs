@@ -91,7 +91,9 @@ pub mod srtp_keys;
 
 // Re-export legacy manager for backward compatibility
 mod manager;
-pub use manager::{SiprecConfig, SiprecError, SiprecManager, SiprecSession, Result};
+pub use manager::{
+    SiprecConfig, SiprecError, SiprecManager, SiprecManagerConfig, SiprecSession, Result,
+};
 
 // Re-export new API
 pub use metadata::{

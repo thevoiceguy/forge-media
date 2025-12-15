@@ -1309,6 +1309,7 @@ dependencies = [
 name = "forge-siprec"
 version = "0.1.0"
 dependencies = [
+ "base64 0.21.7",
  "bytes",
  "chrono",
  "dashmap",
@@ -1316,11 +1317,13 @@ dependencies = [
  "forge-recorder",
  "forge-rtp",
  "quick-xml",
+ "rand 0.8.5",
  "serde",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

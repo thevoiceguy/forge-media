@@ -105,6 +105,83 @@ impl OpenAIConnector {
                     item_id: msg["item_id"].as_str().map(|s| s.to_string()),
                 }))
             }
+            "response.audio_transcript.delta" | "conversation.item.input_audio_transcription.completed" => {
+                let transcript = msg["delta"]
+                    .as_str()
+                    .or_else(|| msg["transcript"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let item_id = msg["item_id"].as_str().unwrap_or("unknown");
+                let is_final = event_type.contains("completed");
+
+                Ok(Some(AIEvent::Transcript {
+                    segment: crate::events::TranscriptSegment {
+                        id: item_id.to_string(),
+                        role: if event_type.contains("input") {
+                            crate::events::TranscriptRole::User
+                        } else {
+                            crate::events::TranscriptRole::Assistant
+                        },
+                        text: transcript,
+                        start_ms: None,
+                        end_ms: None,
+                        confidence: None,
+                        is_final,
+                    },
+                }))
+            }
+            "response.function_call_arguments.done" => {
+                let call_id = msg["call_id"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        AIStreamError::Protocol("Missing call_id in function call".to_string())
+                    })?
+                    .to_string();
+
+                let name = msg["name"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        AIStreamError::Protocol("Missing name in function call".to_string())
+                    })?
+                    .to_string();
+
+                let arguments_str = msg["arguments"].as_str().unwrap_or("{}");
+                let arguments: serde_json::Value = serde_json::from_str(arguments_str)
+                    .map_err(|e| AIStreamError::Protocol(format!("Invalid function arguments: {}", e)))?;
+
+                let item_id = msg["item_id"].as_str().map(|s| s.to_string());
+
+                self.stats.function_calls += 1;
+
+                Ok(Some(AIEvent::FunctionCall {
+                    call: crate::events::FunctionCall {
+                        call_id,
+                        name,
+                        arguments,
+                        item_id,
+                    },
+                }))
+            }
+            "input_audio_buffer.speech_started" => {
+                Ok(Some(AIEvent::VadStateChange {
+                    is_speech: true,
+                    confidence: 1.0,
+                }))
+            }
+            "input_audio_buffer.speech_stopped" => {
+                Ok(Some(AIEvent::VadStateChange {
+                    is_speech: false,
+                    confidence: 0.0,
+                }))
+            }
+            "response.cancelled" => {
+                let response_id = msg["response_id"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
+                Ok(Some(AIEvent::BargeIn { response_id }))
+            }
             "error" => {
                 let message = msg["error"]["message"]
                     .as_str()

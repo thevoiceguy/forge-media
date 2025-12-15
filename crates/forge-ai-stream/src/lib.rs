@@ -44,12 +44,14 @@
 //! ```
 
 pub mod audio;
+pub mod bargein;
 pub mod connector;
 pub mod events;
 pub mod openai;
 pub mod vad;
 
 pub use audio::{AudioConverter, AudioFormat, AudioSample};
+pub use bargein::{BargeInConfig, BargeInDetector, BargeInState};
 pub use connector::{AIConnector, AIConnectorConfig, AIConnectorType, AISession};
 pub use events::{AIEvent, AIEventType, FunctionCall, TranscriptSegment};
 pub use openai::{OpenAIConnector, OpenAIConfig, OpenAIModel};

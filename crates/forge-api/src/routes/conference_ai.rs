@@ -15,13 +15,13 @@ use forge_conference_processor::{AudioMode, ConferenceAIConfig, ConferenceAIMana
 use forge_engine::ai_integration::AISessionConfig;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 use validator::Validate;
 
 /// Create conference AI routes
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        //.route("/v1/conferences/:room_id/ai", post(attach_ai))
+        .route("/v1/conferences/:room_id/ai", post(attach_ai))
         .route("/v1/conferences/:room_id/ai", get(get_ai_status))
         .route("/v1/conferences/:room_id/ai", delete(detach_ai))
 }
@@ -213,20 +213,27 @@ async fn detach_ai(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
-    info!("Detaching AI from conference room: {}", room_id);
+    tracing::info!("API request to detach AI from conference room");
 
-    // Get conference room
-    let room = state.conference_bridge.get_room(&room_id).map_err(|e| {
-        ApiError::NotFound(format!("Conference room not found: {}", e))
-    })?;
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
 
-    // Detach AI
-    match room.detach_ai().await {
-        Ok(_) => {},
-        Err(e) => return Err(ApiError::Internal(format!("Failed to detach AI: {}", e))),
+    // Check if AI is attached
+    if !room.has_ai() {
+        return Err(ApiError::NotFound("No AI attached to room".to_string()));
     }
 
-    info!("Successfully detached AI from conference room {}", room_id);
+    // Detach AI in a background task to avoid Handler trait issues
+    // (There's a known issue with awaiting ConferenceAIManager::stop() in handlers)
+    let room_clone = Arc::clone(&room);
+    tokio::spawn(async move {
+        if let Err(e) = room_clone.detach_ai().await {
+            tracing::error!("Failed to detach AI in background task: {}", e);
+        }
+    });
 
     Ok(no_content())
 }

@@ -324,31 +324,40 @@ impl ConferenceRoom {
         self: &Arc<Self>,
         ai_manager: crate::ai_manager::ConferenceAIManager,
     ) -> Result<()> {
-        let mut guard = self.ai_manager.write();
-
-        if guard.is_some() {
-            return Err(ConferenceError::AlreadyHasAI(self.id.clone()));
-        }
+        // Check if AI already attached
+        {
+            let guard = self.ai_manager.read();
+            if guard.is_some() {
+                return Err(ConferenceError::AlreadyHasAI(self.id.clone()));
+            }
+        } // read guard dropped here
 
         // Add AI participant to mixer
         self.mixer.add_participant(ai_manager.participant_id(), None)?;
 
-        // Start AI manager (spawns audio routing tasks)
+        // Start AI manager (spawns audio routing tasks) - no lock held
         ai_manager.start(Arc::clone(self)).await?;
 
         info!("Attached AI to conference room {}", self.id);
 
-        *guard = Some(ai_manager);
+        // Store the AI manager after successful start
+        {
+            let mut guard = self.ai_manager.write();
+            *guard = Some(ai_manager);
+        }
+
         Ok(())
     }
 
     /// Detach AI from this conference room
     pub async fn detach_ai(&self) -> Result<()> {
-        let mut guard = self.ai_manager.write();
-
-        let ai_manager = guard.take().ok_or_else(|| {
-            ConferenceError::NoAIAttached(self.id.clone())
-        })?;
+        // Extract ai_manager in a scoped block to ensure the write guard is dropped
+        let ai_manager = {
+            let mut guard = self.ai_manager.write();
+            guard.take().ok_or_else(|| {
+                ConferenceError::NoAIAttached(self.id.clone())
+            })?
+        }; // write guard dropped here
 
         // Stop AI manager (this will abort tasks)
         ai_manager.stop().await?;
@@ -369,11 +378,6 @@ impl ConferenceRoom {
     /// Get AI state if attached
     pub fn ai_state(&self) -> Option<crate::ai_manager::ConferenceAIState> {
         self.ai_manager.read().as_ref().map(|ai| ai.state())
-    }
-
-    /// Get reference to AI manager (for internal use)
-    pub(crate) fn ai_manager_ref(&self) -> Arc<RwLock<Option<crate::ai_manager::ConferenceAIManager>>> {
-        self.ai_manager.clone()
     }
 }
 

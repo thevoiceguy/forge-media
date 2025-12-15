@@ -497,17 +497,62 @@ impl AISessionManager {
 
     /// Detach AI from a call
     pub async fn detach_ai(&self, call_id: &CallId) -> Result<()> {
-        if let Some((_, session_arc)) = self.sessions.remove(call_id) {
-            let mut session = session_arc.lock().await;
-            session.disconnect().await?;
-            tracing::info!("AI detached from call {}", call_id.0);
-            Ok(())
-        } else {
-            Err(ForgeError::Internal(format!(
+        let session_arc = self.sessions.remove(call_id)
+            .map(|(_, v)| v)
+            .ok_or_else(|| ForgeError::Internal(format!(
                 "No AI session found for call {}",
                 call_id.0
-            )))
+            )))?;
+
+        // Extract task handles and connector in a scoped block to drop the lock
+        let (event_task, audio_task, dtmf_task, connector, state) = {
+            let mut session = session_arc.lock().await;
+
+            // Update state to disconnecting
+            {
+                let mut s = session.state.lock().await;
+                *s = AISessionState::Disconnecting;
+            }
+
+            // Take task handles
+            let event_task = session.event_task.take();
+            let audio_task = session.audio_task.take();
+            let dtmf_task = session.dtmf_task.take();
+
+            // Clone Arc references we need
+            let connector = Arc::clone(&session.connector);
+            let state = Arc::clone(&session.state);
+
+            (event_task, audio_task, dtmf_task, connector, state)
+        }; // session lock dropped here
+
+        // Abort tasks (no lock needed)
+        if let Some(task) = event_task {
+            task.abort();
         }
+        if let Some(task) = audio_task {
+            task.abort();
+        }
+        if let Some(task) = dtmf_task {
+            task.abort();
+        }
+
+        // Disconnect connector (brief lock, then await)
+        {
+            let mut conn = connector.lock().await;
+            conn.disconnect()
+                .await
+                .map_err(|e| ForgeError::Internal(format!("AI disconnect failed: {}", e)))?;
+        } // connector lock dropped here
+
+        // Update final state
+        {
+            let mut s = state.lock().await;
+            *s = AISessionState::Terminated;
+        }
+
+        tracing::info!("AI detached from call {}", call_id.0);
+        Ok(())
     }
 
     /// Get an AI session for a call

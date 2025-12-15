@@ -11,3 +11,18 @@ forge-core = { path = "../forge-core" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+# Audio file decoding
+symphonia = { version = "0.5", features = ["all"] }
+
+# Resampling
+rubato = "0.15"
+
+[features]
+default = []
+# TTS features are framework-only for now
+# Actual provider SDKs to be integrated later
+tts-google = []
+tts-aws = []
+tts-azure = []
+tts-all = ["tts-google", "tts-aws", "tts-azure"]

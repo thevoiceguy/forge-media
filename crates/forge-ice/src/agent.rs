@@ -339,6 +339,14 @@ impl IceAgent {
     pub fn component(&self) -> u16 {
         self.component
     }
+
+    /// Get the bound UDP socket (if available)
+    ///
+    /// Returns the socket created during candidate gathering.
+    /// Returns None if candidates haven't been gathered yet.
+    pub fn get_socket(&self) -> Option<std::sync::Arc<UdpSocket>> {
+        self.socket.clone()
+    }
 }
 
 #[cfg(test)]

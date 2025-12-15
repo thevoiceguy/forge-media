@@ -4,7 +4,7 @@
 //! with support for AES-CM and AES-GCM cipher suites.
 
 use forge_core::{ForgeError, Result};
-use aes::Aes128;
+use aes::{Aes128, Aes256};
 use aes::cipher::{BlockEncrypt, KeyInit};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
@@ -180,10 +180,8 @@ impl SrtpKeyMaterial {
     /// AES Counter Mode PRF (Pseudo-Random Function)
     ///
     /// Generates `out_len` bytes of output using AES in counter mode
+    /// Automatically selects AES-128 or AES-256 based on master key length
     fn aes_cm_prf(&self, iv: &[u8], out_len: usize) -> Result<Vec<u8>> {
-        let cipher = Aes128::new_from_slice(&self.master_key)
-            .map_err(|e| ForgeError::Srtp(format!("Failed to create AES cipher: {}", e)))?;
-
         let mut output = vec![0u8; out_len];
         let mut counter_block = [0u8; 16];
 
@@ -194,22 +192,61 @@ impl SrtpKeyMaterial {
         // Generate output blocks
         let num_blocks = (out_len + 15) / 16; // Round up to block count
 
-        for i in 0..num_blocks {
-            // Encrypt counter block
-            let mut block = aes::Block::from(counter_block);
-            cipher.encrypt_block(&mut block);
+        // Use AES-128 or AES-256 based on master key length
+        match self.master_key.len() {
+            16 => {
+                // AES-128
+                let cipher = Aes128::new_from_slice(&self.master_key)
+                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-128 cipher: {}", e)))?;
 
-            // Copy to output (handle last partial block)
-            let offset = i * 16;
-            let copy_len = (out_len - offset).min(16);
-            output[offset..offset + copy_len].copy_from_slice(&block[..copy_len]);
+                for i in 0..num_blocks {
+                    // Encrypt counter block
+                    let mut block = aes::Block::from(counter_block);
+                    cipher.encrypt_block(&mut block);
 
-            // Increment counter (treat as big-endian 128-bit integer)
-            for j in (0..16).rev() {
-                counter_block[j] = counter_block[j].wrapping_add(1);
-                if counter_block[j] != 0 {
-                    break; // No carry needed
+                    // Copy to output (handle last partial block)
+                    let offset = i * 16;
+                    let copy_len = (out_len - offset).min(16);
+                    output[offset..offset + copy_len].copy_from_slice(&block[..copy_len]);
+
+                    // Increment counter (treat as big-endian 128-bit integer)
+                    for j in (0..16).rev() {
+                        counter_block[j] = counter_block[j].wrapping_add(1);
+                        if counter_block[j] != 0 {
+                            break; // No carry needed
+                        }
+                    }
                 }
+            }
+            32 => {
+                // AES-256
+                let cipher = Aes256::new_from_slice(&self.master_key)
+                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-256 cipher: {}", e)))?;
+
+                for i in 0..num_blocks {
+                    // Encrypt counter block
+                    let mut block = aes::Block::from(counter_block);
+                    cipher.encrypt_block(&mut block);
+
+                    // Copy to output (handle last partial block)
+                    let offset = i * 16;
+                    let copy_len = (out_len - offset).min(16);
+                    output[offset..offset + copy_len].copy_from_slice(&block[..copy_len]);
+
+                    // Increment counter (treat as big-endian 128-bit integer)
+                    for j in (0..16).rev() {
+                        counter_block[j] = counter_block[j].wrapping_add(1);
+                        if counter_block[j] != 0 {
+                            break; // No carry needed
+                        }
+                    }
+                }
+            }
+            len => {
+                return Err(ForgeError::Srtp(format!(
+                    "Invalid master key length: expected 16 or 32 bytes, got {}",
+                    len
+                )));
             }
         }
 
@@ -1594,6 +1631,58 @@ mod tests {
         tracker.update(100);
         assert_eq!(tracker.roc, 1);
         assert_eq!(tracker.highest_seq, 100);
+    }
+
+    /// Test AES-256-GCM key derivation (verifies SRTP-001 fix)
+    #[test]
+    fn test_aes256_gcm_key_derivation() {
+        // Create key material for AES-256-GCM
+        let master_key = vec![0x42; 32]; // 256-bit key
+        let master_salt = vec![0x43; 12]; // 96-bit salt
+        let profile = SrtpProfile::AeadAes256Gcm;
+
+        // This should NOT fail with "Invalid Length" error
+        let key_material = SrtpKeyMaterial::new(master_key, master_salt, profile)
+            .expect("Failed to create key material for AES-256-GCM");
+
+        // Verify key derivation works (this internally calls aes_cm_prf with 32-byte key)
+        let derived = key_material.derive_session_keys(0x12345678, 0)
+            .expect("Failed to derive session keys for AES-256-GCM");
+
+        // Verify derived key lengths
+        assert_eq!(derived.encryption_key.len(), 32, "AES-256 encryption key should be 32 bytes");
+        assert_eq!(derived.salt.len(), 12, "GCM salt should be 12 bytes");
+        assert!(derived.authentication_key.is_none(), "AEAD mode should not have separate auth key");
+    }
+
+    /// Test AES-256-GCM encrypt/decrypt roundtrip
+    #[test]
+    fn test_aes256_gcm_roundtrip() {
+        let master_key = vec![0x42; 32];
+        let master_salt = vec![0x43; 12];
+        let key_material = SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), SrtpProfile::AeadAes256Gcm)
+            .expect("Failed to create AES-256-GCM key material");
+
+        // Create encrypt and decrypt contexts
+        let mut encrypt_ctx = SrtpContext::new();
+        encrypt_ctx.set_local_key(key_material.clone());
+
+        let mut decrypt_ctx = SrtpContext::new();
+        decrypt_ctx.set_remote_key(key_material);
+
+        // Create test packet
+        let packet = create_test_rtp_packet(1, 1000, 0x12345678);
+        let original_len = packet.len();
+
+        // Encrypt
+        let encrypted = encrypt_ctx.protect_rtp(&packet)
+            .expect("Failed to encrypt with AES-256-GCM");
+        assert!(encrypted.len() > original_len, "Encrypted packet should be longer (includes auth tag)");
+
+        // Decrypt
+        let decrypted = decrypt_ctx.unprotect_rtp(&encrypted)
+            .expect("Failed to decrypt with AES-256-GCM");
+        assert_eq!(packet, decrypted, "Decrypted packet should match original");
     }
 
     // Helper functions for tests

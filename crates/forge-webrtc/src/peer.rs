@@ -12,7 +12,8 @@ use forge_sdp::{
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info};
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn, error};
 
 /// WebRTC connection state per RFC 8445
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +56,14 @@ pub struct PeerConnection {
 
     /// DTLS context for handshake
     dtls_context: Option<DtlsContext>,
+
+    /// DTLS connection (wrapped in Arc<Mutex> for background task access)
+    #[cfg(feature = "dtls")]
+    dtls_connection: Option<Arc<Mutex<forge_rtp::dtls::DtlsConnection>>>,
+
+    /// Background task handle for DTLS handshake
+    #[cfg(feature = "dtls")]
+    dtls_task: Option<JoinHandle<()>>,
 
     /// RTP socket pair (RTP + RTCP)
     rtp_socket: Option<Arc<RtpSocketPair>>,
@@ -106,6 +115,10 @@ impl PeerConnection {
             ice_agent: Arc::new(Mutex::new(ice_agent)),
             dtls_cert,
             dtls_context: None,
+            #[cfg(feature = "dtls")]
+            dtls_connection: None,
+            #[cfg(feature = "dtls")]
+            dtls_task: None,
             rtp_socket: None,
             state: ConnectionState::New,
             stun_servers,
@@ -337,38 +350,52 @@ impl PeerConnection {
             local_addr, remote_addr
         );
 
+        // Get the socket from ICE agent for DTLS packet exchange
+        let ice_agent = self.ice_agent.lock().await;
+        let socket = ice_agent
+            .get_socket()
+            .ok_or_else(|| WebRtcError::ConnectionFailed("No ICE socket available".to_string()))?;
         drop(ice_agent);
 
-        // TODO: In production, DTLS handshake should be driven by a background task
-        // that continuously processes incoming DTLS packets and sends outgoing ones.
-        // For now, we'll create the DTLS connection and mark it as a placeholder.
-
-        info!(
-            "DTLS handshake needs to be driven by application (see DtlsConnection::handshake)"
-        );
-
-        // Create DTLS context and connection (but don't run handshake yet - needs packet exchange)
+        // Create DTLS context and connection, then spawn background task to drive handshake
         #[cfg(feature = "dtls")]
         {
             use forge_rtp::dtls::{DtlsContext, DtlsConnection, DtlsRole};
 
+            info!("Starting DTLS handshake with remote fingerprint: {}", remote_fingerprint);
+
             let dtls_ctx = DtlsContext::new(self.dtls_cert.clone(), DtlsRole::Client)
                 .map_err(|e| WebRtcError::DtlsError(format!("Failed to create DTLS context: {}", e)))?;
 
-            let _dtls_conn = DtlsConnection::new(&dtls_ctx, DtlsRole::Client, Some(remote_fingerprint))
+            let dtls_conn = DtlsConnection::new(&dtls_ctx, DtlsRole::Client, Some(remote_fingerprint))
                 .map_err(|e| WebRtcError::DtlsError(format!("Failed to create DTLS connection: {}", e)))?;
 
-            // In production: spawn task to drive handshake with _dtls_conn.handshake()
-            // and exchange packets over the selected ICE pair.
-            // Store _dtls_conn in PeerConnection for later use.
+            let dtls_conn = Arc::new(Mutex::new(dtls_conn));
+            self.dtls_connection = Some(dtls_conn.clone());
 
-            debug!(
-                "DTLS connection created, handshake must be driven by packet exchange"
-            );
+            // Spawn background task to drive DTLS handshake
+            let task_socket = socket.clone();
+            let task_remote_addr = remote_addr;
+            let task_connection_id = self.connection_id.clone();
+
+            let dtls_task = tokio::spawn(async move {
+                if let Err(e) = Self::drive_dtls_handshake(
+                    task_socket,
+                    task_remote_addr,
+                    dtls_conn,
+                    task_connection_id,
+                ).await {
+                    error!("DTLS handshake task failed: {}", e);
+                }
+            });
+
+            self.dtls_task = Some(dtls_task);
+
+            debug!("DTLS handshake task spawned");
         }
 
-        // Transition to connected state (in production, wait for DTLS to complete)
-        // For now, we're "connected" after ICE succeeds
+        // Note: State will transition to Connected after DTLS handshake completes
+        // For now, mark as connected after ICE succeeds (DTLS runs in background)
         self.state = ConnectionState::Connected;
 
         info!("Connection established for {}", self.connection_id);
@@ -417,6 +444,158 @@ impl PeerConnection {
     /// Get the remote SDP (if available)
     pub fn remote_sdp(&self) -> Option<&str> {
         self.remote_sdp.as_deref()
+    }
+
+    /// Drive the DTLS handshake by exchanging packets over UDP
+    ///
+    /// This function runs in a background task and:
+    /// 1. Initiates the DTLS handshake (client sends ClientHello)
+    /// 2. Reads incoming packets and demultiplexes them
+    /// 3. Feeds DTLS packets to the handshake state machine
+    /// 4. Sends outgoing DTLS packets to the remote peer
+    /// 5. Stops when handshake completes or fails
+    ///
+    /// Packet demultiplexing (RFC 5764):
+    /// - 0-3: STUN/TURN (ignore, handled by ICE)
+    /// - 20-63: DTLS
+    /// - 64-79: TURN Channel (ignore)
+    /// - 128-191: SRTP/SRTCP (ignore for now, handled after DTLS completes)
+    #[cfg(feature = "dtls")]
+    async fn drive_dtls_handshake(
+        socket: Arc<tokio::net::UdpSocket>,
+        remote_addr: std::net::SocketAddr,
+        dtls_conn: Arc<Mutex<forge_rtp::dtls::DtlsConnection>>,
+        connection_id: String,
+    ) -> Result<()> {
+        use forge_rtp::dtls::DtlsState;
+
+        info!("DTLS handshake task started for {}", connection_id);
+
+        // Initiate handshake (client sends ClientHello)
+        let mut dtls = dtls_conn.lock().await;
+        let (complete, outgoing) = dtls
+            .handshake(None)
+            .map_err(|e| WebRtcError::DtlsError(format!("Failed to initiate handshake: {}", e)))?;
+
+        if !outgoing.is_empty() {
+            debug!("Sending initial DTLS ClientHello ({} bytes)", outgoing.len());
+            socket
+                .send_to(&outgoing, remote_addr)
+                .await
+                .map_err(|e| WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e)))?;
+        }
+
+        if complete {
+            info!("DTLS handshake completed immediately (unexpected for client)");
+            drop(dtls);
+            Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await?;
+            return Ok(());
+        }
+
+        drop(dtls);
+
+        // Loop to receive and process DTLS packets
+        let mut buf = vec![0u8; 2048];
+        let timeout_duration = tokio::time::Duration::from_secs(10);
+        let start_time = tokio::time::Instant::now();
+
+        loop {
+            // Check for timeout
+            if start_time.elapsed() > timeout_duration {
+                error!("DTLS handshake timeout for {}", connection_id);
+                return Err(WebRtcError::DtlsError("Handshake timeout".to_string()));
+            }
+
+            // Receive packet with timeout
+            let len = match tokio::time::timeout(
+                tokio::time::Duration::from_secs(1),
+                socket.recv(&mut buf)
+            ).await {
+                Ok(Ok(len)) => len,
+                Ok(Err(e)) => {
+                    warn!("Socket recv error: {}", e);
+                    continue;
+                }
+                Err(_) => {
+                    // Timeout, check if handshake is still in progress
+                    let dtls = dtls_conn.lock().await;
+                    if dtls.state() == DtlsState::Connected {
+                        info!("DTLS handshake completed");
+                        drop(dtls);
+                        Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await?;
+                        return Ok(());
+                    }
+                    drop(dtls);
+                    continue;
+                }
+            };
+
+            // Demultiplex packet based on first byte
+            if len == 0 {
+                continue;
+            }
+
+            let first_byte = buf[0];
+            let is_dtls = (20..=63).contains(&first_byte);
+
+            if !is_dtls {
+                // Not a DTLS packet, ignore (likely STUN or SRTP)
+                debug!("Ignoring non-DTLS packet (first byte: {})", first_byte);
+                continue;
+            }
+
+            debug!("Received DTLS packet ({} bytes)", len);
+
+            // Process DTLS packet
+            let mut dtls = dtls_conn.lock().await;
+            let (complete, outgoing) = dtls
+                .handshake(Some(&buf[..len]))
+                .map_err(|e| WebRtcError::DtlsError(format!("Handshake processing failed: {}", e)))?;
+
+            // Send any outgoing data
+            if !outgoing.is_empty() {
+                debug!("Sending DTLS response ({} bytes)", outgoing.len());
+                socket
+                    .send_to(&outgoing, remote_addr)
+                    .await
+                    .map_err(|e| WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e)))?;
+            }
+
+            if complete {
+                info!("DTLS handshake completed for {}", connection_id);
+                drop(dtls);
+                Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await?;
+                return Ok(());
+            }
+
+            drop(dtls);
+        }
+    }
+
+    /// Extract SRTP keys from completed DTLS handshake
+    #[cfg(feature = "dtls")]
+    async fn extract_and_log_srtp_keys(
+        dtls_conn: Arc<Mutex<forge_rtp::dtls::DtlsConnection>>,
+        connection_id: &str,
+    ) -> Result<()> {
+        let dtls = dtls_conn.lock().await;
+        let (client_keys, server_keys) = dtls
+            .export_srtp_keys()
+            .map_err(|e| WebRtcError::DtlsError(format!("Failed to export SRTP keys: {}", e)))?;
+
+        info!(
+            "SRTP keys exported for {}: client_key={} bytes, server_key={} bytes",
+            connection_id,
+            client_keys.master_key.len(),
+            server_keys.master_key.len()
+        );
+
+        // TODO: Store these keys for SRTP encryption/decryption
+        // For now, just log that we have them
+        debug!("Client master key: {:02X?}", &client_keys.master_key[..8]);
+        debug!("Server master key: {:02X?}", &server_keys.master_key[..8]);
+
+        Ok(())
     }
 }
 

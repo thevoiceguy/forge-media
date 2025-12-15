@@ -51,7 +51,7 @@ fn bench_key_derivation(c: &mut Criterion) {
     let profiles = vec![
         (SrtpProfile::Aes128CmHmacSha1_80, "AES-128-CM-SHA1-80"),
         (SrtpProfile::AeadAes128Gcm, "AEAD-AES-128-GCM"),
-        // (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"), // TODO: Fix AES-256-GCM key derivation
+        (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"),
     ];
 
     for (profile, name) in profiles {
@@ -84,7 +84,7 @@ fn bench_rtp_encryption(c: &mut Criterion) {
     let profiles = vec![
         (SrtpProfile::Aes128CmHmacSha1_80, "AES-128-CM-SHA1-80"),
         (SrtpProfile::AeadAes128Gcm, "AEAD-AES-128-GCM"),
-        // (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"), // TODO: Fix AES-256-GCM key derivation
+        (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"),
     ];
 
     for (profile, profile_name) in profiles {
@@ -119,7 +119,7 @@ fn bench_rtp_decryption(c: &mut Criterion) {
     let profiles = vec![
         (SrtpProfile::Aes128CmHmacSha1_80, "AES-128-CM-SHA1-80"),
         (SrtpProfile::AeadAes128Gcm, "AEAD-AES-128-GCM"),
-        // (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"), // TODO: Fix AES-256-GCM key derivation
+        (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"),
     ];
 
     for (profile, profile_name) in profiles {
@@ -166,7 +166,7 @@ fn bench_rtcp_encryption(c: &mut Criterion) {
     let profiles = vec![
         (SrtpProfile::Aes128CmHmacSha1_80, "AES-128-CM-SHA1-80"),
         (SrtpProfile::AeadAes128Gcm, "AEAD-AES-128-GCM"),
-        // (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"), // TODO: Fix AES-256-GCM key derivation
+        (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"),
     ];
 
     for (profile, profile_name) in profiles {
@@ -205,7 +205,7 @@ fn bench_rtcp_decryption(c: &mut Criterion) {
     let profiles = vec![
         (SrtpProfile::Aes128CmHmacSha1_80, "AES-128-CM-SHA1-80"),
         (SrtpProfile::AeadAes128Gcm, "AEAD-AES-128-GCM"),
-        // (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"), // TODO: Fix AES-256-GCM key derivation
+        (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"),
     ];
 
     for (profile, profile_name) in profiles {
@@ -252,7 +252,7 @@ fn bench_rtp_roundtrip(c: &mut Criterion) {
     let profiles = vec![
         (SrtpProfile::Aes128CmHmacSha1_80, "AES-128-CM-SHA1-80"),
         (SrtpProfile::AeadAes128Gcm, "AEAD-AES-128-GCM"),
-        // (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"), // TODO: Fix AES-256-GCM key derivation
+        (SrtpProfile::AeadAes256Gcm, "AEAD-AES-256-GCM"),
     ];
 
     for (profile, profile_name) in profiles {

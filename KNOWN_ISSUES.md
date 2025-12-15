@@ -14,41 +14,7 @@ None currently.
 
 ## High Priority Issues
 
-### SRTP-001: AES-256-GCM Key Derivation Failure
-
-**Status:** Open
-**Severity:** High
-**Component:** forge-rtp (SRTP)
-**Discovered:** 2025-12-13 (Sprint 5)
-
-**Description:**
-SRTP encryption fails for AEAD-AES-256-GCM profile with error "Failed to create AES cipher: Invalid Length". The AES-128-CM-HMAC-SHA1-80 and AEAD-AES-128-GCM profiles work correctly.
-
-**Location:**
-- `crates/forge-rtp/src/srtp.rs` - Key derivation or cipher initialization for AES-256-GCM
-- `benches/srtp_bench.rs:105` - Where error surfaces during benchmarking
-
-**Impact:**
-- AES-256-GCM SRTP profile cannot be used
-- Benchmarks for AES-256-GCM are disabled
-- Limits cipher suite negotiation options for high-security requirements
-
-**Workaround:**
-- Use AEAD-AES-128-GCM or AES-128-CM-HMAC-SHA1-80 profiles
-- AES-256-GCM tests commented out in `benches/srtp_bench.rs`
-
-**Investigation Needed:**
-1. Check key derivation length for AES-256-GCM (should be 32 bytes)
-2. Verify `derive_session_keys()` handles 256-bit keys correctly
-3. Check if encryption key extraction matches expected length
-4. Review RFC 7714 Section 8.1 for key derivation specifics
-
-**Related Files:**
-```
-crates/forge-rtp/src/srtp.rs:115  - derive_session_keys()
-crates/forge-rtp/src/srtp.rs:88   - SrtpKeyMaterial::new()
-benches/srtp_bench.rs:210         - Disabled AES-256-GCM tests
-```
+None currently.
 
 ---
 
@@ -261,48 +227,42 @@ crates/forge-webrtc/src/peer.rs:46-73 - PeerConnection struct
 
 ---
 
-### DEBT-002: DTLS Handshake Not Driven by Background Task
+## Resolved Issues
 
-**Status:** Open (Documented in code)
-**Severity:** Low (Placeholder exists)
-**Component:** forge-webrtc
-**Discovered:** 2025-12-13
+### SRTP-001: AES-256-GCM Key Derivation (Resolved 2025-12-15)
 
-**Description:**
-The DTLS handshake is created but not driven by a background task. See comment in code:
-```rust
-// TODO: In production, DTLS handshake should be driven by a background task
-// that continuously processes incoming DTLS packets and sends outgoing ones.
-```
+**Issue:** SRTP encryption failed for AES-256-GCM profile with "Invalid Length" error. Root cause was hardcoded use of `Aes128` even for 32-byte keys.
 
-**Location:**
-- `crates/forge-webrtc/src/peer.rs:342-363` - DTLS creation but not driven
+**Resolution:** Modified `aes_cm_prf()` to dynamically select AES-128 or AES-256 based on master key length (16 vs 32 bytes).
 
-**Impact:**
-- DTLS handshake will not complete
-- Cannot establish secure media channel
-- Connection will appear "connected" but no media flows
+**Verification:**
+- Added 2 new tests for AES-256-GCM
+- Uncommented 6 benchmark tests
+- All tests pass
 
-**Implementation Plan:**
-1. Spawn background task after ICE succeeds
-2. Task should:
-   - Read DTLS packets from selected ICE pair
-   - Call `DtlsConnection::handshake()` with incoming packets
-   - Send outgoing packets over ICE pair
-   - Extract SRTP keys when handshake completes
-3. Update connection state based on DTLS completion
+**Files Modified:**
+- `crates/forge-rtp/src/srtp.rs` - Fixed aes_cm_prf(), added tests
+- `benches/srtp_bench.rs` - Uncommented AES-256-GCM benchmarks
 
-**Related Files:**
-```
-crates/forge-webrtc/src/peer.rs:342      - DTLS creation location
-crates/forge-rtp/src/dtls.rs:387         - DtlsConnection::handshake()
-```
+**Commit:** (pending)
 
 ---
 
-## Resolved Issues
+### DEBT-002: DTLS Handshake Background Task (Resolved 2025-12-15)
 
-None yet.
+**Issue:** DTLS handshake was created but not driven by a background task, preventing WebRTC media flow.
+
+**Resolution:** Implemented complete DTLS background task system:
+- Background task spawns after ICE succeeds
+- Packet demultiplexing (STUN/DTLS/SRTP) based on RFC 5764
+- Full handshake state machine with timeout handling
+- SRTP key extraction when handshake completes
+
+**Files Modified:**
+- `crates/forge-webrtc/src/peer.rs` - Added DTLS task and drive functions
+- `crates/forge-ice/src/agent.rs` - Added get_socket() method
+
+**Commit:** (pending)
 
 ---
 

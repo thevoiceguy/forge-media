@@ -28,7 +28,7 @@ Forge is a carrier-grade media server built in Rust that handles all media proce
 - **🌐 WebRTC**: ICE, DTLS, SRTP for browser-based communications
 - **👥 Conferencing**: Audio mixing, VAD, AGC, dominant speaker detection
 - **📼 Recording**: Multi-format recording with multiple storage backends
-- **🤖 AI Integration**: Real-time streaming to OpenAI, Dialogflow, Lex, Azure
+- **🤖 AI Integration**: Real-time voice AI with OpenAI Realtime API, bidirectional audio, DTMF support
 - **🔐 Carrier-Grade**: SBC features, SIPREC, CAC, DoS protection, high availability
 - **⚡ Performance**: Async Rust, zero-copy parsing, optional kernel offload
 
@@ -201,6 +201,36 @@ See [FORGE ARCHITECTURE.md](FORGE%20ARCHITECTURE.md) for detailed design.
 
 ---
 
+## 🤖 AI Integration
+
+Forge provides seamless integration with real-time AI services like OpenAI's Realtime API for voice agents, IVR systems, and AI-powered call features.
+
+### Quick Example
+
+```bash
+# Attach AI to an active call
+curl -X POST http://localhost:8080/v1/sessions/call-001/ai \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "openai",
+    "model": "gpt-4o-realtime-preview-2024-12-17",
+    "voice": "alloy",
+    "instructions": "You are a helpful customer service agent."
+  }'
+```
+
+### Features
+
+- **Bidirectional Audio**: Automatic RTP ↔ AI audio routing with codec conversion
+- **DTMF Integration**: Forward DTMF events to AI for IVR scenarios
+- **Function Calling**: Let AI trigger actions (transfers, lookups, etc.)
+- **Recording**: SIPREC support with AI metadata for compliance
+- **Multi-Codec**: G.711, Opus with automatic sample rate conversion
+
+See [AI Integration Guide](docs/AI_INTEGRATION.md) for complete documentation.
+
+---
+
 ## 🔌 API Reference
 
 ### REST API
@@ -243,6 +273,27 @@ POST /v1/recordings
   "call_id": "call-123",
   "format": "opus"
 }
+```
+
+#### AI Integration
+```bash
+# Attach AI to session
+POST /v1/sessions/:call_id/ai
+{
+  "provider": "openai",
+  "model": "gpt-4o-realtime-preview-2024-12-17",
+  "voice": "alloy",
+  "instructions": "You are a helpful assistant."
+}
+
+# Get AI status
+GET /v1/sessions/:call_id/ai
+
+# Detach AI
+DELETE /v1/sessions/:call_id/ai
+
+# Send function response
+POST /v1/sessions/:call_id/ai/function-response
 ```
 
 See [API Documentation](docs/API.md) for complete reference.
@@ -306,6 +357,8 @@ cargo clippy -- -D warnings
 
 - [Development Plan](DEVELOPMENT_PLAN.md) - Phased roadmap and strategy
 - [Architecture](FORGE%20ARCHITECTURE.md) - Detailed technical design
+- [AI Integration Guide](docs/AI_INTEGRATION.md) - OpenAI Realtime API integration
+- [DTMF Integration](docs/DTMF_INTEGRATION.md) - DTMF detection and handling
 - [Feature Specifications](FORGE%20NEW%20FEATURES.MD) - New feature designs
 - [Enhancement Recommendations](FORGE%20ENHANCEMENTS.md) - Future improvements
 - [API Reference](docs/API.md) - HTTP API documentation

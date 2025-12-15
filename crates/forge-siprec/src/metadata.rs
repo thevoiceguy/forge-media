@@ -215,6 +215,47 @@ impl RecordingSession {
         });
     }
 
+    /// Add AI session metadata
+    ///
+    /// This adds standardized extension data for AI-enhanced recordings.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - AI provider name (e.g., "OpenAI", "Google", "Azure")
+    /// * `model` - AI model identifier (e.g., "gpt-4o-realtime-preview")
+    /// * `voice` - Voice/persona used (if applicable)
+    pub fn add_ai_metadata(
+        &mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        voice: Option<String>,
+    ) {
+        self.add_extension("ai-provider", provider);
+        self.add_extension("ai-model", model);
+        if let Some(v) = voice {
+            self.add_extension("ai-voice", v);
+        }
+        self.add_extension("ai-enabled", "true");
+    }
+
+    /// Add AI participant to the recording
+    ///
+    /// Creates a virtual participant representing the AI assistant.
+    ///
+    /// # Arguments
+    ///
+    /// * `ai_name` - Display name for the AI (e.g., "AI Assistant")
+    /// * `provider` - AI provider (e.g., "OpenAI")
+    pub fn add_ai_participant(&mut self, ai_name: impl Into<String>, provider: impl Into<String>) {
+        let ai_id = format!("ai-participant-{}", self.participants.len());
+        let ai_aor = format!("sip:ai@{}.local", provider.into());
+
+        let mut ai_participant = Participant::new(ai_id, ai_aor, ParticipantRole::Unknown);
+        ai_participant.name = Some(ai_name.into());
+
+        self.add_participant(ai_participant);
+    }
+
     /// Serialize to XML string
     ///
     /// # Errors
@@ -406,5 +447,99 @@ mod tests {
         // For now, just verify XML generation works
         assert!(xml.contains("roundtrip-test"));
         assert!(xml.contains("test@example.com"));
+    }
+
+    #[test]
+    fn test_ai_metadata() {
+        let mut session = RecordingSession::new("ai-session-123");
+        session.add_ai_metadata("OpenAI", "gpt-4o-realtime-preview", Some("alloy".to_string()));
+
+        // Verify extension data was added
+        assert!(session.extension_data.is_some());
+        let extensions = session.extension_data.as_ref().unwrap();
+
+        assert_eq!(extensions.len(), 4);
+        assert!(extensions.iter().any(|e| e.name == "ai-provider" && e.value == "OpenAI"));
+        assert!(extensions.iter().any(|e| e.name == "ai-model" && e.value == "gpt-4o-realtime-preview"));
+        assert!(extensions.iter().any(|e| e.name == "ai-voice" && e.value == "alloy"));
+        assert!(extensions.iter().any(|e| e.name == "ai-enabled" && e.value == "true"));
+    }
+
+    #[test]
+    fn test_ai_metadata_without_voice() {
+        let mut session = RecordingSession::new("ai-session-456");
+        session.add_ai_metadata("Google", "gemini-pro", None);
+
+        let extensions = session.extension_data.as_ref().unwrap();
+
+        // Should have 3 extensions (no voice)
+        assert_eq!(extensions.len(), 3);
+        assert!(extensions.iter().any(|e| e.name == "ai-provider" && e.value == "Google"));
+        assert!(extensions.iter().any(|e| e.name == "ai-model" && e.value == "gemini-pro"));
+        assert!(extensions.iter().any(|e| e.name == "ai-enabled" && e.value == "true"));
+
+        // Voice should not be present
+        assert!(!extensions.iter().any(|e| e.name == "ai-voice"));
+    }
+
+    #[test]
+    fn test_ai_participant() {
+        let mut session = RecordingSession::new("ai-participant-test");
+        session.add_participant(Participant::caller("sip:alice@example.com"));
+        session.add_participant(Participant::callee("sip:bob@example.com"));
+        session.add_ai_participant("AI Assistant", "OpenAI");
+
+        assert_eq!(session.participants.len(), 3);
+
+        // Find AI participant
+        let ai_participant = session.participants.iter()
+            .find(|p| p.name.as_ref().map(|n| n.as_str()) == Some("AI Assistant"))
+            .expect("AI participant should be present");
+
+        assert!(ai_participant.aor.contains("ai@"));
+        assert!(ai_participant.aor.contains("OpenAI"));
+        assert_eq!(ai_participant.role, Some(ParticipantRole::Unknown));
+    }
+
+    #[test]
+    fn test_full_ai_recording_session() {
+        let mut session = RecordingSession::new("full-ai-test");
+
+        // Add human participants
+        session.add_participant(Participant::caller("sip:user@example.com").with_name("User"));
+
+        // Add AI participant
+        session.add_ai_participant("AI Assistant", "OpenAI");
+
+        // Add AI metadata
+        session.add_ai_metadata("OpenAI", "gpt-4o-realtime-preview", Some("nova".to_string()));
+
+        // Add media streams
+        session.add_media_stream(MediaStream::audio("user-stream", "192.168.1.100", 5004));
+        session.add_media_stream(MediaStream::audio("ai-stream", "192.168.1.100", 5006));
+
+        // Verify structure
+        assert_eq!(session.participants.len(), 2);
+        assert_eq!(session.streams.len(), 2);
+        assert!(session.extension_data.is_some());
+
+        // Verify XML generation
+        let xml = session.to_xml().unwrap();
+        assert!(xml.contains("full-ai-test"));
+        assert!(xml.contains("AI Assistant"));
+        assert!(xml.contains("ai-provider"));
+        assert!(xml.contains("OpenAI"));
+    }
+
+    #[test]
+    fn test_custom_extension_data() {
+        let mut session = RecordingSession::new("custom-ext-test");
+        session.add_extension("custom-field", "custom-value");
+        session.add_extension("another-field", "another-value");
+
+        let extensions = session.extension_data.as_ref().unwrap();
+        assert_eq!(extensions.len(), 2);
+        assert!(extensions.iter().any(|e| e.name == "custom-field" && e.value == "custom-value"));
+        assert!(extensions.iter().any(|e| e.name == "another-field" && e.value == "another-value"));
     }
 }

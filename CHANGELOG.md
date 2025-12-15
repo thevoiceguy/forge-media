@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - AI Integration
+
+#### forge-ai-stream
+- **OpenAI Realtime API Connector** - Full WebSocket-based integration
+  - Bidirectional audio streaming (PCM16, G.711 µ-law/A-law)
+  - Session configuration (model, voice, instructions, temperature)
+  - Voice Activity Detection (VAD) / turn detection
+  - Function calling support with JSON schemas
+  - Event streaming (transcription, function calls, interruptions)
+  - Connection statistics and monitoring
+  - 12 comprehensive tests
+
+#### forge-engine - AI Integration Module
+- **AISessionManager** - Lifecycle management for AI sessions
+  - Session creation, attachment, detachment
+  - Audio routing to/from AI
+  - Event bus integration for DTMF forwarding
+  - Session statistics and status monitoring
+  - 18 comprehensive tests
+
+- **Audio Routing** - Bidirectional RTP ↔ AI audio flow
+  - RTP → AI: Audio tap from forwarding loop (non-blocking)
+  - AI → RTP: Response injection with codec conversion
+  - Automatic sample rate conversion (8kHz/16kHz/24kHz)
+  - Linear interpolation resampler
+  - G.711 µ-law/A-law and Opus encoding support
+  - Special AI SSRC (0xA1A1A1A1) for tracking
+  - 10 audio routing tests
+
+- **DTMF Integration** - Automatic DTMF forwarding to AI
+  - EventBus subscription for DTMF events
+  - RFC 2833, Inband, SIP INFO detection methods
+  - Sent as text to AI: "[DTMF: User pressed '5' via rfc2833]"
+  - Enables IVR scenarios without custom programming
+
+#### forge-api - AI REST Endpoints
+- **POST /v1/sessions/:id/ai** - Attach AI to session
+- **GET /v1/sessions/:id/ai** - Get AI status and statistics
+- **DELETE /v1/sessions/:id/ai** - Detach AI from session
+- **POST /v1/sessions/:id/ai/function-response** - Send function results
+- Complete request/response validation
+- Error handling and status codes
+
+#### forge-siprec - AI Recording Metadata
+- **add_ai_metadata()** - Add AI provider/model/voice to recordings
+- **add_ai_participant()** - Create virtual AI participant in SIPREC
+- Extension data for compliance recording
+- 6 new tests for AI metadata
+
+#### forge-codecs
+- Made G.711 encode functions public for AI audio encoding
+
+### Documentation
+- **AI Integration Guide** (docs/AI_INTEGRATION.md)
+  - Complete API reference
+  - Configuration guide
+  - Audio routing architecture
+  - DTMF integration examples
+  - SIPREC recording with AI metadata
+  - Troubleshooting guide
+  - Performance considerations
+  - Security best practices
+
+- **Example Scripts** (examples/)
+  - ai_integration_example.sh - Basic AI voice agent
+  - ai_ivr_example.sh - IVR with DTMF
+  - ai_function_calling_example.sh - Function calling demo
+  - README.md - Complete examples guide
+
+- **Updated README.md**
+  - AI Integration section with quick start
+  - API reference for AI endpoints
+  - Link to comprehensive guide
+
+### Test Coverage
+- forge-ai-stream: 12 tests (OpenAI connector)
+- forge-engine: 28 tests (18 AI + 10 audio routing)
+- forge-siprec: 6 new AI metadata tests
+- All 46 new tests passing
+
+### Changed
+- forge-ai-stream version: 0.1.0 → 0.2.0
+- forge-engine version: 0.1.0 → 0.2.0
+- forge-api version: 0.1.0 → 0.2.0
+- forge-codecs version: 0.1.0 → 0.1.1
+
 ## [0.2.0] - 2025-12-15
 
 ### Added - forge-dtmf

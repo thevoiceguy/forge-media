@@ -9,7 +9,21 @@ license.workspace = true
 [dependencies]
 forge-core = { path = "../forge-core" }
 forge-recorder = { path = "../forge-recorder" }
+forge-rtp = { path = "../forge-rtp" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 dashmap = { workspace = true }
+
+# XML metadata handling (RFC 7865)
+quick-xml = { version = "0.36", features = ["serialize", "overlapped-lists"] }
+serde = { workspace = true }
+
+# SIP signaling
+bytes = { workspace = true }
+
+# Networking
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Time handling
+chrono = { workspace = true }

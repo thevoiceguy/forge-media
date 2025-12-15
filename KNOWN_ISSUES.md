@@ -244,7 +244,7 @@ crates/forge-webrtc/src/peer.rs:46-73 - PeerConnection struct
 - `crates/forge-rtp/src/srtp.rs` - Fixed aes_cm_prf(), added tests
 - `benches/srtp_bench.rs` - Uncommented AES-256-GCM benchmarks
 
-**Commit:** (pending)
+**Commit:** 5578239
 
 ---
 
@@ -262,7 +262,7 @@ crates/forge-webrtc/src/peer.rs:46-73 - PeerConnection struct
 - `crates/forge-webrtc/src/peer.rs` - Added DTLS task and drive functions
 - `crates/forge-ice/src/agent.rs` - Added get_socket() method
 
-**Commit:** (pending)
+**Commit:** 5578239
 
 ---
 

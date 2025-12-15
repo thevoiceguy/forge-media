@@ -4,7 +4,7 @@
 
 use crate::{Result, WebRtcError};
 use forge_ice::{IceAgent, IceCandidate};
-use forge_rtp::dtls::{DtlsCertificate, DtlsContext};
+use forge_rtp::dtls::DtlsCertificate;
 use forge_rtp::RtpSocketPair;
 use forge_sdp::{
     DtlsAttributesExt, DtlsSetup, IceAttributesExt, MediaIceAttributesExt, SessionDescription,
@@ -54,9 +54,6 @@ pub struct PeerConnection {
     /// DTLS certificate for key exchange
     dtls_cert: Arc<DtlsCertificate>,
 
-    /// DTLS context for handshake
-    dtls_context: Option<DtlsContext>,
-
     /// DTLS connection (wrapped in Arc<Mutex> for background task access)
     #[cfg(feature = "dtls")]
     dtls_connection: Option<Arc<Mutex<forge_rtp::dtls::DtlsConnection>>>,
@@ -66,12 +63,16 @@ pub struct PeerConnection {
     dtls_task: Option<JoinHandle<()>>,
 
     /// RTP socket pair (RTP + RTCP)
+    /// TODO: Implement RTP media flow using this socket
+    #[allow(dead_code)]
     rtp_socket: Option<Arc<RtpSocketPair>>,
 
     /// Connection state
     state: ConnectionState,
 
     /// STUN servers for server-reflexive candidates
+    /// TODO: Use for ICE restart and re-negotiation
+    #[allow(dead_code)]
     stun_servers: Vec<String>,
 
     /// Local SDP offer/answer
@@ -114,7 +115,6 @@ impl PeerConnection {
             connection_id,
             ice_agent: Arc::new(Mutex::new(ice_agent)),
             dtls_cert,
-            dtls_context: None,
             #[cfg(feature = "dtls")]
             dtls_connection: None,
             #[cfg(feature = "dtls")]

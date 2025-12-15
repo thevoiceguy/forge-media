@@ -216,37 +216,53 @@ crates/forge-webrtc/tests/integration_test.rs:1-235 - Full test suite
 
 ### DEBT-001: Unused Fields in PeerConnection
 
-**Status:** Open
+**Status:** Resolved
 **Severity:** Low
 **Component:** forge-webrtc
 **Discovered:** 2025-12-13
+**Resolved:** 2025-12-15
 
 **Description:**
-Several fields in `PeerConnection` struct are defined but never used:
-- `dtls_context: Option<DtlsContext>`
-- `rtp_socket: Option<Arc<RtpSocketPair>>`
-- `stun_servers: Vec<String>`
+Several fields in `PeerConnection` struct were defined but never used:
+- `dtls_context: Option<DtlsContext>` - Obsolete
+- `rtp_socket: Option<Arc<RtpSocketPair>>` - Future use
+- `stun_servers: Vec<String>` - Future use
 
-Generates dead_code warnings during compilation.
+Generated dead_code warnings during compilation.
 
 **Location:**
-- `crates/forge-webrtc/src/peer.rs:57` - dtls_context
-- `crates/forge-webrtc/src/peer.rs:60` - rtp_socket
-- `crates/forge-webrtc/src/peer.rs:66` - stun_servers
+- `crates/forge-webrtc/src/peer.rs:58` - dtls_context
+- `crates/forge-webrtc/src/peer.rs:68` - rtp_socket
+- `crates/forge-webrtc/src/peer.rs:76` - stun_servers
 
 **Impact:**
 - Code clutter
 - Compiler warnings
 - Confusion about intended usage
 
-**Action Required:**
-- Either implement usage of these fields
-- Or remove them if not needed
-- Or mark with `#[allow(dead_code)]` with TODO comment
+**Resolution:**
+Cleaned up unused fields to eliminate warnings:
+
+1. **Removed `dtls_context`**: Obsolete field - we use `dtls_connection` instead (added in DEBT-002 fix)
+   - Removed field declaration
+   - Removed initialization
+   - Removed unused import
+
+2. **Marked `rtp_socket` with `#[allow(dead_code)]`**: Will be used for RTP media flow
+   - Added TODO comment: "Implement RTP media flow using this socket"
+   - Marked with `#[allow(dead_code)]` to suppress warning
+
+3. **Marked `stun_servers` with `#[allow(dead_code)]`**: Will be used for ICE restart/re-negotiation
+   - Added TODO comment: "Use for ICE restart and re-negotiation"
+   - Marked with `#[allow(dead_code)]` to suppress warning
+
+**Verification:**
+- `cargo check --package forge-webrtc` produces no warnings
+- All tests still pass
 
 **Related Files:**
 ```
-crates/forge-webrtc/src/peer.rs:46-73 - PeerConnection struct
+crates/forge-webrtc/src/peer.rs:47-76 - PeerConnection struct (cleaned)
 ```
 
 ---

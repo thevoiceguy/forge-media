@@ -5,8 +5,12 @@
 use thiserror::Error;
 
 mod conference;
+mod ai_manager;
 
 pub use conference::{ConferenceBridge, ConferenceRoom, RoomId};
+pub use ai_manager::{
+    AudioMode, ConferenceAIConfig, ConferenceAIManager, ConferenceAIState, AI_PARTICIPANT_ID,
+};
 pub use forge_core::AudioFormat;
 pub use forge_mixer::{ParticipantMetadata, ParticipantState};
 
@@ -33,6 +37,18 @@ pub enum ConferenceError {
 
     #[error("Recorder error: {0}")]
     Recorder(#[from] forge_recorder::RecorderError),
+
+    #[error("AI already attached to room: {0}")]
+    AlreadyHasAI(String),
+
+    #[error("No AI attached to room: {0}")]
+    NoAIAttached(String),
+
+    #[error("AI session failed: {0}")]
+    AISessionFailed(String),
+
+    #[error("Audio routing failed: {0}")]
+    AudioRoutingFailed(String),
 }
 
 /// Result type for conference operations

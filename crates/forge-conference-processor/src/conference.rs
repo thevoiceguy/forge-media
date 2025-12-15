@@ -24,6 +24,8 @@ pub struct ConferenceRoom {
     mixer: Arc<AudioMixer>,
     /// Optional recorder for capturing the conference
     recorder: Arc<RwLock<Option<AudioRecorder>>>,
+    /// Optional AI manager for this room
+    ai_manager: Arc<RwLock<Option<crate::ai_manager::ConferenceAIManager>>>,
     /// Audio format
     format: AudioFormat,
     /// Frame size for mixing operations
@@ -47,6 +49,7 @@ impl ConferenceRoom {
             id,
             mixer: Arc::new(mixer),
             recorder: Arc::new(RwLock::new(None)),
+            ai_manager: Arc::new(RwLock::new(None)),
             format,
             _frame_size: frame_size,
         })
@@ -310,6 +313,67 @@ impl ConferenceRoom {
     /// Get metadata for all participants in the room
     pub fn get_all_participant_metadata(&self) -> Vec<forge_mixer::ParticipantMetadata> {
         self.mixer.get_all_participant_metadata()
+    }
+
+    /// Attach AI to this conference room
+    ///
+    /// # Arguments
+    /// * `ai_manager` - The AI manager to attach
+    /// * `self_ref` - Arc reference to self (needed for spawning tasks)
+    pub async fn attach_ai(
+        self: &Arc<Self>,
+        ai_manager: crate::ai_manager::ConferenceAIManager,
+    ) -> Result<()> {
+        let mut guard = self.ai_manager.write();
+
+        if guard.is_some() {
+            return Err(ConferenceError::AlreadyHasAI(self.id.clone()));
+        }
+
+        // Add AI participant to mixer
+        self.mixer.add_participant(ai_manager.participant_id(), None)?;
+
+        // Start AI manager (spawns audio routing tasks)
+        ai_manager.start(Arc::clone(self)).await?;
+
+        info!("Attached AI to conference room {}", self.id);
+
+        *guard = Some(ai_manager);
+        Ok(())
+    }
+
+    /// Detach AI from this conference room
+    pub async fn detach_ai(&self) -> Result<()> {
+        let mut guard = self.ai_manager.write();
+
+        let ai_manager = guard.take().ok_or_else(|| {
+            ConferenceError::NoAIAttached(self.id.clone())
+        })?;
+
+        // Stop AI manager (this will abort tasks)
+        ai_manager.stop().await?;
+
+        // Remove AI participant from mixer
+        self.mixer.remove_participant(ai_manager.participant_id())?;
+
+        info!("Detached AI from conference room {}", self.id);
+
+        Ok(())
+    }
+
+    /// Check if AI is attached to this room
+    pub fn has_ai(&self) -> bool {
+        self.ai_manager.read().is_some()
+    }
+
+    /// Get AI state if attached
+    pub fn ai_state(&self) -> Option<crate::ai_manager::ConferenceAIState> {
+        self.ai_manager.read().as_ref().map(|ai| ai.state())
+    }
+
+    /// Get reference to AI manager (for internal use)
+    pub(crate) fn ai_manager_ref(&self) -> Arc<RwLock<Option<crate::ai_manager::ConferenceAIManager>>> {
+        self.ai_manager.clone()
     }
 }
 

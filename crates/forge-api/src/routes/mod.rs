@@ -1,6 +1,7 @@
 //! API routes
 
 pub mod ai;
+pub mod conference_ai;
 pub mod conferences;
 pub mod health;
 pub mod metrics;
@@ -18,6 +19,7 @@ pub fn create_router() -> Router<Arc<sessions::AppState>> {
         .merge(health::routes())
         .merge(sessions::routes())
         .merge(conferences::routes())
+        .merge(conference_ai::routes())
         .merge(webrtc::routes())
         .merge(ai::routes())
         .merge(metrics::routes())

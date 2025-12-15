@@ -1154,6 +1154,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "forge-core",
+ "forge-engine",
  "forge-mixer",
  "forge-recorder",
  "metrics 0.21.1",

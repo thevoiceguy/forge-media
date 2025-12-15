@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
+forge-engine = { path = "../forge-engine" }
 forge-mixer = { path = "../forge-mixer" }
 forge-recorder = { path = "../forge-recorder" }
 
@@ -17,6 +18,7 @@ dashmap = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

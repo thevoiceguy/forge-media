@@ -22,10 +22,11 @@ None currently.
 
 ### METRICS-001: Missing SRTP Packet Counters
 
-**Status:** Open
+**Status:** Resolved
 **Severity:** Medium
 **Component:** forge-rtp (SRTP), forge-api (Metrics)
 **Discovered:** 2025-12-13 (Sprint 5)
+**Resolved:** 2025-12-15
 
 **Description:**
 Prometheus metrics for SRTP packet counts are not implemented. According to the Sprint 5 plan (task 5.7), we should track:
@@ -41,23 +42,22 @@ Prometheus metrics for SRTP packet counts are not implemented. According to the 
 - Cannot track encryption/decryption failures
 - Missing observability for security-critical operations
 
-**Workaround:**
-- Use WebRTC connection-level metrics as proxy
-- Monitor at application layer instead of SRTP layer
+**Resolution:**
+Added comprehensive Prometheus metrics for SRTP/SRTCP packet tracking:
 
-**Implementation Plan:**
-1. Add `metrics` dependency to `forge-rtp/Cargo.toml`
-2. Add counters in `protect_rtp()` and `unprotect_rtp()`:
-   ```rust
-   counter!("forge_srtp_packets_encrypted_total", 1);
-   counter!("forge_srtp_packets_decrypted_total", 1);
-   ```
-3. Consider adding error counters:
-   ```rust
-   counter!("forge_srtp_encryption_errors_total", 1);
-   counter!("forge_srtp_decryption_errors_total", 1);
-   counter!("forge_srtp_replay_attacks_blocked_total", 1);
-   ```
+**RTP Metrics:**
+- `forge_srtp_packets_encrypted_total` - Total RTP packets encrypted
+- `forge_srtp_packets_decrypted_total` - Total RTP packets decrypted
+- `forge_srtp_replay_attacks_blocked_total` - Replay attacks detected and blocked
+
+**RTCP Metrics:**
+- `forge_srtcp_packets_encrypted_total` - Total RTCP packets encrypted
+- `forge_srtcp_packets_decrypted_total` - Total RTCP packets decrypted
+
+**Implementation:**
+- Added metrics dependency to forge-rtp/Cargo.toml
+- Counters added to protect_rtp(), unprotect_rtp(), protect_rtcp(), unprotect_rtcp()
+- Replay attack counter added to replay window check
 
 **Related Files:**
 ```
@@ -71,10 +71,11 @@ crates/forge-rtp/src/srtp.rs:927  - unprotect_rtcp()
 
 ### WEBRTC-001: ICE Candidate Count Not Exposed
 
-**Status:** Open
+**Status:** Resolved
 **Severity:** Medium
 **Component:** forge-webrtc, forge-ice
 **Discovered:** 2025-12-13 (Sprint 5)
+**Resolved:** 2025-12-15
 
 **Description:**
 The `PeerConnection` struct does not expose the number of gathered ICE candidates. The API route has a placeholder that returns 0.
@@ -88,15 +89,16 @@ The `PeerConnection` struct does not expose the number of gathered ICE candidate
 - `forge_webrtc_ice_candidates_gathered` gauge always reports 0
 - Limited visibility into ICE gathering success
 
-**Implementation Plan:**
-1. Add method to `PeerConnection`:
-   ```rust
-   pub async fn local_candidate_count(&self) -> usize {
-       self.ice_agent.lock().await.get_local_candidates().len()
-   }
-   ```
-2. Update API route to call this method
-3. Update metric in `create_connection()` endpoint
+**Resolution:**
+Implemented ICE candidate count tracking:
+1. Added `local_candidate_count()` method to `PeerConnection`
+2. Updated `create_connection()` API route to report actual count
+3. Metric `forge_webrtc_ice_candidates_gathered` now shows real values
+
+**Implementation:**
+- Added async method in PeerConnection that queries IceAgent
+- Updated metrics in create_connection after SDP offer generation
+- Gauge metric now reflects actual gathered candidates
 
 **Related Files:**
 ```

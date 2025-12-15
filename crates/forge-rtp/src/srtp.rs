@@ -9,6 +9,7 @@ use aes::cipher::{BlockEncrypt, KeyInit};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use aes_gcm::{Aes128Gcm, Aes256Gcm, AeadInPlace, Nonce};
+use metrics::counter;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -473,6 +474,9 @@ impl SrtpContext {
             }
         };
 
+        // Increment metrics counter
+        counter!("forge_srtp_packets_encrypted_total", 1);
+
         Ok(srtp_packet)
     }
 
@@ -664,6 +668,7 @@ impl SrtpContext {
 
         // Check replay protection
         if self.replay_window.check(packet_index) {
+            counter!("forge_srtp_replay_attacks_blocked_total", 1);
             return Err(ForgeError::Srtp("Replay attack detected".to_string()));
         }
 
@@ -699,6 +704,9 @@ impl SrtpContext {
         // Update replay window
         self.replay_window.update(packet_index);
         self.remote_roc.update(sequence);
+
+        // Increment metrics counter
+        counter!("forge_srtp_packets_decrypted_total", 1);
 
         Ok(rtp_packet)
     }
@@ -892,14 +900,19 @@ impl SrtpContext {
         let derived_keys = key_material.derive_session_keys(ssrc, srtcp_index as u64)?;
 
         // Encrypt based on profile
-        match key_material.profile {
+        let srtcp_packet = match key_material.profile {
             SrtpProfile::Aes128CmHmacSha1_80 | SrtpProfile::Aes128CmHmacSha1_32 => {
-                self.protect_rtcp_aes_cm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)
+                self.protect_rtcp_aes_cm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)?
             }
             SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => {
-                self.protect_rtcp_aes_gcm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)
+                self.protect_rtcp_aes_gcm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)?
             }
-        }
+        };
+
+        // Increment metrics counter
+        counter!("forge_srtcp_packets_encrypted_total", 1);
+
+        Ok(srtcp_packet)
     }
 
     /// Protect RTCP packet using AES-CM + HMAC-SHA1
@@ -1095,14 +1108,19 @@ impl SrtpContext {
         let derived_keys = key_material.derive_session_keys(ssrc, srtcp_index as u64)?;
 
         // Decrypt based on profile
-        match key_material.profile {
+        let rtcp_packet = match key_material.profile {
             SrtpProfile::Aes128CmHmacSha1_80 | SrtpProfile::Aes128CmHmacSha1_32 => {
-                self.unprotect_rtcp_aes_cm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)
+                self.unprotect_rtcp_aes_cm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)?
             }
             SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => {
-                self.unprotect_rtcp_aes_gcm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)
+                self.unprotect_rtcp_aes_gcm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)?
             }
-        }
+        };
+
+        // Increment metrics counter
+        counter!("forge_srtcp_packets_decrypted_total", 1);
+
+        Ok(rtcp_packet)
     }
 
     /// Unprotect SRTCP packet using AES-CM + HMAC-SHA1

@@ -171,6 +171,10 @@ async fn create_connection(
     let dtls_fingerprint = peer.dtls_fingerprint().to_string();
     let state_str = format!("{:?}", peer.get_state());
 
+    // Update ICE candidate metric
+    let candidate_count = peer.local_candidate_count().await;
+    gauge!("forge_webrtc_ice_candidates_gathered", candidate_count as f64);
+
     // Store connection in manager
     let peer_arc = Arc::new(tokio::sync::Mutex::new(peer));
     state.webrtc_manager.add_connection(connection_id.clone(), peer_arc);

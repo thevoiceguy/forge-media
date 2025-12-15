@@ -446,6 +446,11 @@ impl PeerConnection {
         self.remote_sdp.as_deref()
     }
 
+    /// Get the number of local ICE candidates gathered
+    pub async fn local_candidate_count(&self) -> usize {
+        self.ice_agent.lock().await.get_local_candidates().len()
+    }
+
     /// Drive the DTLS handshake by exchanging packets over UDP
     ///
     /// This function runs in a background task and:

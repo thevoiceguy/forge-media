@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "forge-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "axum-server",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1246,6 +1246,7 @@ dependencies = [
  "hex",
  "hmac",
  "libc",
+ "metrics 0.21.1",
  "openssl",
  "openssl-sys",
  "sha1",
@@ -1362,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "forge-webrtc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dashmap",
  "forge-core",

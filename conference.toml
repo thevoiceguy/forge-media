@@ -1,0 +1,110 @@
+# Conference Configuration
+# This file controls conference behavior, security, and DTMF commands
+
+# ============================================================================
+# Security Settings
+# ============================================================================
+[security]
+# Require guest PIN to join conference
+require_guest_pin = true
+
+# Guest PIN (participants must enter this to join)
+# Leave empty or set to null to disable
+guest_pin = "1234"
+
+# Host PIN (elevates participant to host role with special commands)
+# Leave empty or set to null to disable host commands
+host_pin = "9876"
+
+# Lock conference by default (participants can't join until unlocked by host)
+default_locked = false
+
+# Maximum failed PIN attempts before temporary lockout
+max_pin_attempts = 3
+
+# Lockout duration in seconds after exceeding max attempts
+lockout_duration_secs = 300  # 5 minutes
+
+# PIN Requirements
+[security.pin_requirements]
+# Minimum PIN length
+min_length = 4
+
+# Maximum PIN length
+max_length = 12
+
+# Allow only digits (0-9, *, #) - recommended for phone keypads
+digits_only = true
+
+# Complexity requirements (only applies if digits_only = false)
+require_digit = true
+require_letter = false
+require_special = false
+
+# ============================================================================
+# DTMF Command Settings
+# ============================================================================
+[dtmf]
+# Enable DTMF command processing
+enabled = true
+
+# Forward unhandled DTMF digits to AI (if AI is attached to conference)
+forward_to_ai = true
+
+# Timeout for multi-digit command sequences (milliseconds)
+sequence_timeout_ms = 3000
+
+# Enable audio feedback (beep tones to confirm commands)
+audio_feedback = true
+
+# Participant Commands (available to all participants)
+[dtmf.participant_commands]
+mute_toggle = "*6"      # Toggle mute/unmute
+volume_up = "*7"        # Increase volume
+volume_down = "*8"      # Decrease volume
+info = "*0"             # Hear conference info (participant count, duration)
+leave = "*9"            # Leave the conference
+
+# Host Commands (require host PIN authentication)
+[dtmf.host_commands]
+kick_prefix = "##"      # Kick participant by number (e.g., "##1" kicks participant 1)
+mute_all = "*91"        # Mute all participants except host
+unmute_all = "*92"      # Unmute all muted participants
+lock = "*93"            # Lock conference (prevent new joins)
+unlock = "*94"          # Unlock conference (allow new joins)
+end_conference = "*99"  # End conference and disconnect all participants
+
+# ============================================================================
+# Audio Settings
+# ============================================================================
+[audio]
+# Default audio sample rate (Hz)
+# Common values: 8000 (narrowband), 16000 (wideband), 48000 (fullband)
+sample_rate = 48000
+
+# Frame size in samples (determines latency)
+# At 48kHz: 480 = 10ms, 960 = 20ms, 1920 = 40ms
+frame_size = 960
+
+# Default participant gain (volume multiplier)
+# 1.0 = normal, 0.5 = half volume, 2.0 = double volume
+default_gain = 1.0
+
+# Enable voice activity detection
+enable_vad = true
+
+# ============================================================================
+# Recording Settings
+# ============================================================================
+[recording]
+# Automatically start recording when conference begins
+auto_record = false
+
+# Recording codec: "pcm" (WAV) or "opus"
+codec = "pcm"
+
+# Output directory for recordings
+output_dir = "./recordings"
+
+# Include AI audio in recordings (if AI is attached)
+include_ai = true

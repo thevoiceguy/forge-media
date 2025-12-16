@@ -3,10 +3,11 @@
 use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use forge_core::CallId;
+use forge_core::{CallId, SecureString};
 use forge_engine::{AISessionConfig, AISessionState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use url::{Host, Url};
 use validator::Validate;
 
 use crate::error::{ApiError, ApiResult};
@@ -25,6 +26,9 @@ pub struct AttachAIRequest {
     /// Voice/persona for AI (defaults to "alloy")
     #[validate(length(min = 1, max = 64))]
     pub voice: Option<String>,
+    /// Optional custom endpoint (must be https/wss and in allowlist)
+    #[validate(length(min = 1, max = 512))]
+    pub endpoint: Option<String>,
     /// System instructions for AI behavior
     #[validate(length(max = 4096))]
     pub instructions: Option<String>,
@@ -59,6 +63,65 @@ pub struct FunctionResponseRequest {
     pub output: String,
 }
 
+pub(crate) fn validate_ai_endpoint(
+    endpoint: &str,
+    allowed_endpoints: &[String],
+) -> Result<(), ApiError> {
+    let url = Url::parse(endpoint)
+        .map_err(|e| ApiError::InvalidRequest(format!("Invalid endpoint URL: {}", e)))?;
+
+    let scheme = url.scheme();
+    if scheme != "https" && scheme != "wss" {
+        return Err(ApiError::InvalidRequest(
+            "Endpoint must use https or wss".to_string(),
+        ));
+    }
+
+    let host = url
+        .host()
+        .ok_or_else(|| ApiError::InvalidRequest("Endpoint must include host".to_string()))?;
+
+    if is_private_host(&host) {
+        return Err(ApiError::InvalidRequest(
+            "Private or loopback endpoints are not allowed".to_string(),
+        ));
+    }
+
+    let port = url.port_or_known_default();
+    let host_str = host.to_string();
+
+    let allowed = allowed_endpoints.iter().any(|allowed| {
+        Url::parse(allowed).ok().and_then(|allowed_url| {
+            allowed_url.host().map(|allowed_host| {
+                let same_host = allowed_host.to_string().eq_ignore_ascii_case(&host_str);
+                let allowed_port = allowed_url.port_or_known_default();
+                same_host && (allowed_port.is_none() || allowed_port == port)
+            })
+        }).unwrap_or(false)
+    });
+
+    if !allowed {
+        return Err(ApiError::InvalidRequest(format!(
+            "Endpoint host '{}' not in allowlist",
+            host_str
+        )));
+    }
+
+    Ok(())
+}
+
+fn is_private_host(host: &Host<&str>) -> bool {
+    match host {
+        Host::Ipv4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        Host::Ipv6(ip) => {
+            ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() || ip.is_multicast()
+        }
+        Host::Domain(domain) => {
+            domain.eq_ignore_ascii_case("localhost") || domain.ends_with(".local")
+        }
+    }
+}
+
 /// Attach AI to a media session
 ///
 /// POST /v1/sessions/:id/ai
@@ -74,6 +137,10 @@ async fn attach_ai(
     request
         .validate()
         .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
+
+    if let Some(endpoint) = request.endpoint.as_ref() {
+        validate_ai_endpoint(endpoint, &state.ai_allowed_endpoints)?;
+    }
 
     let call_id = CallId(call_id.clone());
 
@@ -94,8 +161,8 @@ async fn attach_ai(
     // Create AI session config
     let config = AISessionConfig {
         connector_type: forge_ai_stream::AIConnectorType::OpenAI,
-        api_key: request.api_key,
-        endpoint: None,
+        api_key: SecureString::new(request.api_key),
+        endpoint: request.endpoint.clone(),
         model: request.model.unwrap_or_else(|| "gpt-4o-realtime-preview".to_string()),
         voice: request.voice.or_else(|| Some("alloy".to_string())),
         temperature: request.temperature,
@@ -261,6 +328,7 @@ mod tests {
             conference_bridge,
             std::env::temp_dir().join("forge-test-recordings"),
             std::env::temp_dir().join("forge-test-prompts"),
+            forge_core::config::default_ai_allowed_endpoints(),
             Arc::new(forge_core::EventBus::new()),
         ))
     }

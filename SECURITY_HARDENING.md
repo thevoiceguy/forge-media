@@ -13,7 +13,7 @@ This document outlines critical security vulnerabilities discovered during code 
 | ID | Severity | Component | Status | Remediation Time |
 |----|----------|-----------|--------|------------------|
 | SEC-001 | 🔴 HIGH | Rate Limiting | ✅ FIXED | - |
-| SEC-002 | 🔴 HIGH | AI API Keys | ⚠️ PENDING | 4-6 hours |
+| SEC-002 | 🔴 HIGH | AI API Keys | ✅ FIXED | 4-6 hours |
 | SEC-003 | 🟡 MEDIUM | Recording Paths | ⚠️ PENDING | 2-3 hours |
 | SEC-004 | 🟡 MEDIUM | RTP Port Allocation | ⚠️ PENDING | 2-3 hours |
 | SEC-005 | 🔵 LOW | Security Defaults | ⚠️ PENDING | 2-3 hours |
@@ -65,9 +65,9 @@ curl -H "X-Forwarded-For: 1.2.3.4" http://localhost:8080/health
 
 ---
 
-## SEC-002: AI API Key Exposure and SSRF [PENDING]
+## SEC-002: AI API Key Exposure and SSRF [FIXED]
 
-### Severity: 🔴 HIGH
+### Severity: 🔴 HIGH / Status: ✅ FIXED (redacted secrets + endpoint allowlist)
 
 ### Vulnerability
 AI integration endpoints accept raw API keys in HTTP requests, store them in memory without encryption, log them in plaintext, and accept arbitrary custom endpoints without validation.
@@ -105,61 +105,15 @@ let config = AISessionConfig {
 
 #### 1. API Key Redaction
 
-**Implementation:**
-```rust
-// crates/forge-core/src/types.rs - New secure string type
-use std::fmt;
-
-/// Secure string that redacts its value in logs and debug output
-#[derive(Clone)]
-pub struct SecureString(String);
-
-impl SecureString {
-    pub fn new(value: String) -> Self {
-        Self(value)
-    }
-
-    pub fn expose_secret(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for SecureString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[REDACTED]")
-    }
-}
-
-impl fmt::Display for SecureString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[REDACTED]")
-    }
-}
-
-impl serde::Serialize for SecureString {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str("[REDACTED]")
-    }
-}
-```
-
-**Usage:**
-```rust
-// Update AISessionConfig
-pub struct AISessionConfig {
-    pub api_key: SecureString,  // Was: String
-    // ...
-}
-
-// Update request handling
-let config = AISessionConfig {
-    api_key: SecureString::new(request.api_key),
-    // ...
-};
-```
+**Implementation Highlights:**
+- Added `SecureString` type with custom `Serialize`/`Deserialize` implementations (redacts in Display/Debug/JSON) and switched `AISessionConfig` + `AIConnectorConfig` to hold secrets safely.
+- Custom `Serialize` always outputs `"[REDACTED]"` to prevent leakage in API responses, logs, and metrics.
+- Custom `Deserialize` rejects `"[REDACTED]"` placeholder to prevent config mistakes.
+- API endpoints now accept optional AI endpoints but enforce HTTPS/WSS, block private/loopback hosts, and require hosts to be in an allowlist (`api.ai_allowed_endpoints`).
+- Comprehensive endpoint validation: blocks private IPs (RFC 1918), loopback, link-local, and AWS metadata endpoints.
+- Configurable allowlist defaults to major AI providers (OpenAI, Anthropic, Deepgram, ElevenLabs).
+- AI attach flows convert incoming keys to `SecureString` before storage; default configs and tests updated to avoid logging real keys.
+- **11 comprehensive tests added** for `SecureString` covering serialization, deserialization, redaction, and edge cases.
 
 #### 2. Endpoint Validation
 

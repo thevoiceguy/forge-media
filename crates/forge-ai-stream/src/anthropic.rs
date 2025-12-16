@@ -303,7 +303,7 @@ mod tests {
     async fn test_anthropic_connector_creation() {
         let config = AIConnectorConfig {
             connector_type: AIConnectorType::Anthropic,
-            api_key: "test-key".to_string(),
+            api_key: forge_core::SecureString::new("test-key"),
             model: "claude-3-opus-20240229".to_string(),
             ..Default::default()
         };
@@ -329,7 +329,7 @@ mod tests {
     async fn test_anthropic_connector_type_validation() {
         let config = AIConnectorConfig {
             connector_type: AIConnectorType::OpenAI, // Wrong type
-            api_key: "test-key".to_string(),
+            api_key: forge_core::SecureString::new("test-key"),
             ..Default::default()
         };
 

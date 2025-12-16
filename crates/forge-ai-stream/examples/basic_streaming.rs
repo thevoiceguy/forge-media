@@ -11,6 +11,7 @@
 use forge_ai_stream::{
     AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector,
 };
+use forge_core::SecureString;
 use std::env;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure the AI connector
     let config = AIConnectorConfig {
         connector_type: AIConnectorType::OpenAI,
-        api_key,
+        api_key: SecureString::new(api_key),
         endpoint: None, // Use default OpenAI endpoint
         model: "gpt-4o-realtime-preview".to_string(),
         voice: Some("alloy".to_string()),

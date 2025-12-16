@@ -380,7 +380,7 @@ mod tests {
     async fn test_deepgram_connector_creation() {
         let config = AIConnectorConfig {
             connector_type: AIConnectorType::Deepgram,
-            api_key: "test-key".to_string(),
+            api_key: forge_core::SecureString::new("test-key"),
             model: "nova-2".to_string(),
             voice: Some(DeepgramVoices::AURA_ASTERIA_EN.to_string()),
             ..Default::default()
@@ -410,7 +410,7 @@ mod tests {
     async fn test_deepgram_connector_type_validation() {
         let config = AIConnectorConfig {
             connector_type: AIConnectorType::OpenAI, // Wrong type
-            api_key: "test-key".to_string(),
+            api_key: forge_core::SecureString::new("test-key"),
             ..Default::default()
         };
 

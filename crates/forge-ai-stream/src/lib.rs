@@ -25,7 +25,7 @@
 //! use forge_ai_stream::{OpenAIConnector, AIConnectorConfig, AudioFormat};
 //!
 //! let config = AIConnectorConfig {
-//!     api_key: "sk-...".to_string(),
+//!     api_key: forge_core::SecureString::new("sk-..."),
 //!     model: "gpt-4o-realtime-preview".to_string(),
 //!     ..Default::default()
 //! };

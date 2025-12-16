@@ -268,7 +268,10 @@ impl AIConnector for OpenAIConnector {
         // Build WebSocket request with authorization
         let request = tungstenite::http::Request::builder()
             .uri(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.api_key.expose_secret()),
+            )
             .header("OpenAI-Beta", "realtime=v1")
             .body(())
             .map_err(|e| AIStreamError::Connection(format!("Failed to build request: {}", e)))?;

@@ -42,6 +42,7 @@ pub struct ApiServerConfig {
     pub xdp_enabled: bool,
     pub xdp_interface: String,
     pub xdp_mode: String,
+    pub ai_allowed_endpoints: Vec<String>,
 }
 
 impl Default for ApiServerConfig {
@@ -68,6 +69,7 @@ impl Default for ApiServerConfig {
             xdp_enabled: false,
             xdp_interface: "lo".to_string(),
             xdp_mode: "generic".to_string(),
+            ai_allowed_endpoints: forge_core::config::default_ai_allowed_endpoints(),
         }
     }
 }
@@ -192,6 +194,7 @@ impl ApiServer {
             conference_bridge,
             config.recording_base_dir.clone(),
             config.prompts_base_dir.clone(),
+            config.ai_allowed_endpoints.clone(),
             event_bus.clone(),
         ));
         let auth_config = middleware::auth::AuthConfig::new(config.auth_tokens.clone());

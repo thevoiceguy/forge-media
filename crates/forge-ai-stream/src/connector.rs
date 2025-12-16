@@ -5,6 +5,7 @@
 use crate::events::{AIEvent, SessionConfig, ToolDefinition};
 use crate::{AIStreamStats, Result};
 use async_trait::async_trait;
+use forge_core::SecureString;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -36,7 +37,7 @@ pub struct AIConnectorConfig {
     pub connector_type: AIConnectorType,
 
     /// API key or credentials
-    pub api_key: String,
+    pub api_key: SecureString,
 
     /// API endpoint (optional, uses default if not provided)
     pub endpoint: Option<String>,
@@ -76,7 +77,7 @@ impl Default for AIConnectorConfig {
     fn default() -> Self {
         Self {
             connector_type: AIConnectorType::OpenAI,
-            api_key: String::new(),
+            api_key: SecureString::new(String::new()),
             endpoint: None,
             model: "gpt-4o-realtime-preview".to_string(),
             voice: Some("alloy".to_string()),

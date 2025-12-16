@@ -244,6 +244,7 @@ mod tests {
             conference_bridge,
             std::env::temp_dir().join("forge-test-recordings"),
             std::env::temp_dir().join("forge-test-prompts"),
+            forge_core::config::default_ai_allowed_endpoints(),
             Arc::new(forge_core::EventBus::new()),
         ))
     }

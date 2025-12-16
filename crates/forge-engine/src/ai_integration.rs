@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use forge_ai_stream::{
     AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector,
 };
-use forge_core::{CallId, ForgeError, Result};
+use forge_core::{CallId, ForgeError, Result, SecureString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -19,7 +19,7 @@ pub struct AISessionConfig {
     /// AI service type (OpenAI, etc.)
     pub connector_type: AIConnectorType,
     /// API key for the AI service
-    pub api_key: String,
+    pub api_key: SecureString,
     /// Optional custom endpoint URL
     pub endpoint: Option<String>,
     /// AI model to use (e.g., "gpt-4o-realtime-preview")
@@ -42,7 +42,7 @@ impl Default for AISessionConfig {
     fn default() -> Self {
         Self {
             connector_type: AIConnectorType::OpenAI,
-            api_key: String::new(),
+            api_key: SecureString::new(String::new()),
             endpoint: None,
             model: "gpt-4o-realtime-preview".to_string(),
             voice: Some("alloy".to_string()),
@@ -108,7 +108,7 @@ impl AISession {
         // Convert AISessionConfig to AIConnectorConfig
         let connector_config = AIConnectorConfig {
             connector_type: config.connector_type,
-            api_key: config.api_key,
+            api_key: config.api_key.clone(),
             endpoint: config.endpoint,
             model: config.model,
             voice: config.voice,
@@ -1147,7 +1147,7 @@ mod tests {
         // Test with custom configurations
         let config1 = AISessionConfig {
             connector_type: forge_ai_stream::AIConnectorType::OpenAI,
-            api_key: "test-key".to_string(),
+            api_key: SecureString::new("test-key"),
             endpoint: Some("wss://custom.endpoint".to_string()),
             model: "custom-model".to_string(),
             voice: Some("nova".to_string()),

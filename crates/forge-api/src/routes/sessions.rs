@@ -93,6 +93,7 @@ pub struct AppState {
     pub storage_manager: Arc<tokio::sync::Mutex<forge_storage::StorageManager>>,
     pub recording_base_dir: std::path::PathBuf,
     pub prompts_base_dir: std::path::PathBuf,
+    pub ai_allowed_endpoints: Vec<String>,
     pub event_bus: crate::EventBus,
     pub core_event_bus: Arc<forge_core::EventBus>,
     pub webrtc_manager: Arc<super::webrtc::WebRtcManager>,
@@ -106,6 +107,7 @@ impl AppState {
         conference_bridge: Arc<forge_conference_processor::ConferenceBridge>,
         recording_base_dir: std::path::PathBuf,
         prompts_base_dir: std::path::PathBuf,
+        ai_allowed_endpoints: Vec<String>,
         core_event_bus: Arc<forge_core::EventBus>,
     ) -> Self {
         // Create default storage manager
@@ -132,6 +134,7 @@ impl AppState {
             storage_manager,
             recording_base_dir,
             prompts_base_dir,
+            ai_allowed_endpoints,
             event_bus,
             core_event_bus,
             webrtc_manager,
@@ -580,6 +583,7 @@ mod tests {
             conference_bridge,
             std::env::temp_dir().join("forge-test-recordings"),
             std::env::temp_dir().join("forge-test-prompts"),
+            forge_core::config::default_ai_allowed_endpoints(),
             Arc::new(forge_core::EventBus::new()),
         ))
     }

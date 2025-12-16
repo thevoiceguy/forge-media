@@ -316,6 +316,10 @@ pub struct ApiConfig {
     /// SIPREC configuration
     #[serde(default)]
     pub siprec: SiprecConfig,
+
+    /// Allowed AI provider endpoints (https/wss)
+    #[serde(default = "default_ai_allowed_endpoints")]
+    pub ai_allowed_endpoints: Vec<String>,
 }
 
 impl Default for ApiConfig {
@@ -335,6 +339,7 @@ impl Default for ApiConfig {
             recording_base_dir: default_recording_base_dir(),
             prompts_base_dir: default_prompts_base_dir(),
             siprec: SiprecConfig::default(),
+            ai_allowed_endpoints: default_ai_allowed_endpoints(),
         }
     }
 }
@@ -365,6 +370,15 @@ fn default_recording_base_dir() -> std::path::PathBuf {
 
 fn default_prompts_base_dir() -> std::path::PathBuf {
     "/var/lib/forge/prompts".into()
+}
+
+pub fn default_ai_allowed_endpoints() -> Vec<String> {
+    vec![
+        "https://api.openai.com".to_string(),
+        "https://api.anthropic.com".to_string(),
+        "https://api.deepgram.com".to_string(),
+        "https://api.elevenlabs.io".to_string(),
+    ]
 }
 
 /// SIPREC (compliance recording) configuration

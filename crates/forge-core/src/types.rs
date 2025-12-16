@@ -339,3 +339,188 @@ impl fmt::Display for RecordingId {
         write!(f, "{}", self.0)
     }
 }
+
+/// Secrets that should be redacted when formatted for logs, JSON, and serialization
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecureString(String);
+
+impl SecureString {
+    /// Create a new secure string
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Reveal the underlying secret
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+
+    /// Check if the secret is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for SecureString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl fmt::Display for SecureString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl From<String> for SecureString {
+    fn from(value: String) -> Self {
+        SecureString::new(value)
+    }
+}
+
+impl From<&str> for SecureString {
+    fn from(value: &str) -> Self {
+        SecureString::new(value)
+    }
+}
+
+impl AsRef<str> for SecureString {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl serde::Serialize for SecureString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Always serialize as [REDACTED] to prevent leakage in JSON logs/responses
+        serializer.serialize_str("[REDACTED]")
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SecureString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Allow deserialization from strings (needed for config loading)
+        // but log a warning if the value looks like it might be [REDACTED]
+        let value = String::deserialize(deserializer)?;
+
+        if value == "[REDACTED]" {
+            return Err(serde::de::Error::custom(
+                "Cannot deserialize [REDACTED] placeholder as a secret. \
+                 Use environment variables or secret management systems instead."
+            ));
+        }
+
+        Ok(SecureString::new(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_secure_string_debug_redaction() {
+        let secret = SecureString::new("sk-super-secret-api-key-12345");
+        let debug_output = format!("{:?}", secret);
+        
+        assert_eq!(debug_output, "[REDACTED]");
+        assert!(!debug_output.contains("sk-super-secret"));
+    }
+
+    #[test]
+    fn test_secure_string_display_redaction() {
+        let secret = SecureString::new("password123");
+        let display_output = format!("{}", secret);
+        
+        assert_eq!(display_output, "[REDACTED]");
+        assert!(!display_output.contains("password"));
+    }
+
+    #[test]
+    fn test_secure_string_serialization_redaction() {
+        let secret = SecureString::new("sk-openai-key-abc123xyz");
+        let json = serde_json::to_string(&secret).unwrap();
+        
+        // Should serialize as [REDACTED], not the actual secret
+        assert_eq!(json, "\"[REDACTED]\"");
+        assert!(!json.contains("sk-openai-key"));
+        assert!(!json.contains("abc123xyz"));
+    }
+
+    #[test]
+    fn test_secure_string_deserialization() {
+        // Should successfully deserialize a real secret
+        let json = "\"my-secret-key\"";
+        let secret: SecureString = serde_json::from_str(json).unwrap();
+        assert_eq!(secret.expose_secret(), "my-secret-key");
+    }
+
+    #[test]
+    fn test_secure_string_reject_redacted_placeholder() {
+        // Should reject [REDACTED] as a value
+        let json = "\"[REDACTED]\"";
+        let result: Result<SecureString, _> = serde_json::from_str(json);
+        
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Cannot deserialize [REDACTED]"));
+    }
+
+    #[test]
+    fn test_secure_string_expose_secret() {
+        let secret = SecureString::new("actual-secret-value");
+        
+        // expose_secret() should reveal the actual value
+        assert_eq!(secret.expose_secret(), "actual-secret-value");
+    }
+
+    #[test]
+    fn test_secure_string_is_empty() {
+        let empty = SecureString::new("");
+        let non_empty = SecureString::new("value");
+        
+        assert!(empty.is_empty());
+        assert!(!non_empty.is_empty());
+    }
+
+    #[test]
+    fn test_secure_string_from_conversions() {
+        let from_string = SecureString::from("test".to_string());
+        let from_str = SecureString::from("test");
+        
+        assert_eq!(from_string.expose_secret(), "test");
+        assert_eq!(from_str.expose_secret(), "test");
+    }
+
+    #[test]
+    fn test_secure_string_as_ref() {
+        let secret = SecureString::new("mykey");
+        let as_ref: &str = secret.as_ref();
+        
+        assert_eq!(as_ref, "mykey");
+    }
+
+    #[test]
+    fn test_secure_string_clone() {
+        let original = SecureString::new("original");
+        let cloned = original.clone();
+        
+        assert_eq!(original.expose_secret(), cloned.expose_secret());
+    }
+
+    #[test]
+    fn test_secure_string_equality() {
+        let secret1 = SecureString::new("same");
+        let secret2 = SecureString::new("same");
+        let secret3 = SecureString::new("different");
+        
+        assert_eq!(secret1, secret2);
+        assert_ne!(secret1, secret3);
+    }
+}

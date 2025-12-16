@@ -33,6 +33,14 @@ auth_tokens = [
 rate_limit_requests_per_window = 120  # Max requests
 rate_limit_window_secs = 60            # Time window in seconds
 
+# Allowed AI provider endpoints (https/wss only)
+ai_allowed_endpoints = [
+    "https://api.openai.com",
+    "https://api.anthropic.com",
+    "https://api.deepgram.com",
+    "https://api.elevenlabs.io",
+]
+
 # Recording base directory
 # All recording paths are constrained within this directory
 recording_base_dir = "/var/lib/forge/recordings"

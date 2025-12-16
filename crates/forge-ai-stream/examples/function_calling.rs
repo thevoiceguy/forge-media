@@ -11,6 +11,7 @@
 use forge_ai_stream::{
     AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector,
 };
+use forge_core::SecureString;
 use serde_json::json;
 use std::collections::HashMap;
 use std::env;
@@ -82,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = AIConnectorConfig {
         connector_type: AIConnectorType::OpenAI,
-        api_key,
+        api_key: SecureString::new(api_key),
         endpoint: None,
         model: "gpt-4o-realtime-preview".to_string(),
         voice: Some("alloy".to_string()),

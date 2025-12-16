@@ -3,6 +3,7 @@
 //! Provides REST API for attaching/detaching AI to conference rooms
 
 use crate::response::{created, no_content};
+use crate::routes::ai::validate_ai_endpoint;
 use crate::routes::sessions::AppState;
 use crate::{ApiError, ApiResult};
 use axum::{
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
 use validator::Validate;
+use forge_core::{CallId, SecureString};
 
 /// Create conference AI routes
 pub fn routes() -> Router<Arc<AppState>> {
@@ -38,6 +40,10 @@ pub struct AttachConferenceAIRequest {
 
     /// Voice personality (alloy, shimmer, echo, etc.)
     pub voice: Option<String>,
+
+    /// Optional custom endpoint (must be https/wss and in allowlist)
+    #[validate(length(min = 1, max = 512))]
+    pub endpoint: Option<String>,
 
     /// System instructions for the AI
     pub instructions: Option<String>,
@@ -80,6 +86,10 @@ async fn attach_ai(
         ApiError::InvalidRequest(format!("Invalid request: {}", e))
     })?;
 
+    if let Some(endpoint) = request.endpoint.as_ref() {
+        validate_ai_endpoint(endpoint, &state.ai_allowed_endpoints)?;
+    }
+
     // Get conference room
     let room = state.conference_bridge.get_room(&room_id).map_err(|e| {
         ApiError::NotFound(format!("Conference room not found: {}", e))
@@ -108,8 +118,8 @@ async fn attach_ai(
     // Create AI session config
     let ai_config = AISessionConfig {
         connector_type: forge_ai_stream::AIConnectorType::OpenAI,
-        api_key: request.api_key,
-        endpoint: None,
+        api_key: SecureString::new(request.api_key),
+        endpoint: request.endpoint.clone(),
         model: request
             .model
             .unwrap_or_else(|| "gpt-4o-realtime-preview-2024-12-17".to_string()),
@@ -122,7 +132,7 @@ async fn attach_ai(
     };
 
     // Create call ID for the conference AI session
-    let call_id = forge_core::CallId::from(format!("conference-{}", room_id));
+    let call_id = CallId::from(format!("conference-{}", room_id));
 
     // Attach AI session via manager (no EventBus needed for conference)
     state
@@ -249,6 +259,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             model: None,
             voice: None,
+            endpoint: None,
             instructions: None,
             temperature: Some(0.8),
             audio_mode: None,
@@ -261,6 +272,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             model: None,
             voice: None,
+            endpoint: None,
             instructions: None,
             temperature: Some(1.5), // Out of range
             audio_mode: None,

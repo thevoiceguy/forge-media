@@ -356,7 +356,7 @@ mod tests {
     async fn test_elevenlabs_connector_creation() {
         let config = AIConnectorConfig {
             connector_type: AIConnectorType::ElevenLabs,
-            api_key: "test-key".to_string(),
+            api_key: forge_core::SecureString::new("test-key"),
             voice: Some(ElevenLabsVoices::RACHEL.to_string()),
             model: "eleven_turbo_v2".to_string(),
             ..Default::default()
@@ -391,7 +391,7 @@ mod tests {
     async fn test_elevenlabs_connector_type_validation() {
         let config = AIConnectorConfig {
             connector_type: AIConnectorType::OpenAI, // Wrong type
-            api_key: "test-key".to_string(),
+            api_key: forge_core::SecureString::new("test-key"),
             ..Default::default()
         };
 

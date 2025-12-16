@@ -6,6 +6,7 @@ use forge_ai_stream::{
     AIConnectorConfig, AIConnectorType, AudioConverter, AudioFormat, BargeInConfig,
     BargeInDetector, VadConfig, VadDetector, VadState,
 };
+use forge_core::SecureString;
 use std::time::Duration;
 
 #[test]
@@ -123,7 +124,7 @@ fn test_bargein_pipeline() {
 fn test_connector_config() {
     let config = AIConnectorConfig {
         connector_type: AIConnectorType::OpenAI,
-        api_key: "test-key".to_string(),
+        api_key: SecureString::new("test-key"),
         endpoint: Some("wss://test.example.com".to_string()),
         model: "gpt-4o-realtime-preview".to_string(),
         voice: Some("alloy".to_string()),

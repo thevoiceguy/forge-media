@@ -1,0 +1,194 @@
+# Conference Configuration
+# This file controls conference behavior, security, and DTMF commands
+
+# ============================================================================
+# Security Settings
+# ============================================================================
+[security]
+# Require guest PIN to join conference
+require_guest_pin = true
+
+# Guest PIN (participants must enter this to join)
+# Leave empty or set to null to disable
+guest_pin = "1234"
+
+# Host PIN (elevates participant to host role with special commands)
+# Leave empty or set to null to disable host commands
+host_pin = "9876"
+
+# Lock conference by default (participants can't join until unlocked by host)
+default_locked = false
+
+# Maximum failed PIN attempts before temporary lockout
+max_pin_attempts = 3
+
+# Lockout duration in seconds after exceeding max attempts
+lockout_duration_secs = 300  # 5 minutes
+
+# PIN Requirements
+[security.pin_requirements]
+# Minimum PIN length
+min_length = 4
+
+# Maximum PIN length
+max_length = 12
+
+# Allow only digits (0-9, *, #) - recommended for phone keypads
+digits_only = true
+
+# Complexity requirements (only applies if digits_only = false)
+require_digit = true
+require_letter = false
+require_special = false
+
+# ============================================================================
+# DTMF Command Settings
+# ============================================================================
+[dtmf]
+# Enable DTMF command processing
+enabled = true
+
+# Forward unhandled DTMF digits to AI (if AI is attached to conference)
+forward_to_ai = true
+
+# Timeout for multi-digit command sequences (milliseconds)
+sequence_timeout_ms = 3000
+
+# Enable audio feedback (beep tones to confirm commands)
+audio_feedback = true
+
+# Participant Commands (available to all participants)
+[dtmf.participant_commands]
+mute_toggle = "*6"      # Toggle mute/unmute
+volume_up = "*7"        # Increase volume
+volume_down = "*8"      # Decrease volume
+info = "*0"             # Hear conference info (participant count, duration)
+leave = "*9"            # Leave the conference
+
+# Host Commands (require host PIN authentication)
+[dtmf.host_commands]
+kick_prefix = "##"      # Kick participant by number (e.g., "##1" kicks participant 1)
+mute_all = "*91"        # Mute all participants except host
+unmute_all = "*92"      # Unmute all muted participants
+lock = "*93"            # Lock conference (prevent new joins)
+unlock = "*94"          # Unlock conference (allow new joins)
+end_conference = "*99"  # End conference and disconnect all participants
+
+# ============================================================================
+# Audio Settings
+# ============================================================================
+[audio]
+# Default audio sample rate (Hz)
+# Common values: 8000 (narrowband), 16000 (wideband), 48000 (fullband)
+sample_rate = 48000
+
+# Frame size in samples (determines latency)
+# At 48kHz: 480 = 10ms, 960 = 20ms, 1920 = 40ms
+frame_size = 960
+
+# Default participant gain (volume multiplier)
+# 1.0 = normal, 0.5 = half volume, 2.0 = double volume
+default_gain = 1.0
+
+# Enable voice activity detection
+enable_vad = true
+
+# ============================================================================
+# Recording Settings
+# ============================================================================
+[recording]
+# Automatically start recording when conference begins
+auto_record = false
+
+# Recording codec: "pcm" (WAV) or "opus"
+codec = "pcm"
+
+# Output directory for recordings
+output_dir = "./recordings"
+
+# Include AI audio in recordings (if AI is attached)
+include_ai = true
+
+# ============================================================================
+# Capacity and Access Control
+# ============================================================================
+[capacity]
+# Maximum number of participants allowed in the conference (0 = unlimited)
+# When reached, new participants hear max_members_sound and are disconnected
+max_channels = 0
+
+# Require host/moderator to join before participants can join
+# If true, participants wait (hearing MOH) until a host joins
+wait_for_moderator = false
+
+# ============================================================================
+# Meeting Requirements
+# ============================================================================
+[meeting]
+# Minimum number of users required to start the meeting
+# Until reached, participants only hear MOH and can't interact
+# Set to 1 to start immediately, 2+ to require multiple participants
+min_users = 1
+
+# Minimum number of participants required to start recording
+# Recording will automatically start when this threshold is reached
+# Useful for ensuring you don't record empty/partial conferences
+min_recording_participants = 1
+
+# ============================================================================
+# Audio Feedback Sounds
+# ============================================================================
+# All sound paths are optional. Set to null or omit to disable.
+# Paths can be absolute or relative to the working directory.
+# Supported formats: WAV, MP3, OGG (depending on audio engine support)
+[sounds]
+
+# Sound played when a participant joins the conference
+# join_sound = "./sounds/join.wav"
+join_sound = null
+
+# Sound played when a participant exits the conference
+# exit_sound = "./sounds/exit.wav"
+exit_sound = null
+
+# Sound played when you're the only participant in the conference
+# Typically used to inform the user they're alone
+# alone_sound = "./sounds/alone.wav"
+alone_sound = null
+
+# Sound played when an invalid PIN is entered
+# invalid_pin_sound = "./sounds/invalid_pin.wav"
+invalid_pin_sound = null
+
+# Sound played when trying to join a locked conference
+# locked_sound = "./sounds/locked.wav"
+locked_sound = null
+
+# Sound played when the conference is unlocked
+# unlocked_sound = "./sounds/unlocked.wav"
+unlocked_sound = null
+
+# Sound played when you are kicked from the conference
+# kicked_sound = "./sounds/kicked.wav"
+kicked_sound = null
+
+# Sound played when trying to join a full conference (max_channels reached)
+# max_members_sound = "./sounds/conference_full.wav"
+max_members_sound = null
+
+# Music on hold - played when only 1 user is in the conference
+# Loops until another participant joins or until alone_sound plays
+# moh_sound = "./sounds/music_on_hold.wav"
+moh_sound = null
+
+# Prompt asking user to enter their PIN
+# pin_prompt_sound = "./sounds/enter_pin.wav"
+pin_prompt_sound = null
+
+# Sound played to all participants when recording starts
+# recording_started_sound = "./sounds/recording_started.wav"
+recording_started_sound = null
+
+# Sound played to all participants when recording stops
+# recording_stopped_sound = "./sounds/recording_stopped.wav"
+recording_stopped_sound = null

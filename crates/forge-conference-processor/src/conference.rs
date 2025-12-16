@@ -43,6 +43,10 @@ pub struct ConferenceRoom {
     call_id_map: Arc<DashMap<CallId, String>>,
     /// Conference is locked (no new participants allowed)
     is_locked: Arc<RwLock<bool>>,
+    /// Set of host participant IDs
+    hosts: Arc<DashMap<String, ()>>,
+    /// Set of participants waiting for moderator (participant_id)
+    waiting_participants: Arc<DashMap<String, ()>>,
     /// Audio format
     format: AudioFormat,
     /// Frame size for mixing operations
@@ -73,6 +77,8 @@ impl ConferenceRoom {
             room_config: Arc::new(RwLock::new(None)),
             call_id_map: Arc::new(DashMap::new()),
             is_locked: Arc::new(RwLock::new(false)),
+            hosts: Arc::new(DashMap::new()),
+            waiting_participants: Arc::new(DashMap::new()),
             format,
             _frame_size: frame_size,
         })
@@ -176,17 +182,163 @@ impl ConferenceRoom {
         &self.id
     }
 
+    /// Check if a participant is a host
+    pub fn is_host(&self, participant_id: &str) -> bool {
+        self.hosts.contains_key(participant_id)
+    }
+
+    /// Get the number of hosts in the room
+    pub fn host_count(&self) -> usize {
+        self.hosts.len()
+    }
+
+    /// Get the number of participants waiting for moderator
+    pub fn waiting_count(&self) -> usize {
+        self.waiting_participants.len()
+    }
+
+    /// Check if the minimum user requirement is met
+    pub fn meets_min_users_requirement(&self) -> bool {
+        let config = self.room_config.read();
+        if let Some(cfg) = config.as_ref() {
+            self.mixer.participant_count() >= cfg.min_users
+        } else {
+            true // No requirement configured
+        }
+    }
+
+    /// Check if conference is at capacity
+    pub fn is_at_capacity(&self) -> bool {
+        let config = self.room_config.read();
+        if let Some(cfg) = config.as_ref() {
+            if cfg.max_channels > 0 {
+                let current_count = self.mixer.participant_count() + self.waiting_participants.len();
+                return current_count >= cfg.max_channels;
+            }
+        }
+        false
+    }
+
     /// Add a participant to the room
-    pub fn add_participant<S: Into<String>>(&self, participant_id: S) -> Result<()> {
+    ///
+    /// This method enforces:
+    /// - Capacity limits (max_channels)
+    /// - Wait-for-moderator requirement
+    /// - Conference lock status
+    ///
+    /// # Arguments
+    /// * `participant_id` - Unique identifier for the participant
+    /// * `is_host` - Whether this participant is joining as a host/moderator
+    pub fn add_participant<S: Into<String>>(&self, participant_id: S, is_host: bool) -> Result<()> {
         let participant_id = participant_id.into();
+
+        // Check if conference is locked
+        if *self.is_locked.read() {
+            warn!("Participant {} denied entry - room {} is locked", participant_id, self.id);
+            return Err(ConferenceError::ConferenceLocked);
+        }
+
+        // Get effective configuration
+        let config = self.room_config.read();
+        let config = config.as_ref();
+
+        // Check capacity limits (if configured)
+        if let Some(cfg) = config {
+            if cfg.max_channels > 0 {
+                let current_count = self.mixer.participant_count() + self.waiting_participants.len();
+                if current_count >= cfg.max_channels {
+                    warn!(
+                        "Participant {} denied entry - room {} is full ({}/{})",
+                        participant_id, self.id, current_count, cfg.max_channels
+                    );
+                    return Err(ConferenceError::ConferenceFull(cfg.max_channels));
+                }
+            }
+
+            // Check wait-for-moderator requirement
+            if cfg.wait_for_moderator && !is_host && self.hosts.is_empty() {
+                info!(
+                    "Participant {} waiting for moderator in room {}",
+                    participant_id, self.id
+                );
+                self.waiting_participants.insert(participant_id.clone(), ());
+                return Err(ConferenceError::WaitingForModerator);
+            }
+        }
+
+        // If this is a host, track them
+        if is_host {
+            info!("Adding host {} to room {}", participant_id, self.id);
+            self.hosts.insert(participant_id.clone(), ());
+
+            // Release waiting participants when first host joins
+            self.release_waiting_participants();
+        }
+
         info!("Adding participant {} to room {}", participant_id, self.id);
-        self.mixer.add_participant(participant_id, None)?;
+        self.mixer.add_participant(&participant_id, None)?;
 
         // Update metrics
         counter!("forge_conference_participants_joined_total", 1, "room_id" => self.id.clone());
         gauge!("forge_conference_participants_active", self.mixer.participant_count() as f64, "room_id" => self.id.clone());
 
+        // Check if we should auto-start recording
+        self.check_auto_start_recording();
+
         Ok(())
+    }
+
+    /// Release all waiting participants (called when host joins)
+    fn release_waiting_participants(&self) {
+        if self.waiting_participants.is_empty() {
+            return;
+        }
+
+        let waiting: Vec<String> = self.waiting_participants
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for participant_id in waiting {
+            info!(
+                "Releasing participant {} from waiting in room {}",
+                participant_id, self.id
+            );
+
+            // Add to mixer
+            if let Err(e) = self.mixer.add_participant(&participant_id, None) {
+                warn!(
+                    "Failed to add waiting participant {} to room {}: {}",
+                    participant_id, self.id, e
+                );
+            } else {
+                self.waiting_participants.remove(&participant_id);
+                counter!("forge_conference_participants_joined_total", 1, "room_id" => self.id.clone());
+            }
+        }
+
+        gauge!("forge_conference_participants_active", self.mixer.participant_count() as f64, "room_id" => self.id.clone());
+    }
+
+    /// Check if recording should auto-start based on participant count
+    fn check_auto_start_recording(&self) {
+        let config = self.room_config.read();
+        if let Some(cfg) = config.as_ref() {
+            let participant_count = self.mixer.participant_count();
+
+            // Check if we've reached the threshold to start recording
+            if participant_count >= cfg.min_recording_participants {
+                // Check if recording is not already active
+                if self.recorder.read().is_none() {
+                    info!(
+                        "Auto-starting recording for room {} ({} participants reached threshold of {})",
+                        self.id, participant_count, cfg.min_recording_participants
+                    );
+                    // TODO: Start recording automatically
+                    // This will be implemented when we add the recording API
+                }
+            }
+        }
     }
 
     /// Remove a participant from the room
@@ -195,13 +347,57 @@ impl ConferenceRoom {
             "Removing participant {} from room {}",
             participant_id, self.id
         );
+
+        // Remove from hosts if they were a host
+        let was_host = self.hosts.remove(participant_id).is_some();
+
+        // Remove from waiting participants if they were waiting
+        self.waiting_participants.remove(participant_id);
+
+        // Remove from mixer
         self.mixer.remove_participant(participant_id)?;
 
         // Update metrics
         counter!("forge_conference_participants_left_total", 1, "room_id" => self.id.clone());
         gauge!("forge_conference_participants_active", self.mixer.participant_count() as f64, "room_id" => self.id.clone());
 
+        // If the last host left and wait_for_moderator is enabled,
+        // move active participants to waiting
+        if was_host && self.hosts.is_empty() {
+            self.move_participants_to_waiting();
+        }
+
         Ok(())
+    }
+
+    /// Move all active participants to waiting (when last host leaves)
+    fn move_participants_to_waiting(&self) {
+        let config = self.room_config.read();
+        if let Some(cfg) = config.as_ref() {
+            if cfg.wait_for_moderator {
+                // Get list of participant IDs from mixer
+                let participants = self.mixer.participants();
+
+                for participant_id in participants {
+                    info!(
+                        "Moving participant {} to waiting (no moderator) in room {}",
+                        participant_id, self.id
+                    );
+
+                    // Remove from mixer
+                    if let Err(e) = self.mixer.remove_participant(&participant_id) {
+                        warn!(
+                            "Failed to remove participant {} from mixer: {}",
+                            participant_id, e
+                        );
+                        continue;
+                    }
+
+                    // Add to waiting
+                    self.waiting_participants.insert(participant_id, ());
+                }
+            }
+        }
     }
 
     /// Write audio samples from a participant
@@ -959,9 +1155,9 @@ impl ConferenceBridge {
     }
 
     /// Add a participant to a room
-    pub fn add_participant_to_room(&self, room_id: &str, participant_id: &str) -> Result<()> {
+    pub fn add_participant_to_room(&self, room_id: &str, participant_id: &str, is_host: bool) -> Result<()> {
         let room = self.get_room(room_id)?;
-        room.add_participant(participant_id)
+        room.add_participant(participant_id, is_host)
     }
 
     /// Remove a participant from a room
@@ -995,8 +1191,8 @@ mod tests {
         let room = ConferenceRoom::new("test-room", AudioFormat::pcm_mono(), 480).unwrap();
 
         // Add participants
-        room.add_participant("alice").unwrap();
-        room.add_participant("bob").unwrap();
+        room.add_participant("alice", false).unwrap();
+        room.add_participant("bob", false).unwrap();
 
         assert_eq!(room.participant_count(), 2);
         assert!(room.participants().contains(&"alice".to_string()));
@@ -1018,7 +1214,7 @@ mod tests {
         assert!(room.is_recording());
 
         // Add participant and write audio
-        room.add_participant("alice").unwrap();
+        room.add_participant("alice", false).unwrap();
         let samples: Vec<i16> = vec![100; 480];
         room.write_audio("alice", &samples).unwrap();
 
@@ -1046,9 +1242,9 @@ mod tests {
         assert!(bridge.list_rooms().contains(&"room-1".to_string()));
 
         // Add participants
-        bridge.add_participant_to_room("room-1", "alice").unwrap();
-        bridge.add_participant_to_room("room-1", "bob").unwrap();
-        bridge.add_participant_to_room("room-2", "charlie").unwrap();
+        bridge.add_participant_to_room("room-1", "alice", false).unwrap();
+        bridge.add_participant_to_room("room-1", "bob", false).unwrap();
+        bridge.add_participant_to_room("room-2", "charlie", false).unwrap();
 
         assert_eq!(bridge.total_participants(), 3);
         assert_eq!(room1.participant_count(), 2);
@@ -1079,8 +1275,8 @@ mod tests {
     fn test_mix_for_participant() {
         let room = ConferenceRoom::new("test-room", AudioFormat::pcm_mono(), 480).unwrap();
 
-        room.add_participant("alice").unwrap();
-        room.add_participant("bob").unwrap();
+        room.add_participant("alice", false).unwrap();
+        room.add_participant("bob", false).unwrap();
 
         // Write audio
         let samples: Vec<i16> = vec![100; 480];

@@ -63,6 +63,15 @@ pub enum ConferenceError {
 
     #[error("Audio routing failed: {0}")]
     AudioRoutingFailed(String),
+
+    #[error("Conference is full (max {0} participants)")]
+    ConferenceFull(usize),
+
+    #[error("Waiting for moderator to join")]
+    WaitingForModerator,
+
+    #[error("Conference is locked")]
+    ConferenceLocked,
 }
 
 /// Result type for conference operations

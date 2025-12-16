@@ -26,10 +26,11 @@ Forge is a carrier-grade media server built in Rust that handles all media proce
 - **🎵 Audio Processing**: G.711, G.722, G.729, Opus codec support with transcoding
 - **📞 RTP/SRTP**: Full RFC-compliant RTP handling with SRTP encryption
 - **🌐 WebRTC**: ICE, DTLS, SRTP for browser-based communications
-- **👥 Conferencing**: Audio mixing, VAD, AGC, dominant speaker detection
+- **👥 Conferencing**: Audio mixing, VAD, AGC, dominant speaker detection, host controls, capacity management
+- **🎙️ Conference Features**: PIN authentication, wait-for-moderator, audio feedback, per-room configuration
 - **📼 Recording**: Multi-format recording with multiple storage backends
 - **🤖 AI Integration**: Real-time voice AI with OpenAI Realtime API, bidirectional audio, DTMF support
-- **🔐 Carrier-Grade**: SBC features, SIPREC, CAC, DoS protection, high availability
+- **🔐 Enterprise Grade**: SIPREC, CAC, DoS protection, high availability
 - **⚡ Performance**: Async Rust, zero-copy parsing, optional kernel offload
 
 ---
@@ -43,14 +44,22 @@ The project structure is established and core types are defined. See [DEVELOPMEN
 ### What's Working
 - ✅ Project structure and workspace
 - ✅ Core types and configuration system
-- ✅ Basic RTP packet parsing
-- 🚧 Session management (in progress)
+- ✅ RTP/RTCP/SRTP packet handling
+- ✅ Session management with bidirectional audio
+- ✅ WebRTC support (ICE, DTLS, SRTP)
+- ✅ Audio conferencing with mixing
+- ✅ Conference features (PINs, host controls, capacity management)
+- ✅ Audio feedback system with WAV playback
+- ✅ Recording system (WAV, Opus)
+- ✅ AI integration (OpenAI Realtime API)
+- ✅ DTMF detection and handling
+- ✅ Prometheus metrics and monitoring
 
 ### Coming Soon
-- 🔜 RTP forwarding
-- 🔜 Codec transcoding
-- 🔜 Audio conferencing
-- 🔜 Recording system
+- 🔜 Additional codec support (G.722, G.729)
+- 🔜 Advanced transcoding pipelines
+- 🔜 SIPREC recording
+- 🔜 High availability features
 
 ---
 
@@ -190,7 +199,6 @@ forge-media/
 ├── forge-injection             # Audio injection and TTS
 ├── forge-webrtc                # WebRTC support
 ├── forge-sdp                   # SDP parsing and generation
-├── forge-sbc                   # SBC features
 ├── forge-siprec                # SIPREC (RFC 7865/7866)
 ├── forge-ai-stream             # AI streaming integration
 ├── forge-ha                    # High availability
@@ -256,12 +264,46 @@ DELETE /v1/sessions/:call_id
 # Create conference
 POST /v1/conferences
 {
-  "room_id": "room-456",
-  "max_participants": 100
+  "room_id": "room-456"
 }
+
+# Configure room
+POST /v1/conferences/:room_id/configure
+{
+  "guest_pin": "1234",
+  "host_pin": "9999",
+  "max_channels": 100,
+  "wait_for_moderator": true,
+  "require_guest_pin": true
+}
+
+# Get room configuration
+GET /v1/conferences/:room_id/config
 
 # Add participant
 POST /v1/conferences/:room_id/participants
+{
+  "participant_id": "user-123",
+  "is_host": false
+}
+
+# List participants with host status
+GET /v1/conferences/:room_id/participants
+
+# List waiting participants
+GET /v1/conferences/:room_id/waiting
+
+# Promote participant to host
+POST /v1/conferences/:room_id/participants/:id/promote
+{
+  "host_pin": "9999"
+}
+
+# Start recording
+POST /v1/conferences/:room_id/recording
+{
+  "output_path": "conference-123.wav"
+}
 ```
 
 #### Recording

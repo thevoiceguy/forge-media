@@ -56,7 +56,6 @@ The Forge media engine design is comprehensive and well-architected. This docume
 | **Transcription** | ✅ Complete | Multiple STT providers |
 | **Audio Injection** | ✅ Complete | File, TTS, tone generation |
 | **WebRTC** | ⚠️ Partial | ICE, DTLS-SRTP (audio only) |
-| **SBC Features** | ✅ Complete | Topology hiding, CAC, DoS protection |
 | **AI Streaming** | ✅ Complete | OpenAI, Dialogflow, Lex, Azure |
 | **High Availability** | ✅ Complete | Session replication, VIP failover |
 | **Video Support** | ❌ Missing | No video codecs or conferencing |

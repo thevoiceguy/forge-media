@@ -361,8 +361,6 @@ Performance:
 
 ### ⚠️ Known Limitations (Out of Scope for Phase 2)
 - [ ] WebRTC support (ICE, DTLS, SRTP) - **Phase 3**
-- [ ] Video support - **Phase 4**
-- [ ] SBC features (CAC, topology hiding) - **Phase 4**
 - [ ] SIPREC recording - **Phase 4**
 - [ ] High availability / failover - **Phase 5**
 - [ ] XDP kernel offload - **Phase 5**
@@ -449,7 +447,7 @@ forge_active_sessions > 800
 ### Recommendations for Future Phases
 
 1. **Phase 3 (WebRTC)**: Consider using existing WebRTC library (webrtc-rs) rather than implementing from scratch
-2. **Phase 4 (SBC Features)**: Implement CAC before topology hiding for simpler testing
+2. **Phase 4 (SIPREC)**: Start with SRC implementation before SRS for simpler testing
 3. **Phase 5 (XDP)**: Start with AF_XDP socket in userspace before full kernel integration
 4. **CI/CD**: Add automated performance regression testing
 
@@ -479,8 +477,8 @@ forge_active_sessions > 800
 
 ### Long-term Roadmap
 
-- **Phase 4**: Advanced features (video, SBC, SIPREC)
-- **Phase 5**: Production hardening (HA, XDP, AI streaming)
+- **Phase 4**: Advanced features (SIPREC, AI streaming)
+- **Phase 5**: Production hardening (HA, XDP)
 
 ---
 

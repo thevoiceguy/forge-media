@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2025-12-16
+
+### Added - Conference Features
+
+#### forge-conference-processor v0.3.0
+- **Audio Feedback System** - Play sound files at conference events
+  - `AudioFeedbackPlayer` for loading and decoding WAV files
+  - Support for 8, 16, 24, and 32-bit PCM WAV files
+  - Automatic stereo-to-mono conversion
+  - Sample rate resampling using linear interpolation
+  - `ConferenceSounds` struct for pre-loaded conference sounds
+  - Integration via virtual participant in mixer
+  - Sounds: join, exit, alone, recording start/stop, PIN prompts, etc.
+
+- **Capacity Management** - Control conference size and access
+  - `max_channels` - Limit number of participants per room
+  - Automatic capacity enforcement with `ConferenceFull` error
+  - Per-room configuration overrides
+
+- **Wait-for-Moderator** - Hold participants until host joins
+  - `wait_for_moderator` flag in room configuration
+  - Automatic waiting room management
+  - Host tracking with `hosts` set
+  - `WaitingForModerator` error for held participants
+  - Automatic release when first host joins
+  - Automatic hold when last host leaves
+
+- **Meeting Requirements** - Enforce minimum participation
+  - `min_users` - Minimum participants before meeting starts
+  - `min_recording_participants` - Auto-start recording threshold
+  - Automatic recording start when threshold reached
+
+- **Conference Lock** - Control room access
+  - `default_locked` - Lock conference by default
+  - `is_locked` state management
+  - `ConferenceLocked` error for denied entry
+
+- **Room Configuration System** - Per-room customization
+  - `RoomConfig` with optional overrides for all settings
+  - `EffectiveRoomConfig` merging room + global defaults
+  - Per-room PINs, capacity, DTMF, meeting requirements
+  - Audio feedback sound paths (12 configurable sounds)
+
+- **Helper Methods**
+  - `is_host()`, `host_count()`, `waiting_count()`
+  - `is_at_capacity()`, `meets_min_users_requirement()`
+  - `get_effective_config()`, `waiting_participants()`
+  - `promote_to_host()`
+
+#### forge-api v0.3.0
+- **Conference Configuration Endpoints**
+  - `POST /v1/conferences/:room_id/configure` - Configure room settings
+  - `GET /v1/conferences/:room_id/config` - Get room configuration
+
+- **Participant Management Endpoints**
+  - `GET /v1/conferences/:room_id/participants` - List with host status
+  - `GET /v1/conferences/:room_id/waiting` - List waiting participants
+  - `POST /v1/conferences/:room_id/participants/:id/promote` - Promote to host
+
+- **Enhanced Participant Request**
+  - `is_host` field in `AddParticipantRequest`
+  - Direct host join support
+
+### Configuration
+- **conference.toml** - Comprehensive conference configuration file
+  - Security settings (PINs, lockout, default locked state)
+  - DTMF command bindings (participant and host commands)
+  - Audio settings (sample rate, buffer size, VAD)
+  - Recording settings (format, auto-record)
+  - Capacity settings (max channels, wait for moderator)
+  - Meeting requirements (min users, min recording participants)
+  - Audio feedback (12 configurable sound file paths)
+  - Extensive inline documentation (195 lines)
+
+### Dependencies
+- Added `hound = "3.5"` for WAV file decoding
+
+### Tests
+- 8 new tests for audio feedback system
+- WAV loading, resampling, stereo conversion tests
+- All 39 conference processor tests passing
+- All API tests passing
+
+## [Unreleased - AI Integration]
+
 ### Added - AI Integration
 
 #### forge-ai-stream

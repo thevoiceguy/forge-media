@@ -84,8 +84,8 @@ Phase 0: Foundation          [████████] Core types, config, API 
 Phase 1: Core RTP            [████████] RTP/RTCP, sessions, port management
 Phase 2: Media Processing    [████████] Codecs, transcoding, mixing
 Phase 3: Advanced Features   [████████] Recording, DTMF, injection, WebRTC
-Phase 4: Carrier Grade       [████████] SBC, HA, SIPREC, AI streaming
-Phase 5: Polish & Scale      [████████] Optimization, kernel offload, video
+Phase 4: Carrier Grade       [████████] HA, SIPREC, AI streaming
+Phase 5: Polish & Scale      [████████] Optimization, kernel offload
                              └──────────────────────────────────────────┘
                                     6 months (estimated)
 ```
@@ -475,30 +475,13 @@ pub trait RecordingStorage: Send + Sync {
 
 ---
 
-## Phase 4: Carrier Grade (4-5 weeks)
+## Phase 4: Carrier Grade (3-4 weeks)
 
-**Goal**: SBC features, SIPREC, AI streaming, and high availability.
+**Goal**: SIPREC, AI streaming, and high availability.
 
 ### Deliverables
 
-#### 1. forge-sbc (Week 1-2)
-- [ ] Media proxy modes:
-  - Pass-through
-  - Proxy/relay
-  - Transcode
-  - Hairpin
-- [ ] Topology hiding (SDP rewriting)
-- [ ] Call admission control (CAC):
-  - Max sessions
-  - Bandwidth limits
-  - Per-IP limits
-- [ ] DoS protection:
-  - Rate limiting
-  - Packet validation
-  - Auto-blacklisting
-- [ ] RTP flags: symmetric, strict_source, media_handover
-
-#### 2. forge-siprec (Week 2-3)
+#### 1. forge-siprec (Week 1-2)
 - [ ] Metadata XML parser/generator (quick-xml)
 - [ ] SRC (Session Recording Client):
   - SIPREC INVITE generation
@@ -510,7 +493,7 @@ pub trait RecordingStorage: Send + Sync {
   - Record media streams
 - [ ] SRTP key forwarding
 
-#### 3. forge-ai-stream (Week 3-4)
+#### 2. forge-ai-stream (Week 2-3)
 - [ ] AI connector framework
 - [ ] OpenAI Realtime API integration
 - [ ] Audio format conversion (PCM16 ↔ G.711)
@@ -519,7 +502,7 @@ pub trait RecordingStorage: Send + Sync {
 - [ ] Tool/function calling
 - [ ] Event streaming via WebSocket
 
-#### 4. forge-ha (Week 4-5)
+#### 3. forge-ha (Week 3-4)
 - [ ] Session state serialization
 - [ ] Redis state backend
 - [ ] Heartbeat mechanism
@@ -528,7 +511,6 @@ pub trait RecordingStorage: Send + Sync {
 - [ ] Session restoration
 
 **Exit Criteria**:
-- [ ] CAC prevents overload
 - [ ] SIPREC recording to external SRS works
 - [ ] Can receive SIPREC sessions as SRS
 - [ ] OpenAI Realtime conversation works
@@ -781,7 +763,6 @@ Mitigation: Pin dependency versions, monitor for security advisories.
 
 ### Phase 4: Carrier Grade
 ✅ **Enterprise Ready**
-- [ ] SBC features operational
 - [ ] SIPREC compliant
 - [ ] AI streaming functional
 - [ ] HA with <5s failover

@@ -40,7 +40,6 @@ forge-media/
 │   ├── forge-injection/           # 🚧 Audio injection and TTS
 │   ├── forge-webrtc/              # 🚧 WebRTC support
 │   ├── forge-sdp/                 # 🚧 SDP parsing and generation
-│   ├── forge-sbc/                 # 🚧 SBC features
 │   ├── forge-siprec/              # 🚧 SIPREC (RFC 7865/7866)
 │   ├── forge-ai-stream/           # 🚧 AI streaming integration
 │   ├── forge-ha/                  # 🚧 High availability
@@ -160,8 +159,7 @@ The comprehensive development plan in `DEVELOPMENT_PLAN.md` outlines a 6-month r
 - WebRTC support
 - **Goal**: Feature-complete for basic deployments
 
-### Phase 4: Carrier Grade (4-5 weeks)
-- SBC features (CAC, DoS protection)
+### Phase 4: Carrier Grade (3-4 weeks)
 - SIPREC (RFC 7865/7866)
 - AI streaming (OpenAI, Dialogflow)
 - High availability
@@ -170,7 +168,6 @@ The comprehensive development plan in `DEVELOPMENT_PLAN.md` outlines a 6-month r
 ### Phase 5: Polish & Scale (3-4 weeks)
 - Performance optimization
 - Kernel offload (eBPF)
-- Video support
 - Observability (Prometheus/OpenTelemetry)
 - **Goal**: Best-in-class performance
 

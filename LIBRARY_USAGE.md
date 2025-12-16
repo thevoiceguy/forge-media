@@ -33,7 +33,6 @@ Available features:
 - `transcription` - Real-time transcription
 - `injection` - Audio injection and TTS
 - `webrtc` - WebRTC support
-- `sbc` - SBC features
 - `siprec` - SIPREC recording
 - `ai-stream` - AI streaming
 - `ha` - High availability

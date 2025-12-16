@@ -641,10 +641,10 @@ impl G729Codec {
 
         #[cfg(not(feature = "g729"))]
         {
-            if encoded.len() != self.variant.frame_size() {
+            if encoded.len() != self.variant.max_frame_size() {
                 return Err(CodecError::InvalidFormat(format!(
                     "G.729 requires exactly {} bytes per frame, got {}",
-                    self.variant.frame_size(),
+                    self.variant.max_frame_size(),
                     encoded.len()
                 )));
             }

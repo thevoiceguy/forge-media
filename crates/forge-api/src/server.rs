@@ -9,7 +9,7 @@ use axum_server::tls_rustls::{bind_rustls, RustlsConfig};
 use forge_core::EventBus;
 use forge_engine::{SessionManager, SessionManagerConfig};
 use forge_rtp::PortPoolConfig;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +29,7 @@ pub struct ApiServerConfig {
     pub auth_tokens: Vec<String>,
     pub rate_limit_requests_per_window: usize,
     pub rate_limit_window_secs: u64,
+    pub trusted_proxies: Vec<IpAddr>,  // IPs allowed to set X-Forwarded-For
     pub enable_https: bool,
     pub https_bind: Option<SocketAddr>,
     pub tls_cert: Option<PathBuf>,
@@ -54,6 +55,7 @@ impl Default for ApiServerConfig {
             auth_tokens: Vec::new(),
             rate_limit_requests_per_window: 120,
             rate_limit_window_secs: 60,
+            trusted_proxies: Vec::new(),  // No proxies trusted by default
             enable_https: false,
             https_bind: None,
             tls_cert: None,
@@ -196,6 +198,7 @@ impl ApiServer {
         let rate_limiter = middleware::RateLimiter::new(
             config.rate_limit_requests_per_window,
             Duration::from_secs(config.rate_limit_window_secs),
+            config.trusted_proxies.clone(),
         );
 
         Self {

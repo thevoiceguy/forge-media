@@ -1,12 +1,12 @@
 //! Rate limiting middleware
 
 use axum::body::Body;
-use axum::extract::Request;
+use axum::extract::{ConnectInfo, Request};
 use axum::http::{Response, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -17,6 +17,7 @@ pub struct RateLimiter {
     state: Arc<RwLock<RateLimiterState>>,
     requests_per_window: usize,
     window_duration: Duration,
+    trusted_proxies: Arc<Vec<IpAddr>>,
 }
 
 struct RateLimiterState {
@@ -34,7 +35,12 @@ impl RateLimiter {
     /// # Arguments
     /// * `requests_per_window` - Maximum requests allowed per window
     /// * `window_duration` - Duration of the time window
-    pub fn new(requests_per_window: usize, window_duration: Duration) -> Self {
+    /// * `trusted_proxies` - List of proxy IPs allowed to set X-Forwarded-For
+    pub fn new(
+        requests_per_window: usize,
+        window_duration: Duration,
+        trusted_proxies: Vec<IpAddr>,
+    ) -> Self {
         Self {
             state: Arc::new(RwLock::new(RateLimiterState {
                 clients: HashMap::new(),
@@ -42,6 +48,7 @@ impl RateLimiter {
             })),
             requests_per_window,
             window_duration,
+            trusted_proxies: Arc::new(trusted_proxies),
         }
     }
 
@@ -83,31 +90,40 @@ impl RateLimiter {
 }
 
 /// Rate limiting middleware
+///
+/// Extracts the client IP address for rate limiting. Uses socket address by default.
+/// Only trusts X-Forwarded-For header if the request originates from a configured trusted proxy.
 pub async fn rate_limit_middleware(
+    ConnectInfo(socket_addr): ConnectInfo<SocketAddr>,
     request: Request,
     next: Next,
 ) -> Result<Response<Body>, impl IntoResponse> {
-    // Extract IP address from socket or X-Forwarded-For header
-    let ip = if let Some(forwarded_for) = request.headers().get("X-Forwarded-For") {
-        forwarded_for
-            .to_str()
-            .ok()
-            .and_then(|s| s.split(',').next())
-            .and_then(|s| s.trim().parse::<IpAddr>().ok())
-    } else {
-        request
-            .extensions()
-            .get::<std::net::SocketAddr>()
-            .map(|addr| addr.ip())
-    };
-
-    let ip = ip.unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-
     // Get rate limiter from extensions (will be set by the server)
     let rate_limiter = request.extensions().get::<RateLimiter>().cloned();
 
+    // Default to socket address (always trustworthy)
+    let mut client_ip = socket_addr.ip();
+
+    // Only trust X-Forwarded-For if request is from a trusted proxy
+    if let Some(limiter) = &rate_limiter {
+        if limiter.trusted_proxies.contains(&client_ip) {
+            // Request is from trusted proxy, check X-Forwarded-For header
+            if let Some(forwarded_for) = request.headers().get("X-Forwarded-For") {
+                if let Some(forwarded_ip) = forwarded_for
+                    .to_str()
+                    .ok()
+                    .and_then(|s| s.split(',').next())
+                    .and_then(|s| s.trim().parse::<IpAddr>().ok())
+                {
+                    client_ip = forwarded_ip;
+                }
+            }
+        }
+        // If not from trusted proxy, use socket address (already set above)
+    }
+
     if let Some(limiter) = rate_limiter {
-        if !limiter.check_rate_limit(ip).await {
+        if !limiter.check_rate_limit(client_ip).await {
             return Err((
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests, please try again later",
@@ -125,7 +141,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limiter() {
-        let limiter = RateLimiter::new(3, Duration::from_secs(1));
+        let limiter = RateLimiter::new(3, Duration::from_secs(1), Vec::new());
         let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
         // First 3 requests should be allowed

@@ -1149,6 +1149,8 @@ fn codec_name(codec: forge_codecs::AudioCodecType) -> &'static str {
     match codec {
         forge_codecs::AudioCodecType::PCMU => "G.711 µ-law",
         forge_codecs::AudioCodecType::PCMA => "G.711 A-law",
+        forge_codecs::AudioCodecType::G722 => "G.722",
+        forge_codecs::AudioCodecType::G729 => "G.729",
         forge_codecs::AudioCodecType::Opus => "Opus",
         forge_codecs::AudioCodecType::PCM => "PCM",
     }

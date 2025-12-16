@@ -47,16 +47,16 @@ The project structure is established and core types are defined. See [DEVELOPMEN
 - ✅ RTP/RTCP/SRTP packet handling
 - ✅ Session management with bidirectional audio
 - ✅ WebRTC support (ICE, DTLS, SRTP)
+- ✅ **Codec Support**: G.711 (µ-law/A-law), G.722 (wideband), G.729 (with VAD/PLC), Opus
 - ✅ Audio conferencing with mixing
 - ✅ Conference features (PINs, host controls, capacity management)
 - ✅ Audio feedback system with WAV playback
 - ✅ Recording system (WAV, Opus)
-- ✅ AI integration (OpenAI Realtime API)
+- ✅ AI integration (OpenAI Realtime API, multiple providers)
 - ✅ DTMF detection and handling
 - ✅ Prometheus metrics and monitoring
 
 ### Coming Soon
-- 🔜 Additional codec support (G.722, G.729)
 - 🔜 Advanced transcoding pipelines
 - 🔜 SIPREC recording
 - 🔜 High availability features
@@ -154,6 +154,89 @@ cp config/forge.toml /etc/forge/config.toml
 ```
 
 See [config/forge.toml](config/forge.toml) for all configuration options.
+
+---
+
+## 🎵 Codec Support
+
+Forge supports a comprehensive range of audio codecs for different use cases:
+
+### Codec Comparison Matrix
+
+| Codec | Bit Rate | Sample Rate | Frame Size | Latency | Use Case | Quality |
+|-------|----------|-------------|------------|---------|----------|---------|
+| **G.711** (µ-law/A-law) | 64 kbps | 8 kHz | 160 samples (20ms) | ~20ms | Legacy PSTN, high compatibility | Toll quality |
+| **G.722** | 48-64 kbps | 16 kHz | 320 samples (20ms) | ~20ms | HD Voice, wideband | Wideband |
+| **G.729** | 8 kbps | 8 kHz | 80 samples (10ms) | ~25ms | Low bandwidth, mobile | Near toll quality |
+| **Opus** | 6-510 kbps | 8-48 kHz | Variable (2.5-60ms) | 2.5-60ms | Internet, WebRTC | Excellent |
+
+### Codec Features
+
+#### G.711 (µ-law/A-law)
+- **Status**: ✅ Fully implemented
+- **Format**: PCM-based, log-companded
+- **Variants**: µ-law (North America, Japan), A-law (Europe, rest of world)
+- **Use**: PSTN interoperability, maximum compatibility
+- **Pros**: No licensing, minimal CPU, universal support
+- **Cons**: High bandwidth, narrowband only
+
+#### G.722
+- **Status**: ✅ Fully implemented with ITU-T compliance
+- **Format**: Sub-band ADPCM with QMF (Quadrature Mirror Filter)
+- **Features**:
+  - 64/56/48 kbps modes
+  - Auxiliary bit support for data embedding
+  - ITU threshold-based quantization with Gray coding
+- **Use**: HD Voice on VoIP, conference systems
+- **Pros**: Wideband (7 kHz bandwidth), no licensing, excellent quality
+- **Cons**: Higher CPU than G.711, fixed 64 kbps default
+
+#### G.729
+- **Status**: ✅ Fully implemented via bcg729 FFI
+- **Format**: CS-ACELP (Conjugate-Structure Algebraic-Code-Excited Linear-Prediction)
+- **Features**:
+  - G.729 Annex A (standard 8 kbps)
+  - G.729 Annex B (VAD/DTX for bandwidth savings)
+  - Packet Loss Concealment (PLC)
+  - Length-prefixed framing for variable-length VAD frames
+- **Use**: Mobile networks, satellite links, low-bandwidth scenarios
+- **Pros**: Very low bandwidth, good quality, patents expired
+- **Cons**: Higher CPU than G.711/G.722, narrowband only
+- **Requirements**: `libbcg729-dev` package, enable with `--features g729`
+- **See**: [G.729 Integration Guide](docs/CODEC_G729_GUIDE.md) for detailed usage
+
+#### Opus
+- **Status**: ✅ Fully implemented
+- **Format**: Hybrid SILK + CELT
+- **Features**:
+  - Adaptive bit rate (6-510 kbps)
+  - Multiple bandwidth modes (narrowband to fullband)
+  - Built-in FEC (Forward Error Correction)
+  - Ultra-low latency option
+- **Use**: WebRTC, VoIP, music streaming
+- **Pros**: Best quality/bandwidth ratio, flexible, low latency, royalty-free
+- **Cons**: Higher complexity than legacy codecs
+
+### Feature Flags
+
+Enable specific codecs in your `Cargo.toml`:
+
+```toml
+[dependencies]
+forge-codecs = { version = "0.2", features = ["g729", "opus"] }
+
+# Or enable all codecs
+forge-codecs = { version = "0.2", features = ["all-codecs"] }
+```
+
+### Transcoding
+
+Forge automatically transcodes between codecs when needed:
+- Conference mixing (multiple codecs → common format → mix → transcode per participant)
+- RTP forwarding (codec negotiation mismatch)
+- Recording (input codec → target codec for storage)
+
+See the **Coming Soon** section for advanced transcoding pipeline features.
 
 ---
 
@@ -399,6 +482,7 @@ cargo clippy -- -D warnings
 
 - [Development Plan](DEVELOPMENT_PLAN.md) - Phased roadmap and strategy
 - [Architecture](FORGE%20ARCHITECTURE.md) - Detailed technical design
+- [G.729 Codec Integration Guide](docs/CODEC_G729_GUIDE.md) - G.729 installation and usage
 - [AI Integration Guide](docs/AI_INTEGRATION.md) - OpenAI Realtime API integration
 - [DTMF Integration](docs/DTMF_INTEGRATION.md) - DTMF detection and handling
 - [Feature Specifications](FORGE%20NEW%20FEATURES.MD) - New feature designs

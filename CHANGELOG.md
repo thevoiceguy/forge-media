@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2025-12-16 - Codec Enhancement
+
+### Added - Comprehensive Codec Support
+
+#### forge-codecs v0.2.0
+- **G.729 Codec Implementation** - Production-ready via bcg729 FFI
+  - Created `bcg729-sys` crate with raw FFI bindings to libbcg729
+  - Safe Rust wrappers (`G729Encoder`, `G729Decoder`) with proper Drop implementations
+  - Support for G.729 Annex A (8 kbit/s standard)
+  - Support for G.729 Annex B (VAD/DTX for bandwidth savings)
+  - **Length-prefixed framing** for variable-length VAD frames
+    - Format: `[len:u8][data:len bytes]...`
+    - Handles 0-byte (untransmitted), 2-byte (SID), and 10-byte (speech) frames unambiguously
+  - **Packet Loss Concealment (PLC)** API
+    - `encode_frame_unframed()` - Raw frame encoding for RTP
+    - `decode_frame_with_plc(&data, is_erasure)` - Decoding with erasure flag
+    - Exposes bcg729's native PLC for graceful degradation
+  - **Proper error handling**
+    - `G729Codec::new()` returns `Result` (was panicking)
+    - Initialization errors propagate immediately
+    - Added `CodecError::InitializationFailed` variant
+  - **Corrected variant metadata**
+    - Removed misleading `G729Variant::G729`
+    - Only `G729A` and `G729B` (matches bcg729 implementation)
+    - Fixed bit rates (both 8 kbps, not 11.8 kbps)
+    - `max_frame_size()` always 10 bytes (was variable)
+  - **11 comprehensive tests** all passing
+    - Basic encode/decode, silence, multi-frame
+    - Annex B VAD, reset, PLC
+    - Sine wave, invalid frame size handling
+
+- **G.722 Critical Fixes**
+  - Fixed magnitude calculation (`saturating_abs` instead of XOR)
+  - Added **auxiliary bit support** for 56k/48k modes
+    - `encode_with_aux()` / `decode_with_aux()` APIs
+    - Embeds/extracts data in LSBs of encoded frames
+  - Removed duplicate G.722 stub from media-processor
+  - All 10 tests passing with new aux-bit test
+
+- **AudioCodecType Enhancement**
+  - `native_format()` now returns `AudioCodecType::G729` (was `PCM`)
+  - Fixes transcoder selection and SDP mapping
+
+### Breaking Changes
+- `G729Codec::new()` now returns `Result<G729Codec>` (was `G729Codec`)
+- `G729Variant::G729` removed (use `G729A`)
+- G.729 framed format adds 1-byte length prefix per frame
+- No `Default` trait for `G729Codec` (construction can fail)
+- `G729Variant::frame_size()` renamed to `max_frame_size()`
+
+### Documentation
+- Comprehensive codec comparison matrix in README
+- Detailed codec feature descriptions (G.711, G.722, G.729, Opus)
+- Feature flag usage examples
+- G.729 requirements and installation instructions
+- Links to integration guide (docs/CODEC_G729_GUIDE.md)
+
+### Technical Details
+- **Dependencies**: `bcg729-sys` with pkg-config build script
+- **Feature flags**: `g729` (optional), `all-codecs` (includes all)
+- **Requirements**: `libbcg729-dev` for G.729 support
+- **Build**: `cargo build --features g729`
+
 ## [0.4.0] - 2025-12-16
 
 ### Added - Conference AI Integration

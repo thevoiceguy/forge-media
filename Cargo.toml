@@ -140,7 +140,7 @@ toml = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-forge-codecs = { path = "crates/forge-codecs" }
+forge-codecs = { path = "crates/forge-codecs", features = ["g722", "g729"] }
 forge-resampler = { path = "crates/forge-resampler" }
 forge-transcoder = { path = "crates/forge-transcoder" }
 
@@ -165,6 +165,9 @@ full = [
     "ha",
 ]
 opus = ["forge-codecs/opus", "forge-transcoder/opus"]
+g722 = ["forge-codecs/g722"]
+g729 = ["forge-codecs/g729"]
+all-codecs = ["opus", "g722", "g729"]
 recording = ["dep:forge-recording"]
 dtmf = ["dep:forge-dtmf"]
 transcription = ["dep:forge-transcription"]

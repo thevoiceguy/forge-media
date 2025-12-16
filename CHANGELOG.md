@@ -7,6 +7,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2025-12-16
+
+### Added - Conference AI Integration
+
+#### forge-conference-processor v0.4.0
+- **AI as Virtual Conference Participant** - AI joins as first-class participant
+  - `ConferenceAIManager` lifecycle management
+  - Virtual participant ID `__ai__` in AudioMixer
+  - Bidirectional audio routing (conference ↔ AI)
+  - Three async tasks: audio routing, response polling, DTMF forwarding
+  - Automatic sample rate conversion (48kHz conference ↔ 16kHz AI)
+  - State management (Connecting, Active, Speaking, Terminated)
+
+- **DTMF Forwarding** - Automatic DTMF event routing to AI
+  - Event bus subscription for participant DTMF events
+  - Filters for "End" events to avoid duplicates
+  - Forwards as text: "[DTMF: User pressed '5' via RFC 2833]"
+  - Enables IVR scenarios in conferences
+  - Support for RFC 2833, Inband, SIP INFO detection
+
+- **Audio Modes**
+  - **Mixed Mode** (✅ Implemented) - AI hears combined audio from all participants
+    - Single audio stream
+    - Lower CPU usage (~1-2% per session)
+    - Good for conversation, Q&A, facilitation
+  - **Individual Mode** (⚠️ Not Yet Implemented) - Per-participant labeled streams
+    - Requires mixer enhancement for per-participant buffer access
+    - Better speaker identification
+    - Required for accurate transcription with speaker attribution
+    - Higher CPU (~2-4% per session)
+
+- **Conference Room Methods**
+  - `attach_ai()` - Attach AI manager with event bus
+  - `detach_ai()` - Remove AI and cleanup tasks
+  - `has_ai()` - Check if AI is attached
+  - `ai_state()` - Get current AI state
+
+#### forge-engine v0.4.0
+- **DTMF Forwarding Support** in AISessionManager
+  - `send_dtmf_event()` method for manual forwarding
+  - Supports all detection methods (RFC 2833, Inband, SIP INFO)
+  - Integration with OpenAI Realtime API
+  - Formats as text message to AI
+
+#### forge-api v0.4.0
+- **Conference AI Endpoints**
+  - `POST /v1/conferences/:room_id/ai` - Attach AI to conference
+    - Request: api_key, model, voice, instructions, temperature, audio_mode
+    - Returns: room_id, state, model, voice, audio_mode, participants_heard
+    - Status: 201 Created, 404 Not Found, 409 Conflict
+  - `GET /v1/conferences/:room_id/ai` - Get AI status
+    - Returns current state and configuration
+    - Status: 200 OK, 404 Not Found
+  - `DELETE /v1/conferences/:room_id/ai` - Detach AI
+    - Graceful cleanup of tasks and resources
+    - Status: 204 No Content, 404 Not Found
+
+- **AppState Enhancement**
+  - Added `core_event_bus` field for media events (DTMF)
+  - Separate from WebSocket event bus
+  - Passed to conference AI manager on attachment
+
+### Documentation
+- **Conference AI Integration Guide** (docs/CONFERENCE_AI_INTEGRATION.md)
+  - 572-line comprehensive guide
+  - Quick start with curl examples
+  - Architecture diagrams (audio flow, component stack)
+  - Complete API reference for all 3 endpoints
+  - Audio modes comparison (Mixed vs Individual)
+  - DTMF integration with IVR example
+  - Configuration options and constants
+  - 4 real-world examples:
+    - Meeting assistant
+    - Language translation
+    - Conference moderator
+    - Dynamic attach/detach
+  - Comprehensive troubleshooting guide
+  - Best practices section
+
+### Tests
+- **Integration Tests** - 9 new tests in conference_ai_tests.rs
+  - test_attach_ai_to_conference
+  - test_attach_ai_already_attached_error
+  - test_attach_ai_invalid_audio_mode
+  - test_attach_ai_individual_mode_not_implemented
+  - test_get_ai_status_not_attached
+  - test_detach_ai_not_attached
+  - test_attach_ai_missing_api_key
+  - test_attach_ai_invalid_temperature
+  - test_attach_ai_to_nonexistent_room
+
+- **Test Coverage**
+  - All 31 conference tests passing (22 existing + 9 new)
+  - 4 unit tests in ai_manager.rs
+  - Validation, error handling, status codes
+  - Edge cases and state management
+
+### Architecture
+- **Event Bus Separation**
+  - `crate::EventBus` - WebSocket conference state events
+  - `forge_core::EventBus` - Media events (DTMF, audio)
+  - Clear separation of concerns
+
+- **Task Management**
+  - Audio routing task: 20ms polling interval
+  - AI response polling: 100ms interval
+  - DTMF forwarding: Event-driven
+  - Graceful task cleanup on detach
+
+### Recording Integration
+- AI audio automatically included in conference recordings
+- AI is regular participant in mixer
+- Room mix includes AI voice
+- Can add AI metadata to recording info
+
+### Use Cases
+- Voice assistants in meetings
+- Meeting moderation and facilitation
+- Real-time translation
+- IVR systems in conferences
+- Meeting notes and summaries
+- Q&A bots
+
+### Changed
+- forge-conference-processor: 0.3.0 → 0.4.0
+- forge-engine: 0.2.0 → 0.4.0 (DTMF forwarding added)
+- forge-api: 0.2.0 → 0.4.0
+
 ## [0.3.0] - 2025-12-16
 
 ### Added - Conference Features

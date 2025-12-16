@@ -21,6 +21,7 @@ members = [
     "bins/forge-sip-server",
     "crates/forge-media-processor",
     "crates/forge-codecs",
+    "crates/bcg729-sys",
     "crates/forge-resampler",
     "crates/forge-storage",
     "crates/forge-recorder",

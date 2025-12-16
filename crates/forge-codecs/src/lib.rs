@@ -22,6 +22,12 @@ pub enum CodecError {
     #[error("Invalid audio format: {0}")]
     InvalidFormat(String),
 
+    #[error("Codec not supported: {0}")]
+    NotSupported(String),
+
+    #[error("Codec initialization failed: {0}")]
+    InitializationFailed(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -38,6 +44,10 @@ pub enum AudioCodecType {
     PCMU,
     /// G.711 A-law (PCMA)
     PCMA,
+    /// G.722 wideband codec
+    G722,
+    /// G.729 codec
+    G729,
     /// Raw PCM
     PCM,
 }
@@ -49,6 +59,8 @@ impl AudioCodecType {
             "opus" => Ok(AudioCodecType::Opus),
             "pcmu" => Ok(AudioCodecType::PCMU),
             "pcma" => Ok(AudioCodecType::PCMA),
+            "g722" => Ok(AudioCodecType::G722),
+            "g729" => Ok(AudioCodecType::G729),
             "pcm" | "wav" => Ok(AudioCodecType::PCM),
             _ => Err(CodecError::InvalidFormat(format!("Unknown codec: {}", s))),
         }
@@ -60,6 +72,8 @@ impl AudioCodecType {
             AudioCodecType::Opus => "opus",
             AudioCodecType::PCM => "wav",
             AudioCodecType::PCMU | AudioCodecType::PCMA => "wav",
+            AudioCodecType::G722 => "g722",
+            AudioCodecType::G729 => "g729",
         }
     }
 }
@@ -152,6 +166,14 @@ pub fn create_codec(format: &AudioFormat) -> Result<Box<dyn AudioCodec>> {
                 ..Default::default()
             };
             Ok(Box::new(opus::OpusCodec::with_config(config)?))
+        }
+        AudioCodecType::G722 => {
+            Ok(Box::new(g722::G722Codec::new(g722::G722BitRate::Rate64k)))
+        }
+        AudioCodecType::G729 => {
+            Err(CodecError::NotSupported(
+                "G.729 codec not yet implemented".to_string(),
+            ))
         }
     }
 }

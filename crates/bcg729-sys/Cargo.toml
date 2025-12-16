@@ -1,0 +1,21 @@
+[package]
+name = "bcg729-sys"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Low-level FFI bindings to the bcg729 library (G.729A encoder/decoder)"
+build = "build.rs"
+
+[dependencies]
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[features]
+# Default: use system-installed bcg729
+default = ["system"]
+# Use system-installed bcg729 via pkg-config
+system = []

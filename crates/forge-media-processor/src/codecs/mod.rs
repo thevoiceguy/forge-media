@@ -4,7 +4,6 @@
 //! used in telephony and media processing.
 
 pub mod g711;
-pub mod g722;
 pub mod g729;
 pub mod opus;
 

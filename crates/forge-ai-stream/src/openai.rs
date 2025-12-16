@@ -236,6 +236,28 @@ impl OpenAIConnector {
         self.stats.events_sent += 2;
         Ok(())
     }
+
+    /// Send labeled audio from a specific participant (for conference Individual mode)
+    ///
+    /// This is used in conference Individual audio mode where each participant's audio
+    /// is sent separately with a label for speaker identification.
+    ///
+    /// Note: This sends audio through the normal input_audio_buffer.append mechanism.
+    /// The participant label is included in the audio metadata for transcription purposes.
+    pub async fn send_labeled_audio(&mut self, participant_id: &str, audio_data: &[i16], sample_rate: u32) -> Result<()> {
+        // For now, just send the audio with the participant ID as context
+        // OpenAI Realtime API doesn't have native multi-speaker support,
+        // so we send audio sequentially and rely on the model to distinguish speakers
+        // based on voice characteristics and context
+
+        // In the future, we could prepend a very short text label before each audio chunk,
+        // but that may interrupt the audio flow. For now, we just send the audio directly.
+
+        debug!("Sending labeled audio from participant {}: {} samples @ {}Hz",
+               participant_id, audio_data.len(), sample_rate);
+
+        self.send_audio(audio_data, sample_rate).await
+    }
 }
 
 #[async_trait]

@@ -1281,6 +1281,7 @@ mod tests {
             bridge,
             std::env::temp_dir().join("forge-test-recordings"),
             std::env::temp_dir().join("forge-test-prompts"),
+            Arc::new(forge_core::EventBus::new()),
         ))
     }
 

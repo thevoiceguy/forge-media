@@ -578,6 +578,46 @@ impl AISessionManager {
         }
     }
 
+    /// Send labeled audio to AI for a specific call (for conference Individual mode)
+    ///
+    /// This is used in conference Individual audio mode where each participant's audio
+    /// is sent separately with a label for speaker identification.
+    ///
+    /// # Arguments
+    /// * `call_id` - The call/conference ID
+    /// * `participant_id` - The participant's identifier (for speaker labeling)
+    /// * `samples` - PCM16 audio samples
+    pub async fn send_labeled_audio(&self, call_id: &CallId, participant_id: &str, samples: &[i16]) -> Result<()> {
+        if let Some(session_arc) = self.get_session(call_id) {
+            let session = session_arc.lock().await;
+
+            // Get connector reference
+            let connector = Arc::clone(&session.connector);
+
+            // Release session lock before awaiting
+            drop(session);
+
+            // Send labeled audio to AI connector
+            let mut conn = connector.lock().await;
+            conn.send_labeled_audio(participant_id, samples, 16000)
+                .await
+                .map_err(|e| ForgeError::Internal(format!("Failed to send labeled audio to AI: {}", e)))?;
+
+            tracing::debug!(
+                "Sent {} samples from participant {} to AI for call {}",
+                samples.len(),
+                participant_id,
+                call_id.0
+            );
+            Ok(())
+        } else {
+            Err(ForgeError::Internal(format!(
+                "No AI session found for call {}",
+                call_id.0
+            )))
+        }
+    }
+
     /// Send a function response to AI for a specific call
     pub async fn send_function_response(
         &self,

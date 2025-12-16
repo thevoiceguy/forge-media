@@ -535,6 +535,22 @@ impl ConferenceRoom {
         Ok(self.mixer.mix_excluding(participant_id)?)
     }
 
+    /// Get audio from all participants individually (for AI Individual mode)
+    ///
+    /// Returns a map of participant IDs to their audio samples.
+    /// Only returns participants that have enough samples available.
+    ///
+    /// # Arguments
+    /// * `count` - Number of samples to retrieve per participant
+    /// * `exclude_id` - Optional participant ID to exclude (e.g., "__ai__")
+    pub fn get_all_participant_audio(
+        &self,
+        count: usize,
+        exclude_id: Option<&str>,
+    ) -> std::collections::HashMap<String, Vec<i16>> {
+        self.mixer.get_all_participant_audio(count, exclude_id)
+    }
+
     /// Start recording the conference
     ///
     /// # Arguments

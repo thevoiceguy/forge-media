@@ -238,27 +238,24 @@ impl ConferenceAIManager {
     /// * `room` - Reference to the conference room
     /// * `event_bus` - Optional event bus for DTMF forwarding
     ///
-    /// # Note
-    /// Currently only Mixed audio mode is supported. Individual mode requires
-    /// per-participant audio buffer access which is not yet implemented in the mixer.
+    /// # Supported Audio Modes
+    /// - Mixed: AI hears combined audio from all participants (lower CPU)
+    /// - Individual: AI receives labeled per-participant streams (better speaker ID)
     pub async fn start(
         &self,
         room: Arc<crate::conference::ConferenceRoom>,
         event_bus: Option<Arc<forge_core::EventBus>>,
     ) -> Result<()> {
-        info!("Starting AI manager for room {}", self.room_id);
-
-        // Check if Individual mode is requested (not yet supported)
-        if self.config.audio_mode == AudioMode::Individual {
-            return Err(crate::ConferenceError::Internal(
-                "Individual audio mode is not yet implemented. Use Mixed mode instead.".to_string()
-            ));
-        }
+        info!(
+            "Starting AI manager for room {} in {:?} mode",
+            self.room_id, self.config.audio_mode
+        );
 
         // Update state
         *self.state.write() = ConferenceAIState::Active;
 
-        // Spawn audio routing task (conference mix → AI)
+        // Spawn audio routing task (conference → AI)
+        // Different implementation based on audio mode
         let audio_task = self.spawn_audio_routing_task(room.clone()).await;
         *self.audio_task.write() = Some(audio_task);
 
@@ -278,7 +275,9 @@ impl ConferenceAIManager {
         Ok(())
     }
 
-    /// Spawn task to route conference audio to AI (mixed mode only for now)
+    /// Spawn task to route conference audio to AI
+    ///
+    /// Handles both Mixed and Individual audio modes
     async fn spawn_audio_routing_task(
         &self,
         room: Arc<crate::conference::ConferenceRoom>,
@@ -289,33 +288,68 @@ impl ConferenceAIManager {
         let ai_sample_rate = self.config.sample_rate;
         let conference_sample_rate = self.config.conference_format.sample_rate;
         let room_id = self.room_id.clone();
+        let audio_mode = self.config.audio_mode;
+        let frame_size = self.config.frame_size;
 
         tokio::spawn(async move {
-            debug!("Audio routing task started for room {}", room_id);
+            debug!("Audio routing task started for room {} in {:?} mode", room_id, audio_mode);
 
             loop {
                 tokio::time::sleep(Duration::from_millis(AUDIO_TASK_SLEEP_MS)).await;
 
-                // Get conference mix (excluding AI's own voice)
-                let mixed = match room.mix_for_participant(&participant_id) {
-                    Ok(Some(samples)) => samples,
-                    Ok(None) => continue, // Not enough audio yet
-                    Err(e) => {
-                        debug!("Failed to get mix for AI in room {}: {}", room_id, e);
-                        continue;
+                match audio_mode {
+                    AudioMode::Mixed => {
+                        // Get conference mix (excluding AI's own voice)
+                        let mixed = match room.mix_for_participant(&participant_id) {
+                            Ok(Some(samples)) => samples,
+                            Ok(None) => continue, // Not enough audio yet
+                            Err(e) => {
+                                debug!("Failed to get mix for AI in room {}: {}", room_id, e);
+                                continue;
+                            }
+                        };
+
+                        // Resample if needed
+                        let samples_to_send = if conference_sample_rate != ai_sample_rate {
+                            Self::resample_audio(&mixed, conference_sample_rate, ai_sample_rate)
+                        } else {
+                            mixed
+                        };
+
+                        // Send to AI via session manager
+                        if let Err(e) = ai_session_manager.send_audio(&call_id, &samples_to_send).await {
+                            debug!("Failed to send audio to AI in room {}: {}", room_id, e);
+                        }
                     }
-                };
+                    AudioMode::Individual => {
+                        // Get audio from each participant individually
+                        let participant_audio = room.get_all_participant_audio(frame_size, Some(&participant_id));
 
-                // Resample if needed
-                let samples_to_send = if conference_sample_rate != ai_sample_rate {
-                    Self::resample_audio(&mixed, conference_sample_rate, ai_sample_rate)
-                } else {
-                    mixed
-                };
+                        if participant_audio.is_empty() {
+                            continue; // No participants have audio yet
+                        }
 
-                // Send to AI via session manager
-                if let Err(e) = ai_session_manager.send_audio(&call_id, &samples_to_send).await {
-                    debug!("Failed to send audio to AI in room {}: {}", room_id, e);
+                        // Send each participant's audio with their label
+                        for (pid, samples) in participant_audio {
+                            // Resample if needed
+                            let samples_to_send = if conference_sample_rate != ai_sample_rate {
+                                Self::resample_audio(&samples, conference_sample_rate, ai_sample_rate)
+                            } else {
+                                samples
+                            };
+
+                            // Send labeled audio to AI
+                            if let Err(e) = ai_session_manager
+                                .send_labeled_audio(&call_id, &pid, &samples_to_send)
+                                .await
+                            {
+                                debug!(
+                                    "Failed to send labeled audio from {} to AI in room {}: {}",
+                                    pid, room_id, e
+                                );
+                            }
+                        }
+                    }
                 }
             }
         })

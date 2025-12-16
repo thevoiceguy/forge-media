@@ -564,6 +564,97 @@ impl AudioMixer {
             })
             .collect()
     }
+
+    /// Get audio samples for a specific participant without mixing
+    ///
+    /// This is useful for AI Individual mode where each participant's audio
+    /// needs to be sent separately with speaker labels.
+    ///
+    /// # Arguments
+    /// * `id` - Participant identifier
+    /// * `count` - Number of samples to retrieve (typically frame_size)
+    ///
+    /// # Returns
+    /// Option containing the samples if available, with participant gain applied
+    pub fn get_participant_audio(&self, id: &str, count: usize) -> Result<Option<Vec<i16>>> {
+        let mut participant = self
+            .participants
+            .get_mut(id)
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
+
+        // Check if participant has enough samples
+        if participant.available_samples() < count {
+            return Ok(None);
+        }
+
+        // Drain samples from this participant
+        let samples = participant.drain_samples(count);
+
+        // Apply participant gain
+        let output: Vec<i16> = samples
+            .iter()
+            .map(|&s| ((s as f32 * participant.gain).clamp(-32768.0, 32767.0)) as i16)
+            .collect();
+
+        debug!(
+            "Retrieved {} samples for participant {} (individual mode)",
+            output.len(),
+            id
+        );
+
+        Ok(Some(output))
+    }
+
+    /// Get audio samples for all participants individually (for AI Individual mode)
+    ///
+    /// Returns a map of participant IDs to their audio samples.
+    /// Only returns participants that have enough samples available.
+    ///
+    /// # Arguments
+    /// * `count` - Number of samples to retrieve per participant
+    /// * `exclude_id` - Optional participant ID to exclude (e.g., "__ai__")
+    ///
+    /// # Returns
+    /// Map of participant ID to audio samples
+    pub fn get_all_participant_audio(
+        &self,
+        count: usize,
+        exclude_id: Option<&str>,
+    ) -> std::collections::HashMap<String, Vec<i16>> {
+        let mut result = std::collections::HashMap::new();
+
+        for mut participant in self.participants.iter_mut() {
+            // Clone the key first to avoid borrow conflicts
+            let id = participant.key().clone();
+
+            // Skip excluded participant
+            if let Some(exclude) = exclude_id {
+                if id == exclude {
+                    continue;
+                }
+            }
+
+            // Check if participant has enough samples
+            if participant.available_samples() >= count {
+                let samples = participant.drain_samples(count);
+
+                // Apply participant gain
+                let output: Vec<i16> = samples
+                    .iter()
+                    .map(|&s| ((s as f32 * participant.gain).clamp(-32768.0, 32767.0)) as i16)
+                    .collect();
+
+                result.insert(id, output);
+            }
+        }
+
+        debug!(
+            "Retrieved audio for {} participants (individual mode)",
+            result.len()
+        );
+
+        result
+    }
 }
 
 impl Default for AudioMixer {

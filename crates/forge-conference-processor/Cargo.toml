@@ -15,6 +15,7 @@ forge-recorder = { path = "../forge-recorder" }
 
 bytes = { workspace = true }
 dashmap = { workspace = true }
+hound = "3.5"
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }

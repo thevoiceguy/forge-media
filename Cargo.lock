@@ -1149,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference-processor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1157,6 +1157,7 @@ dependencies = [
  "forge-engine",
  "forge-mixer",
  "forge-recorder",
+ "hound",
  "metrics 0.21.1",
  "parking_lot",
  "serde",

@@ -21,6 +21,9 @@ use tracing::{debug, info, warn};
 /// Unique identifier for a conference room
 pub type RoomId = String;
 
+/// Constant participant ID for audio feedback sounds
+const AUDIO_FEEDBACK_PARTICIPANT_ID: &str = "__audio_feedback__";
+
 /// Conference room with audio mixing and optional recording
 pub struct ConferenceRoom {
     /// Room identifier
@@ -47,6 +50,10 @@ pub struct ConferenceRoom {
     hosts: Arc<DashMap<String, ()>>,
     /// Set of participants waiting for moderator (participant_id)
     waiting_participants: Arc<DashMap<String, ()>>,
+    /// Audio feedback player for playing sounds
+    audio_feedback_player: Arc<RwLock<Option<crate::audio_feedback::AudioFeedbackPlayer>>>,
+    /// Pre-loaded conference sounds
+    conference_sounds: Arc<RwLock<Option<crate::audio_feedback::ConferenceSounds>>>,
     /// Audio format
     format: AudioFormat,
     /// Frame size for mixing operations
@@ -79,6 +86,8 @@ impl ConferenceRoom {
             is_locked: Arc::new(RwLock::new(false)),
             hosts: Arc::new(DashMap::new()),
             waiting_participants: Arc::new(DashMap::new()),
+            audio_feedback_player: Arc::new(RwLock::new(None)),
+            conference_sounds: Arc::new(RwLock::new(None)),
             format,
             _frame_size: frame_size,
         })
@@ -109,9 +118,44 @@ impl ConferenceRoom {
         // Set initial lock state
         *self.is_locked.write() = effective_config.security.default_locked;
 
+        // Initialize audio feedback if any sounds are configured
+        let has_sounds = effective_config.join_sound.is_some()
+            || effective_config.exit_sound.is_some()
+            || effective_config.alone_sound.is_some()
+            || effective_config.invalid_pin_sound.is_some()
+            || effective_config.locked_sound.is_some()
+            || effective_config.unlocked_sound.is_some()
+            || effective_config.kicked_sound.is_some()
+            || effective_config.max_members_sound.is_some()
+            || effective_config.moh_sound.is_some()
+            || effective_config.pin_prompt_sound.is_some()
+            || effective_config.recording_started_sound.is_some()
+            || effective_config.recording_stopped_sound.is_some();
+
+        if has_sounds {
+            // Create audio feedback player with room's sample rate
+            let player = crate::audio_feedback::AudioFeedbackPlayer::new(
+                self.format.sample_rate
+            );
+
+            // Load all configured sounds
+            let sounds = crate::audio_feedback::ConferenceSounds::load_from_config(
+                &effective_config,
+                &player,
+            );
+
+            *self.audio_feedback_player.write() = Some(player);
+            *self.conference_sounds.write() = Some(sounds);
+
+            // Add audio feedback as a virtual participant to the mixer
+            self.mixer.add_participant(AUDIO_FEEDBACK_PARTICIPANT_ID, None)?;
+
+            info!("Audio feedback enabled for room {}", self.id);
+        }
+
         debug!(
-            "Room {} configured: require_guest_pin={}, default_locked={}",
-            self.id, effective_config.security.require_guest_pin, effective_config.security.default_locked
+            "Room {} configured: require_guest_pin={}, default_locked={}, audio_feedback={}",
+            self.id, effective_config.security.require_guest_pin, effective_config.security.default_locked, has_sounds
         );
 
         Ok(())
@@ -278,6 +322,9 @@ impl ConferenceRoom {
         info!("Adding participant {} to room {}", participant_id, self.id);
         self.mixer.add_participant(&participant_id, None)?;
 
+        // Play join sound
+        self.play_join_sound();
+
         // Update metrics
         counter!("forge_conference_participants_joined_total", 1, "room_id" => self.id.clone());
         gauge!("forge_conference_participants_active", self.mixer.participant_count() as f64, "room_id" => self.id.clone());
@@ -356,6 +403,17 @@ impl ConferenceRoom {
 
         // Remove from mixer
         self.mixer.remove_participant(participant_id)?;
+
+        // Play exit sound
+        self.play_exit_sound();
+
+        // Check if only one participant is left (alone sound)
+        // Count actual participants (excluding audio feedback participant)
+        let remaining_count = self.mixer.participant_count();
+        if remaining_count == 2 {
+            // 1 real participant + 1 audio feedback participant = 2 total
+            self.play_alone_sound();
+        }
 
         // Update metrics
         counter!("forge_conference_participants_left_total", 1, "room_id" => self.id.clone());
@@ -466,6 +524,9 @@ impl ConferenceRoom {
 
         *self.recorder.write() = Some(recorder);
 
+        // Play recording started sound
+        self.play_recording_started_sound();
+
         // Update metrics
         counter!("forge_conference_recordings_started_total", 1, "room_id" => self.id.clone());
         gauge!("forge_conference_recordings_active", 1.0, "room_id" => self.id.clone());
@@ -480,6 +541,9 @@ impl ConferenceRoom {
         let mut recorder_guard = self.recorder.write();
         if let Some(recorder) = recorder_guard.take() {
             recorder.stop()?;
+
+            // Play recording stopped sound
+            self.play_recording_stopped_sound();
 
             // Update metrics
             counter!("forge_conference_recordings_stopped_total", 1, "room_id" => self.id.clone());
@@ -1030,6 +1094,76 @@ impl ConferenceRoom {
         }
 
         Ok(())
+    }
+
+    /// Play a sound to all participants
+    ///
+    /// # Arguments
+    /// * `samples` - PCM audio samples to play
+    fn play_sound_to_all(&self, samples: &[i16]) {
+        if samples.is_empty() {
+            return;
+        }
+
+        // Write samples to the audio feedback participant
+        if let Err(e) = self.mixer.write_samples(AUDIO_FEEDBACK_PARTICIPANT_ID, samples) {
+            warn!("Failed to play sound in room {}: {}", self.id, e);
+        }
+    }
+
+    /// Play the join sound
+    fn play_join_sound(&self) {
+        let sounds = self.conference_sounds.read();
+        if let Some(sounds) = sounds.as_ref() {
+            if let Some(samples) = sounds.join_sound.as_ref() {
+                debug!("Playing join sound in room {}", self.id);
+                self.play_sound_to_all(samples);
+            }
+        }
+    }
+
+    /// Play the exit sound
+    fn play_exit_sound(&self) {
+        let sounds = self.conference_sounds.read();
+        if let Some(sounds) = sounds.as_ref() {
+            if let Some(samples) = sounds.exit_sound.as_ref() {
+                debug!("Playing exit sound in room {}", self.id);
+                self.play_sound_to_all(samples);
+            }
+        }
+    }
+
+    /// Play the alone sound (last participant remaining)
+    fn play_alone_sound(&self) {
+        let sounds = self.conference_sounds.read();
+        if let Some(sounds) = sounds.as_ref() {
+            if let Some(samples) = sounds.alone_sound.as_ref() {
+                debug!("Playing alone sound in room {}", self.id);
+                self.play_sound_to_all(samples);
+            }
+        }
+    }
+
+    /// Play the recording started sound
+    fn play_recording_started_sound(&self) {
+        let sounds = self.conference_sounds.read();
+        if let Some(sounds) = sounds.as_ref() {
+            if let Some(samples) = sounds.recording_started_sound.as_ref() {
+                debug!("Playing recording started sound in room {}", self.id);
+                self.play_sound_to_all(samples);
+            }
+        }
+    }
+
+    /// Play the recording stopped sound
+    fn play_recording_stopped_sound(&self) {
+        let sounds = self.conference_sounds.read();
+        if let Some(sounds) = sounds.as_ref() {
+            if let Some(samples) = sounds.recording_stopped_sound.as_ref() {
+                debug!("Playing recording stopped sound in room {}", self.id);
+                self.play_sound_to_all(samples);
+            }
+        }
     }
 }
 

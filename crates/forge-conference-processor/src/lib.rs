@@ -10,6 +10,7 @@ mod dtmf_commands;
 mod config;
 mod pin_auth;
 mod room_config;
+mod audio_feedback;
 
 pub use conference::{ConferenceBridge, ConferenceRoom, RoomId};
 pub use ai_manager::{
@@ -25,6 +26,7 @@ pub use config::{
 };
 pub use pin_auth::{PinAuthResult, PinAuthenticator};
 pub use room_config::{DtmfCommandBindings, EffectiveRoomConfig, RoomConfig};
+pub use audio_feedback::{AudioFeedbackPlayer, ConferenceSounds};
 pub use forge_core::AudioFormat;
 pub use forge_mixer::{ParticipantMetadata, ParticipantState};
 

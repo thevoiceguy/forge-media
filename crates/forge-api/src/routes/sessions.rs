@@ -94,6 +94,7 @@ pub struct AppState {
     pub recording_base_dir: std::path::PathBuf,
     pub prompts_base_dir: std::path::PathBuf,
     pub event_bus: crate::EventBus,
+    pub core_event_bus: Arc<forge_core::EventBus>,
     pub webrtc_manager: Arc<super::webrtc::WebRtcManager>,
     pub ai_session_manager: Arc<forge_engine::AISessionManager>,
 }
@@ -105,6 +106,7 @@ impl AppState {
         conference_bridge: Arc<forge_conference_processor::ConferenceBridge>,
         recording_base_dir: std::path::PathBuf,
         prompts_base_dir: std::path::PathBuf,
+        core_event_bus: Arc<forge_core::EventBus>,
     ) -> Self {
         // Create default storage manager
         let storage_manager =
@@ -131,6 +133,7 @@ impl AppState {
             recording_base_dir,
             prompts_base_dir,
             event_bus,
+            core_event_bus,
             webrtc_manager,
             ai_session_manager,
         }

@@ -628,6 +628,48 @@ impl AISessionManager {
             None
         }
     }
+
+    /// Send a DTMF event to the AI for a specific call
+    ///
+    /// This allows manual DTMF forwarding when not using the automatic event bus integration.
+    /// Useful for conference scenarios where DTMF events need to be forwarded from conference participants.
+    pub async fn send_dtmf_event(
+        &self,
+        call_id: &CallId,
+        digit: char,
+        detection_method: forge_core::DtmfDetectionMethod,
+    ) -> Result<()> {
+        if let Some(session_arc) = self.get_session(call_id) {
+            let session = session_arc.lock().await;
+
+            // Get connector reference
+            let connector = Arc::clone(&session.connector);
+
+            // Convert detection method to string
+            let method_str = match detection_method {
+                forge_core::DtmfDetectionMethod::Rfc2833 => "RFC 2833",
+                forge_core::DtmfDetectionMethod::Inband => "Inband",
+                forge_core::DtmfDetectionMethod::SipInfo => "SIP INFO",
+            };
+
+            // Release session lock before awaiting
+            drop(session);
+
+            // Send DTMF to AI connector
+            let mut conn = connector.lock().await;
+            conn.send_dtmf_event(digit, method_str)
+                .await
+                .map_err(|e| ForgeError::Internal(format!("Failed to send DTMF to AI: {}", e)))?;
+
+            tracing::debug!("Sent DTMF '{}' to AI for call {}", digit, call_id.0);
+            Ok(())
+        } else {
+            Err(ForgeError::Internal(format!(
+                "No AI session found for call {}",
+                call_id.0
+            )))
+        }
+    }
 }
 
 #[cfg(test)]

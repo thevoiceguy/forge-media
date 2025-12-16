@@ -729,10 +729,11 @@ impl ConferenceRoom {
     ///
     /// # Arguments
     /// * `ai_manager` - The AI manager to attach
-    /// * `self_ref` - Arc reference to self (needed for spawning tasks)
+    /// * `event_bus` - Optional event bus for DTMF forwarding
     pub async fn attach_ai(
         self: &Arc<Self>,
         ai_manager: crate::ai_manager::ConferenceAIManager,
+        event_bus: Option<Arc<EventBus>>,
     ) -> Result<()> {
         // Check if AI already attached
         {
@@ -746,7 +747,7 @@ impl ConferenceRoom {
         self.mixer.add_participant(ai_manager.participant_id(), None)?;
 
         // Start AI manager (spawns audio routing tasks) - no lock held
-        ai_manager.start(Arc::clone(self)).await?;
+        ai_manager.start(Arc::clone(self), event_bus).await?;
 
         info!("Attached AI to conference room {}", self.id);
 

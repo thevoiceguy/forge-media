@@ -149,10 +149,10 @@ async fn attach_ai(
         ApiError::Internal(format!("Failed to create AI manager: {}", e))
     })?;
 
-    // Attach AI to room
-    room.attach_ai(ai_manager).await.map_err(|e| {
-        ApiError::Internal(format!("Failed to attach AI: {}", e))
-    })?;
+    // Attach AI to room with event bus for DTMF forwarding
+    room.attach_ai(ai_manager, Some(Arc::clone(&state.core_event_bus)))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to attach AI: {}", e)))?;
 
     info!("Successfully attached AI to conference room {}", room_id);
 

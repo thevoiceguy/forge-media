@@ -24,7 +24,11 @@ use tower::ServiceExt;
 /// Create a test application with in-memory state
 fn create_test_app() -> Router {
     let session_manager_config = SessionManagerConfig::default();
-    let session_manager = SessionManager::new(session_manager_config, None);
+
+    // Create event bus for inter-component communication
+    let event_bus = Arc::new(forge_core::EventBus::new());
+
+    let session_manager = SessionManager::new(session_manager_config, Some(event_bus.clone()));
     let metrics_handle = Arc::new(forge_api::routes::prometheus::MetricsHandle::init());
 
     let conference_bridge = Arc::new(
@@ -41,6 +45,7 @@ fn create_test_app() -> Router {
         conference_bridge,
         temp_dir.clone(),
         temp_dir,
+        event_bus,
     ));
 
     routes::create_router().with_state(state)

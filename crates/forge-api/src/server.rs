@@ -190,6 +190,7 @@ impl ApiServer {
             conference_bridge,
             config.recording_base_dir.clone(),
             config.prompts_base_dir.clone(),
+            event_bus.clone(),
         ));
         let auth_config = middleware::auth::AuthConfig::new(config.auth_tokens.clone());
         let rate_limiter = middleware::RateLimiter::new(

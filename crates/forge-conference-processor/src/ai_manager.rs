@@ -34,12 +34,17 @@ pub enum AudioMode {
     /// - Lower CPU usage
     /// - Simpler implementation
     /// - Good for conversation and Q&A
+    /// - **Status**: ✅ Fully implemented
     Mixed,
 
     /// AI receives separate labeled audio streams per participant
     /// - Higher CPU usage (scales with participant count)
     /// - Better speaker identification
     /// - Required for accurate transcription with speaker attribution
+    /// - **Status**: ⚠️ Not yet implemented (requires mixer enhancements)
+    ///
+    /// To implement this mode, the mixer needs a method to extract per-participant
+    /// audio buffers before mixing. This is planned for a future release.
     Individual,
 }
 
@@ -225,17 +230,30 @@ impl ConferenceAIManager {
     /// This will:
     /// 1. Spawn audio routing task (conference → AI)
     /// 2. Spawn AI response polling task (AI → conference)
-    /// 3. Spawn DTMF forwarding task (conference → AI)
+    /// 3. Spawn DTMF forwarding task (conference → AI) if event bus provided
     ///
     /// The AI participant must be added to the mixer before calling this.
     ///
     /// # Arguments
     /// * `room` - Reference to the conference room
+    /// * `event_bus` - Optional event bus for DTMF forwarding
+    ///
+    /// # Note
+    /// Currently only Mixed audio mode is supported. Individual mode requires
+    /// per-participant audio buffer access which is not yet implemented in the mixer.
     pub async fn start(
         &self,
         room: Arc<crate::conference::ConferenceRoom>,
+        event_bus: Option<Arc<forge_core::EventBus>>,
     ) -> Result<()> {
         info!("Starting AI manager for room {}", self.room_id);
+
+        // Check if Individual mode is requested (not yet supported)
+        if self.config.audio_mode == AudioMode::Individual {
+            return Err(crate::ConferenceError::Internal(
+                "Individual audio mode is not yet implemented. Use Mixed mode instead.".to_string()
+            ));
+        }
 
         // Update state
         *self.state.write() = ConferenceAIState::Active;
@@ -247,6 +265,13 @@ impl ConferenceAIManager {
         // Spawn AI response polling task (AI → conference)
         let response_task = self.spawn_response_polling_task(room.clone()).await;
         *self.response_task.write() = Some(response_task);
+
+        // Spawn DTMF forwarding task if event bus is provided
+        if let Some(event_bus) = event_bus {
+            info!("Enabling DTMF forwarding for AI in room {}", self.room_id);
+            let dtmf_task = self.spawn_dtmf_forwarding_task(event_bus).await;
+            *self.dtmf_task.write() = Some(dtmf_task);
+        }
 
         info!("AI manager started for room {}", self.room_id);
 
@@ -332,6 +357,71 @@ impl ConferenceAIManager {
                     debug!("Failed to inject AI audio in room {}: {}", room_id, e);
                 }
             }
+        })
+    }
+
+    /// Spawn task to forward DTMF events to AI
+    async fn spawn_dtmf_forwarding_task(
+        &self,
+        event_bus: Arc<forge_core::EventBus>,
+    ) -> JoinHandle<()> {
+        let ai_session_manager = Arc::clone(&self.ai_session_manager);
+        let call_id = self.call_id.clone();
+        let room_id = self.room_id.clone();
+
+        tokio::spawn(async move {
+            let mut rx = event_bus.subscribe();
+            debug!("DTMF forwarding task started for AI in room {}", room_id);
+
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        // Filter for DTMF events
+                        if let forge_core::ForgeEvent::DtmfDigitDetected {
+                            call_id: event_call_id,
+                            digit,
+                            method,
+                            event_type,
+                            ..
+                        } = event
+                        {
+                            // Only process "End" events (complete digit presses)
+                            // to avoid sending duplicate/partial events
+                            if event_type != forge_core::DtmfEventKind::End {
+                                continue;
+                            }
+
+                            // For conference DTMF, the call_id will be the participant's call_id
+                            // We want to forward all conference participant DTMF to the AI
+                            debug!(
+                                "Forwarding DTMF '{}' from {} to AI in room {}",
+                                digit, event_call_id.0, room_id
+                            );
+
+                            // Forward to AI
+                            if let Err(e) = ai_session_manager
+                                .send_dtmf_event(&call_id, digit, method)
+                                .await
+                            {
+                                debug!("Failed to send DTMF to AI in room {}: {}", room_id, e);
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            "DTMF event receiver lagged for AI in room {}, skipped {} events",
+                            room_id,
+                            skipped
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        debug!("Event bus closed for AI in room {}", room_id);
+                        break;
+                    }
+                }
+            }
+
+            debug!("DTMF forwarding task stopped for AI in room {}", room_id);
         })
     }
 

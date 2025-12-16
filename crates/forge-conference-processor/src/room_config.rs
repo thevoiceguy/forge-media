@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Can override global defaults from ConferenceConfig
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomConfig {
+    // Security overrides
     /// Room-specific guest PIN (overrides global)
     pub guest_pin: Option<String>,
 
@@ -23,11 +24,40 @@ pub struct RoomConfig {
     /// Lock this room by default (overrides global)
     pub default_locked: Option<bool>,
 
+    // DTMF overrides
     /// Enable DTMF commands for this room (overrides global)
     pub enable_dtmf: Option<bool>,
 
     /// Room-specific DTMF command bindings (overrides global)
     pub dtmf_commands: Option<DtmfCommandBindings>,
+
+    // Capacity overrides
+    /// Maximum channels for this room (overrides global)
+    pub max_channels: Option<usize>,
+
+    /// Wait for moderator for this room (overrides global)
+    pub wait_for_moderator: Option<bool>,
+
+    // Meeting requirements overrides
+    /// Minimum users for this room (overrides global)
+    pub min_users: Option<usize>,
+
+    /// Minimum recording participants for this room (overrides global)
+    pub min_recording_participants: Option<usize>,
+
+    // Audio feedback overrides (each sound can be independently overridden)
+    pub join_sound: Option<Option<String>>,
+    pub exit_sound: Option<Option<String>>,
+    pub alone_sound: Option<Option<String>>,
+    pub invalid_pin_sound: Option<Option<String>>,
+    pub locked_sound: Option<Option<String>>,
+    pub unlocked_sound: Option<Option<String>>,
+    pub kicked_sound: Option<Option<String>>,
+    pub max_members_sound: Option<Option<String>>,
+    pub moh_sound: Option<Option<String>>,
+    pub pin_prompt_sound: Option<Option<String>>,
+    pub recording_started_sound: Option<Option<String>>,
+    pub recording_stopped_sound: Option<Option<String>>,
 }
 
 impl Default for RoomConfig {
@@ -40,6 +70,22 @@ impl Default for RoomConfig {
             default_locked: None,
             enable_dtmf: None,
             dtmf_commands: None,
+            max_channels: None,
+            wait_for_moderator: None,
+            min_users: None,
+            min_recording_participants: None,
+            join_sound: None,
+            exit_sound: None,
+            alone_sound: None,
+            invalid_pin_sound: None,
+            locked_sound: None,
+            unlocked_sound: None,
+            kicked_sound: None,
+            max_members_sound: None,
+            moh_sound: None,
+            pin_prompt_sound: None,
+            recording_started_sound: None,
+            recording_stopped_sound: None,
         }
     }
 }
@@ -79,6 +125,44 @@ impl RoomConfig {
             dtmf_enabled: self.enable_dtmf
                 .unwrap_or(global.dtmf.enabled),
             dtmf_config: self.build_dtmf_config(&global.dtmf),
+
+            // Capacity settings
+            max_channels: self.max_channels
+                .unwrap_or(global.capacity.max_channels),
+            wait_for_moderator: self.wait_for_moderator
+                .unwrap_or(global.capacity.wait_for_moderator),
+
+            // Meeting requirements
+            min_users: self.min_users
+                .unwrap_or(global.meeting.min_users),
+            min_recording_participants: self.min_recording_participants
+                .unwrap_or(global.meeting.min_recording_participants),
+
+            // Audio feedback sounds (Option<Option<String>> allows overriding with None)
+            join_sound: self.join_sound.clone()
+                .unwrap_or_else(|| global.sounds.join_sound.clone()),
+            exit_sound: self.exit_sound.clone()
+                .unwrap_or_else(|| global.sounds.exit_sound.clone()),
+            alone_sound: self.alone_sound.clone()
+                .unwrap_or_else(|| global.sounds.alone_sound.clone()),
+            invalid_pin_sound: self.invalid_pin_sound.clone()
+                .unwrap_or_else(|| global.sounds.invalid_pin_sound.clone()),
+            locked_sound: self.locked_sound.clone()
+                .unwrap_or_else(|| global.sounds.locked_sound.clone()),
+            unlocked_sound: self.unlocked_sound.clone()
+                .unwrap_or_else(|| global.sounds.unlocked_sound.clone()),
+            kicked_sound: self.kicked_sound.clone()
+                .unwrap_or_else(|| global.sounds.kicked_sound.clone()),
+            max_members_sound: self.max_members_sound.clone()
+                .unwrap_or_else(|| global.sounds.max_members_sound.clone()),
+            moh_sound: self.moh_sound.clone()
+                .unwrap_or_else(|| global.sounds.moh_sound.clone()),
+            pin_prompt_sound: self.pin_prompt_sound.clone()
+                .unwrap_or_else(|| global.sounds.pin_prompt_sound.clone()),
+            recording_started_sound: self.recording_started_sound.clone()
+                .unwrap_or_else(|| global.sounds.recording_started_sound.clone()),
+            recording_stopped_sound: self.recording_stopped_sound.clone()
+                .unwrap_or_else(|| global.sounds.recording_stopped_sound.clone()),
         }
     }
 
@@ -152,6 +236,28 @@ pub struct EffectiveRoomConfig {
     pub security: SecurityConfig,
     pub dtmf_enabled: bool,
     pub dtmf_config: ConferenceDtmfConfig,
+
+    // Capacity settings
+    pub max_channels: usize,
+    pub wait_for_moderator: bool,
+
+    // Meeting requirements
+    pub min_users: usize,
+    pub min_recording_participants: usize,
+
+    // Audio feedback sounds
+    pub join_sound: Option<String>,
+    pub exit_sound: Option<String>,
+    pub alone_sound: Option<String>,
+    pub invalid_pin_sound: Option<String>,
+    pub locked_sound: Option<String>,
+    pub unlocked_sound: Option<String>,
+    pub kicked_sound: Option<String>,
+    pub max_members_sound: Option<String>,
+    pub moh_sound: Option<String>,
+    pub pin_prompt_sound: Option<String>,
+    pub recording_started_sound: Option<String>,
+    pub recording_stopped_sound: Option<String>,
 }
 
 /// Room-specific DTMF command bindings (all optional, uses global defaults if None)

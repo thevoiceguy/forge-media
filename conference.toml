@@ -108,3 +108,87 @@ output_dir = "./recordings"
 
 # Include AI audio in recordings (if AI is attached)
 include_ai = true
+
+# ============================================================================
+# Capacity and Access Control
+# ============================================================================
+[capacity]
+# Maximum number of participants allowed in the conference (0 = unlimited)
+# When reached, new participants hear max_members_sound and are disconnected
+max_channels = 0
+
+# Require host/moderator to join before participants can join
+# If true, participants wait (hearing MOH) until a host joins
+wait_for_moderator = false
+
+# ============================================================================
+# Meeting Requirements
+# ============================================================================
+[meeting]
+# Minimum number of users required to start the meeting
+# Until reached, participants only hear MOH and can't interact
+# Set to 1 to start immediately, 2+ to require multiple participants
+min_users = 1
+
+# Minimum number of participants required to start recording
+# Recording will automatically start when this threshold is reached
+# Useful for ensuring you don't record empty/partial conferences
+min_recording_participants = 1
+
+# ============================================================================
+# Audio Feedback Sounds
+# ============================================================================
+# All sound paths are optional. Set to null or omit to disable.
+# Paths can be absolute or relative to the working directory.
+# Supported formats: WAV, MP3, OGG (depending on audio engine support)
+[sounds]
+
+# Sound played when a participant joins the conference
+# join_sound = "./sounds/join.wav"
+join_sound = null
+
+# Sound played when a participant exits the conference
+# exit_sound = "./sounds/exit.wav"
+exit_sound = null
+
+# Sound played when you're the only participant in the conference
+# Typically used to inform the user they're alone
+# alone_sound = "./sounds/alone.wav"
+alone_sound = null
+
+# Sound played when an invalid PIN is entered
+# invalid_pin_sound = "./sounds/invalid_pin.wav"
+invalid_pin_sound = null
+
+# Sound played when trying to join a locked conference
+# locked_sound = "./sounds/locked.wav"
+locked_sound = null
+
+# Sound played when the conference is unlocked
+# unlocked_sound = "./sounds/unlocked.wav"
+unlocked_sound = null
+
+# Sound played when you are kicked from the conference
+# kicked_sound = "./sounds/kicked.wav"
+kicked_sound = null
+
+# Sound played when trying to join a full conference (max_channels reached)
+# max_members_sound = "./sounds/conference_full.wav"
+max_members_sound = null
+
+# Music on hold - played when only 1 user is in the conference
+# Loops until another participant joins or until alone_sound plays
+# moh_sound = "./sounds/music_on_hold.wav"
+moh_sound = null
+
+# Prompt asking user to enter their PIN
+# pin_prompt_sound = "./sounds/enter_pin.wav"
+pin_prompt_sound = null
+
+# Sound played to all participants when recording starts
+# recording_started_sound = "./sounds/recording_started.wav"
+recording_started_sound = null
+
+# Sound played to all participants when recording stops
+# recording_stopped_sound = "./sounds/recording_stopped.wav"
+recording_stopped_sound = null

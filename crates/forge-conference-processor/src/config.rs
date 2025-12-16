@@ -31,6 +31,15 @@ pub struct ConferenceConfig {
 
     /// Recording settings
     pub recording: RecordingConfig,
+
+    /// Capacity and access control settings
+    pub capacity: CapacityConfig,
+
+    /// Meeting requirements
+    pub meeting: MeetingRequirementsConfig,
+
+    /// Audio feedback sounds
+    pub sounds: AudioFeedbackConfig,
 }
 
 impl Default for ConferenceConfig {
@@ -40,6 +49,9 @@ impl Default for ConferenceConfig {
             dtmf: DtmfConfig::default(),
             audio: AudioConfig::default(),
             recording: RecordingConfig::default(),
+            capacity: CapacityConfig::default(),
+            meeting: MeetingRequirementsConfig::default(),
+            sounds: AudioFeedbackConfig::default(),
         }
     }
 }
@@ -396,6 +408,108 @@ impl Default for RecordingConfig {
             codec: "pcm".to_string(),
             output_dir: "./recordings".to_string(),
             include_ai: true,
+        }
+    }
+}
+
+/// Capacity and access control settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapacityConfig {
+    /// Maximum number of participants allowed (0 = unlimited)
+    pub max_channels: usize,
+
+    /// Require host to join before participants can join
+    /// If true, participants wait in a holding area until host joins
+    pub wait_for_moderator: bool,
+}
+
+impl Default for CapacityConfig {
+    fn default() -> Self {
+        Self {
+            max_channels: 0, // Unlimited
+            wait_for_moderator: false,
+        }
+    }
+}
+
+/// Meeting requirements configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingRequirementsConfig {
+    /// Minimum number of users required to start the meeting
+    /// If set, conference audio won't be mixed until this many participants join
+    pub min_users: usize,
+
+    /// Minimum number of participants required to start recording
+    /// Recording will automatically start when this threshold is reached
+    pub min_recording_participants: usize,
+}
+
+impl Default for MeetingRequirementsConfig {
+    fn default() -> Self {
+        Self {
+            min_users: 1,
+            min_recording_participants: 1,
+        }
+    }
+}
+
+/// Audio feedback sound configuration
+/// All paths are optional - None means the sound is disabled
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioFeedbackConfig {
+    /// Sound played when a participant joins the conference
+    pub join_sound: Option<String>,
+
+    /// Sound played when a participant exits the conference
+    pub exit_sound: Option<String>,
+
+    /// Sound played when you're the only participant in the conference
+    pub alone_sound: Option<String>,
+
+    /// Sound played when an invalid PIN is entered
+    pub invalid_pin_sound: Option<String>,
+
+    /// Sound played when trying to join a locked conference
+    pub locked_sound: Option<String>,
+
+    /// Sound played when the conference is unlocked
+    pub unlocked_sound: Option<String>,
+
+    /// Sound played when you are kicked from the conference
+    pub kicked_sound: Option<String>,
+
+    /// Sound played when trying to join a full conference (max channels reached)
+    pub max_members_sound: Option<String>,
+
+    /// Music on hold - played when only 1 user is in the conference
+    /// Loops until another participant joins
+    pub moh_sound: Option<String>,
+
+    /// Prompt asking user to enter their PIN
+    pub pin_prompt_sound: Option<String>,
+
+    /// Sound played when recording starts
+    pub recording_started_sound: Option<String>,
+
+    /// Sound played when recording stops
+    pub recording_stopped_sound: Option<String>,
+}
+
+impl Default for AudioFeedbackConfig {
+    fn default() -> Self {
+        Self {
+            join_sound: None,
+            exit_sound: None,
+            alone_sound: None,
+            invalid_pin_sound: None,
+            locked_sound: None,
+            unlocked_sound: None,
+            kicked_sound: None,
+            max_members_sound: None,
+            moh_sound: None,
+            pin_prompt_sound: None,
+            recording_started_sound: None,
+            recording_stopped_sound: None,
         }
     }
 }

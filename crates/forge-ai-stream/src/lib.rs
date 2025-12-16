@@ -2,6 +2,9 @@
 //!
 //! This crate provides integration with AI services for real-time voice conversations:
 //! - OpenAI Realtime API
+//! - Anthropic Claude Voice API
+//! - ElevenLabs Conversational AI
+//! - Deepgram Voice Agent API
 //! - Google Dialogflow
 //! - Amazon Lex
 //! - Azure Cognitive Services
@@ -48,6 +51,9 @@ pub mod bargein;
 pub mod connector;
 pub mod events;
 pub mod openai;
+pub mod anthropic;
+pub mod elevenlabs;
+pub mod deepgram;
 pub mod vad;
 
 pub use audio::{AudioConverter, AudioFormat, AudioSample};
@@ -55,6 +61,9 @@ pub use bargein::{BargeInConfig, BargeInDetector, BargeInState};
 pub use connector::{AIConnector, AIConnectorConfig, AIConnectorType, AISession};
 pub use events::{AIEvent, AIEventType, FunctionCall, TranscriptSegment};
 pub use openai::{OpenAIConnector, OpenAIConfig, OpenAIModel};
+pub use anthropic::{AnthropicConnector, AnthropicConfig, AnthropicModel};
+pub use elevenlabs::{ElevenLabsConnector, ElevenLabsConfig, ElevenLabsModel, ElevenLabsVoices};
+pub use deepgram::{DeepgramConnector, DeepgramConfig, DeepgramModel, DeepgramVoices};
 pub use vad::{VadConfig, VadDetector, VadState};
 
 use thiserror::Error;

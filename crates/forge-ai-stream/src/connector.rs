@@ -5,13 +5,20 @@
 use crate::events::{AIEvent, SessionConfig, ToolDefinition};
 use crate::{AIStreamStats, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// AI connector type
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AIConnectorType {
     /// OpenAI Realtime API
     OpenAI,
+    /// Anthropic Claude Voice API
+    Anthropic,
+    /// ElevenLabs Conversational AI
+    ElevenLabs,
+    /// Deepgram Voice Agent API
+    Deepgram,
     /// Google Dialogflow
     Dialogflow,
     /// Amazon Lex

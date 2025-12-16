@@ -4,6 +4,8 @@
 
 use crate::{AudioFormat, ConferenceError, Result};
 use crate::dtmf_commands::{ConferenceDtmfConfig, DtmfCommand, DtmfCommandHandler, ParticipantRole};
+use crate::pin_auth::PinAuthenticator;
+use crate::room_config::EffectiveRoomConfig;
 use bytes::Bytes;
 use dashmap::DashMap;
 use forge_core::{CallId, DtmfEventKind, EventBus, ForgeEvent};
@@ -33,6 +35,10 @@ pub struct ConferenceRoom {
     dtmf_handler: Arc<RwLock<Option<DtmfCommandHandler>>>,
     /// DTMF event processing task
     dtmf_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// PIN authenticator for this room
+    pin_auth: Arc<RwLock<Option<PinAuthenticator>>>,
+    /// Room-specific configuration
+    room_config: Arc<RwLock<Option<EffectiveRoomConfig>>>,
     /// Mapping from call_id to participant_id
     call_id_map: Arc<DashMap<CallId, String>>,
     /// Conference is locked (no new participants allowed)
@@ -63,11 +69,106 @@ impl ConferenceRoom {
             ai_manager: Arc::new(RwLock::new(None)),
             dtmf_handler: Arc::new(RwLock::new(None)),
             dtmf_task: Arc::new(RwLock::new(None)),
+            pin_auth: Arc::new(RwLock::new(None)),
+            room_config: Arc::new(RwLock::new(None)),
             call_id_map: Arc::new(DashMap::new()),
             is_locked: Arc::new(RwLock::new(false)),
             format,
             _frame_size: frame_size,
         })
+    }
+
+    /// Configure room with PIN authentication and room-specific settings
+    ///
+    /// # Arguments
+    /// * `room_config` - Room-specific configuration (overrides global defaults)
+    /// * `global_config` - Global conference configuration (provides defaults)
+    pub fn configure(
+        &self,
+        room_config: crate::room_config::RoomConfig,
+        global_config: &crate::config::ConferenceConfig,
+    ) -> Result<()> {
+        info!("Configuring room {} with custom settings", self.id);
+
+        // Merge room config with global defaults
+        let effective_config = room_config.merge_with_global(global_config);
+
+        // Create PIN authenticator from effective security config
+        let pin_auth = PinAuthenticator::new(effective_config.security.clone());
+
+        // Store configuration
+        *self.pin_auth.write() = Some(pin_auth);
+        *self.room_config.write() = Some(effective_config.clone());
+
+        // Set initial lock state
+        *self.is_locked.write() = effective_config.security.default_locked;
+
+        debug!(
+            "Room {} configured: require_guest_pin={}, default_locked={}",
+            self.id, effective_config.security.require_guest_pin, effective_config.security.default_locked
+        );
+
+        Ok(())
+    }
+
+    /// Authenticate a participant with a PIN
+    ///
+    /// # Arguments
+    /// * `participant_id` - Unique identifier for the participant
+    /// * `pin` - The PIN entered by the participant
+    ///
+    /// # Returns
+    /// `PinAuthResult` indicating success, failure, or lockout
+    pub fn authenticate_participant(
+        &self,
+        participant_id: &str,
+        pin: &str,
+    ) -> crate::pin_auth::PinAuthResult {
+        let guard = self.pin_auth.read();
+        match guard.as_ref() {
+            Some(pin_auth) => {
+                let result = pin_auth.authenticate(participant_id, pin);
+                debug!(
+                    "PIN authentication for participant {} in room {}: {:?}",
+                    participant_id, self.id, result
+                );
+                result
+            }
+            None => {
+                // No PIN authenticator configured, allow without PIN
+                debug!(
+                    "No PIN authentication configured for room {}, allowing participant {}",
+                    self.id, participant_id
+                );
+                crate::pin_auth::PinAuthResult::NoPinRequired
+            }
+        }
+    }
+
+    /// Check if a participant is locked out due to failed PIN attempts
+    pub fn is_participant_locked_out(&self, participant_id: &str) -> bool {
+        let guard = self.pin_auth.read();
+        match guard.as_ref() {
+            Some(pin_auth) => pin_auth.is_locked_out(participant_id),
+            None => false,
+        }
+    }
+
+    /// Clear lockout for a participant (admin override)
+    pub fn clear_participant_lockout(&self, participant_id: &str) {
+        let guard = self.pin_auth.read();
+        if let Some(pin_auth) = guard.as_ref() {
+            pin_auth.clear_lockout(participant_id);
+            info!(
+                "Cleared lockout for participant {} in room {}",
+                self.id, participant_id
+            );
+        }
+    }
+
+    /// Get the room's effective configuration
+    pub fn room_config(&self) -> Option<EffectiveRoomConfig> {
+        self.room_config.read().clone()
     }
 
     /// Get the room ID

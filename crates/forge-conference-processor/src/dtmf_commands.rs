@@ -244,9 +244,39 @@ impl DtmfCommandHandler {
         // Add digit to sequence
         sequence.add_digit(digit);
 
-        // Check if entering PIN
+        // Check if entering PIN (inline to avoid deadlock from nested lock)
         if sequence.entering_pin {
-            return self.check_pin(participant_id, &sequence.digits);
+            let expected_pin = match &self.config.host_pin {
+                Some(pin) => pin,
+                None => {
+                    sequence.clear();
+                    return Some((DtmfCommand::InvalidCommand, ParticipantRole::Participant));
+                }
+            };
+
+            let digits = sequence.digits.clone();
+
+            if &digits == expected_pin {
+                // PIN correct, grant host privileges
+                sequence.is_host = true;
+                sequence.clear();
+                info!(
+                    "Participant {} authenticated as host in room {}",
+                    participant_id, self.room_id
+                );
+                return Some((DtmfCommand::EnterHostPin, ParticipantRole::Host));
+            } else if expected_pin.starts_with(&digits) {
+                // Still entering PIN
+                return None;
+            } else {
+                // Wrong PIN
+                sequence.clear();
+                warn!(
+                    "Incorrect host PIN attempt from {} in room {}",
+                    participant_id, self.room_id
+                );
+                return Some((DtmfCommand::InvalidCommand, ParticipantRole::Participant));
+            }
         }
 
         // Try to match command
@@ -297,57 +327,71 @@ impl DtmfCommandHandler {
     /// Match accumulated digits to a command
     fn match_command(&self, digits: &str, role: ParticipantRole) -> Option<DtmfCommand> {
         // Check participant commands (available to all)
+        // But first check if this could also be a prefix of a host command
+        // to avoid premature command execution
+        let mut participant_command = None;
+
         if digits == self.config.participant_commands.mute_toggle {
-            return Some(DtmfCommand::MuteToggle);
-        }
-        if digits == self.config.participant_commands.volume_up {
-            return Some(DtmfCommand::VolumeUp);
-        }
-        if digits == self.config.participant_commands.volume_down {
-            return Some(DtmfCommand::VolumeDown);
-        }
-        if digits == self.config.participant_commands.info {
-            return Some(DtmfCommand::Info);
-        }
-        if digits == self.config.participant_commands.leave {
-            return Some(DtmfCommand::Leave);
+            participant_command = Some(DtmfCommand::MuteToggle);
+        } else if digits == self.config.participant_commands.volume_up {
+            participant_command = Some(DtmfCommand::VolumeUp);
+        } else if digits == self.config.participant_commands.volume_down {
+            participant_command = Some(DtmfCommand::VolumeDown);
+        } else if digits == self.config.participant_commands.info {
+            participant_command = Some(DtmfCommand::Info);
+        } else if digits == self.config.participant_commands.leave {
+            participant_command = Some(DtmfCommand::Leave);
         }
 
-        // Check if trying to access host commands
-        if role == ParticipantRole::Participant && self.config.host_pin.is_some() {
-            // Check if sequence matches any host command prefix
-            if self.is_host_command_prefix(digits) {
+        // If we found a participant command, check if digits could also be a host command prefix
+        if let Some(cmd) = participant_command {
+            // Check if this is also a prefix of a longer host command
+            if self.is_host_command_prefix(digits) && digits.len() < self.longest_host_command_length() {
+                // Ambiguous - could be complete participant command or prefix of host command
+                // Return Incomplete to wait for more digits
+                return Some(DtmfCommand::Incomplete);
+            }
+            return Some(cmd);
+        }
+
+        // Check if digits match a complete host command
+        let is_mute_all = digits == self.config.host_commands.mute_all;
+        let is_unmute_all = digits == self.config.host_commands.unmute_all;
+        let is_lock = digits == self.config.host_commands.lock;
+        let is_unlock = digits == self.config.host_commands.unlock;
+        let is_end_conference = digits == self.config.host_commands.end_conference;
+        let is_kick = digits.starts_with(&self.config.host_commands.kick_prefix)
+            && digits.len() > self.config.host_commands.kick_prefix.len();
+
+        let is_host_command = is_mute_all || is_unmute_all || is_lock || is_unlock || is_end_conference || is_kick;
+
+        if is_host_command {
+            if role == ParticipantRole::Host {
+                // Authenticated host - execute command
+                if is_mute_all {
+                    return Some(DtmfCommand::MuteAll);
+                }
+                if is_unmute_all {
+                    return Some(DtmfCommand::UnmuteAll);
+                }
+                if is_lock {
+                    return Some(DtmfCommand::LockConference);
+                }
+                if is_unlock {
+                    return Some(DtmfCommand::UnlockConference);
+                }
+                if is_end_conference {
+                    return Some(DtmfCommand::EndConference);
+                }
+                if is_kick {
+                    let number_part = &digits[self.config.host_commands.kick_prefix.len()..];
+                    if let Ok(participant_num) = number_part.parse::<usize>() {
+                        return Some(DtmfCommand::KickParticipant(participant_num));
+                    }
+                }
+            } else if self.config.host_pin.is_some() {
+                // Non-authenticated participant trying to use host command - prompt for PIN
                 return Some(DtmfCommand::EnterHostPin);
-            }
-        }
-
-        // Check host commands (only if authenticated)
-        if role == ParticipantRole::Host {
-            if digits == self.config.host_commands.mute_all {
-                return Some(DtmfCommand::MuteAll);
-            }
-            if digits == self.config.host_commands.unmute_all {
-                return Some(DtmfCommand::UnmuteAll);
-            }
-            if digits == self.config.host_commands.lock {
-                return Some(DtmfCommand::LockConference);
-            }
-            if digits == self.config.host_commands.unlock {
-                return Some(DtmfCommand::UnlockConference);
-            }
-            if digits == self.config.host_commands.end_conference {
-                return Some(DtmfCommand::EndConference);
-            }
-
-            // Check kick command (prefix + number)
-            if digits.starts_with(&self.config.host_commands.kick_prefix) {
-                let number_part = &digits[self.config.host_commands.kick_prefix.len()..];
-                if number_part.is_empty() {
-                    return Some(DtmfCommand::Incomplete);
-                }
-                if let Ok(participant_num) = number_part.parse::<usize>() {
-                    return Some(DtmfCommand::KickParticipant(participant_num));
-                }
             }
         }
 
@@ -358,39 +402,6 @@ impl DtmfCommandHandler {
 
         // No match
         None
-    }
-
-    /// Check if digits match host PIN
-    fn check_pin(&self, participant_id: &str, digits: &str) -> Option<(DtmfCommand, ParticipantRole)> {
-        let expected_pin = self.config.host_pin.as_ref()?;
-
-        if digits == expected_pin {
-            // PIN correct, grant host privileges
-            let mut sequences = self.sequences.write();
-            if let Some(sequence) = sequences.get_mut(participant_id) {
-                sequence.is_host = true;
-                sequence.clear();
-                info!(
-                    "Participant {} authenticated as host in room {}",
-                    participant_id, self.room_id
-                );
-            }
-            Some((DtmfCommand::EnterHostPin, ParticipantRole::Host))
-        } else if expected_pin.starts_with(digits) {
-            // Still entering PIN
-            None
-        } else {
-            // Wrong PIN
-            let mut sequences = self.sequences.write();
-            if let Some(sequence) = sequences.get_mut(participant_id) {
-                sequence.clear();
-            }
-            warn!(
-                "Incorrect host PIN attempt from {} in room {}",
-                participant_id, self.room_id
-            );
-            Some((DtmfCommand::InvalidCommand, ParticipantRole::Participant))
-        }
     }
 
     /// Check if digits could be a prefix of any host command
@@ -404,8 +415,25 @@ impl DtmfCommandHandler {
             || cmds.kick_prefix.starts_with(digits)
     }
 
+    /// Get the length of the longest host command
+    fn longest_host_command_length(&self) -> usize {
+        let cmds = &self.config.host_commands;
+        [
+            cmds.mute_all.len(),
+            cmds.unmute_all.len(),
+            cmds.lock.len(),
+            cmds.unlock.len(),
+            cmds.end_conference.len(),
+            cmds.kick_prefix.len() + 2, // Account for kick prefix + at least 2 digits
+        ]
+        .iter()
+        .max()
+        .copied()
+        .unwrap_or(0)
+    }
+
     /// Check if digits could be a partial match for any command
-    fn is_partial_match(&self, digits: &str, role: ParticipantRole) -> bool {
+    fn is_partial_match(&self, digits: &str, _role: ParticipantRole) -> bool {
         let part_cmds = &self.config.participant_commands;
 
         // Check participant commands
@@ -418,9 +446,10 @@ impl DtmfCommandHandler {
             return true;
         }
 
-        // Check host commands if host
-        if role == ParticipantRole::Host {
-            return self.is_host_command_prefix(digits);
+        // Check host commands (for both participants and hosts)
+        // Participants need this to return Incomplete while entering host commands
+        if self.is_host_command_prefix(digits) {
+            return true;
         }
 
         false

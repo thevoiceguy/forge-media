@@ -123,6 +123,118 @@ mode = "generic"
 fallback = true
 
 # ============================================================================
+# AI Session Persistence & Recovery Configuration
+# ============================================================================
+[engine.ai_persistence]
+# Enable AI session persistence for automatic recovery after server restarts
+#
+# Benefits:
+#   - Sessions survive server crashes/restarts
+#   - Automatic reconnection with exponential backoff
+#   - Preserves conversation context
+#   - Health checks and graceful degradation
+#
+# When disabled, AI sessions are lost on server restart
+enabled = false
+
+# Persistence backend type
+#
+# Options:
+#   "disk":  JSON files on local filesystem (simple, no dependencies)
+#   "redis": Redis key-value store (recommended for production, multi-server)
+#
+# Disk backend:
+#   - Good for: Single-server deployments, development
+#   - Pros: No external dependencies, simple
+#   - Cons: Not shared across servers
+#
+# Redis backend:
+#   - Good for: Production, load-balanced deployments
+#   - Pros: Shared state, TTL expiration, high availability
+#   - Cons: Requires Redis server
+#   - Note: Compile with 'persistence-redis' feature
+backend = "disk"
+
+# Disk persistence directory (used when backend = "disk")
+disk_path = "/var/lib/forge/ai-sessions"
+
+# Redis configuration (used when backend = "redis")
+#
+# Format: "redis://[<username>][:<password>@]<hostname>[:port][/<db>]"
+# Examples:
+#   - redis://localhost:6379
+#   - redis://:password@localhost:6379
+#   - redis://user:password@redis.example.com:6379/0
+# redis_url = "redis://localhost:6379"
+
+# Redis key prefix (prevents collisions in shared Redis)
+redis_key_prefix = "forge:ai:session:"
+
+# Redis TTL (time-to-live) in seconds
+# Sessions older than this are automatically expired
+redis_ttl_secs = 86400  # 24 hours
+
+# Maximum reconnection attempts before marking session as failed
+#
+# Uses exponential backoff: 1s → 2s → 4s → 8s → 16s → 32s → 60s (max)
+# Example with max_reconnect_attempts = 10:
+#   - Total retry time: ~2 minutes
+#   - Attempt 1: 1 second
+#   - Attempt 2: 2 seconds
+#   - Attempt 3: 4 seconds
+#   - ...
+#   - Attempt 7+: 60 seconds (capped)
+max_reconnect_attempts = 10
+
+# Health check interval in seconds
+#
+# Periodically checks:
+#   - Persistence backend availability (disk writable, Redis PING)
+#   - Disconnected sessions for automatic reconnection
+health_check_interval_secs = 30
+
+# Enable automatic reconnection on connection loss
+#
+# When true: Automatically attempt to reconnect disconnected sessions
+# When false: Mark as disconnected but don't auto-reconnect (manual intervention)
+auto_reconnect = true
+
+# ============================================================================
+# AI Persistence Example Configurations
+# ============================================================================
+#
+# Example 1: Disk-based persistence (simple, single-server)
+# [engine.ai_persistence]
+# enabled = true
+# backend = "disk"
+# disk_path = "/var/lib/forge/ai-sessions"
+# max_reconnect_attempts = 10
+# health_check_interval_secs = 30
+# auto_reconnect = true
+#
+# Example 2: Redis-based persistence (production, multi-server)
+# [engine.ai_persistence]
+# enabled = true
+# backend = "redis"
+# redis_url = "redis://localhost:6379"
+# redis_key_prefix = "forge:ai:session:"
+# redis_ttl_secs = 86400
+# max_reconnect_attempts = 10
+# health_check_interval_secs = 30
+# auto_reconnect = true
+#
+# Example 3: High-availability Redis with authentication
+# [engine.ai_persistence]
+# enabled = true
+# backend = "redis"
+# redis_url = "redis://:your-password@redis-ha.example.com:6379/0"
+# redis_key_prefix = "prod:forge:ai:"
+# redis_ttl_secs = 172800  # 48 hours
+# max_reconnect_attempts = 20  # More aggressive retries
+# health_check_interval_secs = 15  # More frequent checks
+# auto_reconnect = true
+
+# ============================================================================
 # Production Example Configuration
 # ============================================================================
 #
@@ -147,3 +259,11 @@ fallback = true
 # interface = "eth0"  # Your primary NIC
 # mode = "native"     # For best performance
 # fallback = true
+#
+# [engine.ai_persistence]
+# enabled = true
+# backend = "redis"
+# redis_url = "redis://localhost:6379"
+# max_reconnect_attempts = 10
+# health_check_interval_secs = 30
+# auto_reconnect = true

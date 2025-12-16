@@ -54,6 +54,10 @@ pub struct EngineConfig {
     /// XDP (eBPF) acceleration configuration
     #[serde(default)]
     pub xdp: XdpConfig,
+
+    /// AI session persistence configuration
+    #[serde(default)]
+    pub ai_persistence: AIPersistenceConfig,
 }
 
 impl Default for EngineConfig {
@@ -65,6 +69,7 @@ impl Default for EngineConfig {
             session_timeout_secs: default_session_timeout_secs(),
             ip_version: IpVersionConfig::DualStack,
             xdp: XdpConfig::default(),
+            ai_persistence: AIPersistenceConfig::default(),
         }
     }
 }
@@ -163,6 +168,97 @@ impl Default for XdpMode {
     fn default() -> Self {
         Self::Generic
     }
+}
+
+/// AI session persistence configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIPersistenceConfig {
+    /// Enable AI session persistence
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Persistence backend type
+    #[serde(default)]
+    pub backend: PersistenceBackendType,
+
+    /// Directory for disk-based persistence
+    #[serde(default = "default_ai_persistence_dir")]
+    pub disk_path: PathBuf,
+
+    /// Redis URL for Redis-based persistence (e.g., "redis://localhost:6379")
+    pub redis_url: Option<String>,
+
+    /// Redis key prefix
+    #[serde(default = "default_redis_key_prefix")]
+    pub redis_key_prefix: String,
+
+    /// Redis TTL in seconds (default: 24 hours)
+    #[serde(default = "default_redis_ttl_secs")]
+    pub redis_ttl_secs: u64,
+
+    /// Maximum reconnection attempts before marking session as failed
+    #[serde(default = "default_max_reconnect_attempts")]
+    pub max_reconnect_attempts: u32,
+
+    /// Health check interval in seconds
+    #[serde(default = "default_health_check_interval_secs")]
+    pub health_check_interval_secs: u64,
+
+    /// Enable automatic reconnection on connection loss
+    #[serde(default = "default_true")]
+    pub auto_reconnect: bool,
+}
+
+impl Default for AIPersistenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Disabled by default
+            backend: PersistenceBackendType::Disk,
+            disk_path: default_ai_persistence_dir(),
+            redis_url: None,
+            redis_key_prefix: default_redis_key_prefix(),
+            redis_ttl_secs: default_redis_ttl_secs(),
+            max_reconnect_attempts: default_max_reconnect_attempts(),
+            health_check_interval_secs: default_health_check_interval_secs(),
+            auto_reconnect: true,
+        }
+    }
+}
+
+/// Persistence backend type
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PersistenceBackendType {
+    /// Disk-based persistence (JSON files)
+    Disk,
+    /// Redis-based persistence
+    Redis,
+}
+
+impl Default for PersistenceBackendType {
+    fn default() -> Self {
+        Self::Disk
+    }
+}
+
+fn default_ai_persistence_dir() -> PathBuf {
+    "/var/lib/forge/ai-sessions".into()
+}
+
+fn default_redis_key_prefix() -> String {
+    "forge:ai:session:".to_string()
+}
+
+fn default_redis_ttl_secs() -> u64 {
+    86400 // 24 hours
+}
+
+fn default_max_reconnect_attempts() -> u32 {
+    10
+}
+
+fn default_health_check_interval_secs() -> u64 {
+    30
 }
 
 /// API server configuration

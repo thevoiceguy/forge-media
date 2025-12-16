@@ -8,12 +8,13 @@ use forge_ai_stream::{
     AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector,
 };
 use forge_core::{CallId, ForgeError, Result};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 /// Configuration for AI integration with a media session
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AISessionConfig {
     /// AI service type (OpenAI, etc.)
     pub connector_type: AIConnectorType,
@@ -461,6 +462,10 @@ impl AISession {
 pub struct AISessionManager {
     /// Active AI sessions by call ID
     sessions: Arc<DashMap<CallId, Arc<Mutex<AISession>>>>,
+    /// Persistence backend (optional)
+    persistence: Option<Arc<dyn crate::persistence::PersistenceBackend>>,
+    /// Session configurations for reconnection
+    configs: Arc<DashMap<CallId, AISessionConfig>>,
 }
 
 impl Default for AISessionManager {
@@ -470,10 +475,23 @@ impl Default for AISessionManager {
 }
 
 impl AISessionManager {
-    /// Create a new AI session manager
+    /// Create a new AI session manager without persistence
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(DashMap::new()),
+            persistence: None,
+            configs: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Create a new AI session manager with persistence backend
+    pub fn new_with_persistence(
+        persistence: Arc<dyn crate::persistence::PersistenceBackend>,
+    ) -> Self {
+        Self {
+            sessions: Arc::new(DashMap::new()),
+            persistence: Some(persistence),
+            configs: Arc::new(DashMap::new()),
         }
     }
 
@@ -486,9 +504,30 @@ impl AISessionManager {
             )));
         }
 
-        let session = AISession::new(call_id.clone(), config, event_bus).await?;
+        // Save config for potential reconnection
+        self.configs.insert(call_id.clone(), config.clone());
+
+        let session = AISession::new(call_id.clone(), config.clone(), event_bus).await?;
         self.sessions
             .insert(call_id.clone(), Arc::new(Mutex::new(session)));
+
+        // Save initial session state to persistence
+        if let Some(persistence) = &self.persistence {
+            let persisted = crate::persistence::PersistedAISession {
+                call_id: call_id.clone(),
+                config,
+                connection_state: crate::persistence::ConnectionState::Connected,
+                created_at: chrono::Utc::now(),
+                last_connected: Some(chrono::Utc::now()),
+                reconnect_attempts: 0,
+                max_reconnect_attempts: 10,
+                conversation_context: None,
+            };
+
+            if let Err(e) = persistence.save(&persisted).await {
+                tracing::warn!("Failed to persist AI session for call {}: {}", call_id.0, e);
+            }
+        }
 
         tracing::info!("AI attached to call {}", call_id.0);
 
@@ -503,6 +542,9 @@ impl AISessionManager {
                 "No AI session found for call {}",
                 call_id.0
             )))?;
+
+        // Remove config
+        self.configs.remove(call_id);
 
         // Extract task handles and connector in a scoped block to drop the lock
         let (event_task, audio_task, dtmf_task, connector, state) = {
@@ -549,6 +591,13 @@ impl AISessionManager {
         {
             let mut s = state.lock().await;
             *s = AISessionState::Terminated;
+        }
+
+        // Delete from persistence
+        if let Some(persistence) = &self.persistence {
+            if let Err(e) = persistence.delete(call_id).await {
+                tracing::warn!("Failed to delete persisted AI session for call {}: {}", call_id.0, e);
+            }
         }
 
         tracing::info!("AI detached from call {}", call_id.0);
@@ -710,12 +759,292 @@ impl AISessionManager {
             )))
         }
     }
+
+    /// Restore AI sessions from persistence
+    ///
+    /// This method loads all persisted sessions and attempts to reconnect them.
+    /// Should be called on server startup to recover sessions after a restart.
+    pub async fn restore_sessions(&self, event_bus: Option<Arc<forge_core::EventBus>>) -> Result<()> {
+        let persistence = match &self.persistence {
+            Some(p) => p,
+            None => {
+                tracing::debug!("No persistence backend configured, skipping session restore");
+                return Ok(());
+            }
+        };
+
+        // Load all persisted sessions
+        let persisted_sessions = persistence.list_all().await?;
+        tracing::info!("Found {} persisted AI sessions to restore", persisted_sessions.len());
+
+        for (call_id, mut persisted) in persisted_sessions {
+            // Skip sessions that are terminated
+            if persisted.connection_state == crate::persistence::ConnectionState::Terminated {
+                tracing::debug!("Skipping terminated session for call {}", call_id.0);
+                continue;
+            }
+
+            // Skip sessions that have exceeded max reconnection attempts
+            if persisted.reconnect_attempts >= persisted.max_reconnect_attempts {
+                tracing::warn!(
+                    "Session for call {} exceeded max reconnection attempts ({}), marking as failed",
+                    call_id.0,
+                    persisted.max_reconnect_attempts
+                );
+                persisted.connection_state = crate::persistence::ConnectionState::Failed;
+                let _ = persistence.save(&persisted).await;
+                continue;
+            }
+
+            // Attempt to reconnect
+            tracing::info!(
+                "Attempting to restore AI session for call {} (attempt {}/{})",
+                call_id.0,
+                persisted.reconnect_attempts + 1,
+                persisted.max_reconnect_attempts
+            );
+
+            // Update state to reconnecting
+            persisted.connection_state = crate::persistence::ConnectionState::Reconnecting;
+            persisted.reconnect_attempts += 1;
+            let _ = persistence.save(&persisted).await;
+
+            // Calculate backoff delay
+            let backoff = persisted.backoff_duration();
+            tracing::debug!("Waiting {:?} before reconnecting call {}", backoff, call_id.0);
+            tokio::time::sleep(backoff).await;
+
+            // Attempt to attach AI with saved config
+            match self.attach_ai(call_id.clone(), persisted.config.clone(), event_bus.clone()).await {
+                Ok(()) => {
+                    tracing::info!("Successfully restored AI session for call {}", call_id.0);
+
+                    // Update persistence with successful reconnection
+                    persisted.connection_state = crate::persistence::ConnectionState::Connected;
+                    persisted.last_connected = Some(chrono::Utc::now());
+                    persisted.reconnect_attempts = 0; // Reset on successful connection
+                    let _ = persistence.save(&persisted).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to restore AI session for call {}: {}", call_id.0, e);
+
+                    // Update persistence with failure
+                    persisted.connection_state = crate::persistence::ConnectionState::Disconnected;
+                    let _ = persistence.save(&persisted).await;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Attempt to reconnect a disconnected AI session
+    ///
+    /// Uses exponential backoff based on the number of previous reconnection attempts.
+    pub async fn try_reconnect(
+        &self,
+        call_id: &CallId,
+        event_bus: Option<Arc<forge_core::EventBus>>,
+    ) -> Result<()> {
+        let persistence = match &self.persistence {
+            Some(p) => p,
+            None => {
+                return Err(ForgeError::Internal(
+                    "Reconnection requires persistence backend".to_string(),
+                ));
+            }
+        };
+
+        // Load persisted session
+        let mut persisted = persistence
+            .load(call_id)
+            .await?
+            .ok_or_else(|| ForgeError::Internal(format!("No persisted session for call {}", call_id.0)))?;
+
+        // Check if we've exceeded max attempts
+        if persisted.reconnect_attempts >= persisted.max_reconnect_attempts {
+            tracing::error!(
+                "Max reconnection attempts ({}) exceeded for call {}",
+                persisted.max_reconnect_attempts,
+                call_id.0
+            );
+            persisted.connection_state = crate::persistence::ConnectionState::Failed;
+            persistence.save(&persisted).await?;
+            return Err(ForgeError::Internal(format!(
+                "Max reconnection attempts exceeded for call {}",
+                call_id.0
+            )));
+        }
+
+        // Update state and increment attempts
+        persisted.connection_state = crate::persistence::ConnectionState::Reconnecting;
+        persisted.reconnect_attempts += 1;
+        persistence.save(&persisted).await?;
+
+        // Calculate exponential backoff
+        let backoff = persisted.backoff_duration();
+        tracing::info!(
+            "Reconnecting AI session for call {} (attempt {}/{}) after {:?}",
+            call_id.0,
+            persisted.reconnect_attempts,
+            persisted.max_reconnect_attempts,
+            backoff
+        );
+
+        tokio::time::sleep(backoff).await;
+
+        // Get config from storage
+        let config = self
+            .configs
+            .get(call_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| ForgeError::Internal(format!("No config found for call {}", call_id.0)))?;
+
+        // Attempt reconnection
+        match self.attach_ai(call_id.clone(), config, event_bus).await {
+            Ok(()) => {
+                tracing::info!("Successfully reconnected AI session for call {}", call_id.0);
+
+                // Update persistence with successful reconnection
+                persisted.connection_state = crate::persistence::ConnectionState::Connected;
+                persisted.last_connected = Some(chrono::Utc::now());
+                persisted.reconnect_attempts = 0; // Reset counter on success
+                persistence.save(&persisted).await?;
+
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("Failed to reconnect AI session for call {}: {}", call_id.0, e);
+
+                // Update persistence with disconnected state
+                persisted.connection_state = crate::persistence::ConnectionState::Disconnected;
+                persistence.save(&persisted).await?;
+
+                Err(e)
+            }
+        }
+    }
+
+    /// Start a background task for periodic health checks
+    ///
+    /// This task periodically checks the health of the persistence backend
+    /// and optionally checks if active sessions are still connected.
+    pub fn start_health_check_task(
+        self: Arc<Self>,
+        check_interval: std::time::Duration,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(check_interval);
+
+            loop {
+                interval.tick().await;
+
+                // Check persistence backend health
+                if let Some(persistence) = &self.persistence {
+                    match persistence.health_check().await {
+                        Ok(true) => {
+                            tracing::debug!("Persistence backend health check passed");
+                        }
+                        Ok(false) => {
+                            tracing::warn!("Persistence backend health check failed");
+                        }
+                        Err(e) => {
+                            tracing::error!("Persistence backend health check error: {}", e);
+                        }
+                    }
+
+                    // Check for disconnected sessions and attempt reconnection
+                    match persistence.list_all().await {
+                        Ok(sessions) => {
+                            for (call_id, persisted) in sessions {
+                                // If session is in disconnected state and has a config, try to reconnect
+                                if persisted.connection_state == crate::persistence::ConnectionState::Disconnected
+                                    && persisted.reconnect_attempts < persisted.max_reconnect_attempts
+                                {
+                                    tracing::info!(
+                                        "Detected disconnected session for call {}, attempting reconnection",
+                                        call_id.0
+                                    );
+
+                                    // Spawn reconnection task (don't block health checks)
+                                    let manager = Arc::clone(&self);
+                                    let call_id_clone = call_id.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = manager.try_reconnect(&call_id_clone, None).await {
+                                            tracing::error!(
+                                                "Automatic reconnection failed for call {}: {}",
+                                                call_id_clone.0,
+                                                e
+                                            );
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to list persisted sessions for health check: {}", e);
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Handle unexpected disconnection of an AI session
+    ///
+    /// This method should be called when an AI session disconnects unexpectedly
+    /// (not through explicit detach). It updates persistence and can trigger
+    /// automatic reconnection.
+    pub async fn handle_disconnection(&self, call_id: &CallId, auto_reconnect: bool) -> Result<()> {
+        tracing::warn!("Handling unexpected disconnection for call {}", call_id.0);
+
+        // Update persistence state
+        if let Some(persistence) = &self.persistence {
+            if let Ok(Some(mut persisted)) = persistence.load(call_id).await {
+                persisted.connection_state = crate::persistence::ConnectionState::Disconnected;
+                if let Err(e) = persistence.save(&persisted).await {
+                    tracing::error!(
+                        "Failed to update persistence after disconnection for call {}: {}",
+                        call_id.0,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Optionally trigger automatic reconnection
+        if auto_reconnect {
+            tracing::info!("Triggering automatic reconnection for call {}", call_id.0);
+            // Spawn reconnection task in background
+            let manager = Arc::new(self.clone());
+            let call_id_clone = call_id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = manager.try_reconnect(&call_id_clone, None).await {
+                    tracing::error!("Automatic reconnection failed for call {}: {}", call_id_clone.0, e);
+                }
+            });
+        }
+
+        Ok(())
+    }
+}
+
+// Make AISessionManager cloneable for background tasks
+impl Clone for AISessionManager {
+    fn clone(&self) -> Self {
+        Self {
+            sessions: Arc::clone(&self.sessions),
+            persistence: self.persistence.clone(),
+            configs: Arc::clone(&self.configs),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+    use crate::persistence::PersistenceBackend;
 
     #[test]
     fn test_ai_session_manager_creation() {
@@ -946,5 +1275,298 @@ mod tests {
         // Trying to receive audio from non-existent session should return None
         let result = manager.try_recv_audio_response(&call_id).await;
         assert!(result.is_none());
+    }
+
+    // ========================================================================
+    // Persistence & Recovery Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_ai_session_manager_with_persistence() {
+        // Create temporary directory for test
+        let temp_dir = std::env::temp_dir().join(format!("forge-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create disk backend
+        let backend = Arc::new(
+            crate::persistence::DiskBackend::new(temp_dir.clone())
+                .await
+                .unwrap(),
+        ) as Arc<dyn crate::persistence::PersistenceBackend>;
+
+        // Create manager with persistence
+        let manager = AISessionManager::new_with_persistence(backend.clone());
+
+        // Verify it's empty initially
+        assert_eq!(manager.session_count(), 0);
+
+        // Create a persisted session manually
+        let call_id = CallId::generate();
+        let config = AISessionConfig::default();
+
+        let persisted = crate::persistence::PersistedAISession {
+            call_id: call_id.clone(),
+            config: config.clone(),
+            connection_state: crate::persistence::ConnectionState::Connected,
+            created_at: chrono::Utc::now(),
+            last_connected: Some(chrono::Utc::now()),
+            reconnect_attempts: 0,
+            max_reconnect_attempts: 10,
+            conversation_context: None,
+        };
+
+        // Save to persistence
+        backend.save(&persisted).await.unwrap();
+
+        // Verify it was saved
+        let loaded = backend.load(&call_id).await.unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().call_id, call_id);
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_persisted_session_backoff_calculation() {
+        let call_id = CallId::generate();
+        let config = AISessionConfig::default();
+
+        let mut persisted = crate::persistence::PersistedAISession {
+            call_id,
+            config,
+            connection_state: crate::persistence::ConnectionState::Disconnected,
+            created_at: chrono::Utc::now(),
+            last_connected: None,
+            reconnect_attempts: 0,
+            max_reconnect_attempts: 10,
+            conversation_context: None,
+        };
+
+        // Test exponential backoff progression
+        persisted.reconnect_attempts = 0;
+        assert_eq!(persisted.backoff_duration().as_millis(), 1000); // 1s
+
+        persisted.reconnect_attempts = 1;
+        assert_eq!(persisted.backoff_duration().as_millis(), 2000); // 2s
+
+        persisted.reconnect_attempts = 2;
+        assert_eq!(persisted.backoff_duration().as_millis(), 4000); // 4s
+
+        persisted.reconnect_attempts = 3;
+        assert_eq!(persisted.backoff_duration().as_millis(), 8000); // 8s
+
+        persisted.reconnect_attempts = 4;
+        assert_eq!(persisted.backoff_duration().as_millis(), 16000); // 16s
+
+        persisted.reconnect_attempts = 5;
+        assert_eq!(persisted.backoff_duration().as_millis(), 32000); // 32s
+
+        persisted.reconnect_attempts = 6;
+        assert_eq!(persisted.backoff_duration().as_millis(), 60000); // 60s (capped)
+
+        persisted.reconnect_attempts = 7;
+        assert_eq!(persisted.backoff_duration().as_millis(), 60000); // 60s (capped)
+
+        persisted.reconnect_attempts = 100;
+        assert_eq!(persisted.backoff_duration().as_millis(), 60000); // 60s (capped)
+    }
+
+    #[tokio::test]
+    async fn test_disk_backend_operations() {
+        // Create temporary directory
+        let temp_dir = std::env::temp_dir().join(format!("forge-test-{}", uuid::Uuid::new_v4()));
+
+        let backend = crate::persistence::DiskBackend::new(temp_dir.clone())
+            .await
+            .unwrap();
+
+        let call_id = CallId::generate();
+        let config = AISessionConfig::default();
+
+        let session = crate::persistence::PersistedAISession {
+            call_id: call_id.clone(),
+            config: config.clone(),
+            connection_state: crate::persistence::ConnectionState::Connected,
+            created_at: chrono::Utc::now(),
+            last_connected: Some(chrono::Utc::now()),
+            reconnect_attempts: 0,
+            max_reconnect_attempts: 10,
+            conversation_context: Some("Test context".to_string()),
+        };
+
+        // Test save
+        backend.save(&session).await.unwrap();
+
+        // Test load
+        let loaded = backend.load(&call_id).await.unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.call_id, call_id);
+        assert_eq!(
+            loaded.conversation_context,
+            Some("Test context".to_string())
+        );
+
+        // Test list_all
+        let all_sessions = backend.list_all().await.unwrap();
+        assert_eq!(all_sessions.len(), 1);
+        assert!(all_sessions.contains_key(&call_id));
+
+        // Test health check
+        let healthy = backend.health_check().await.unwrap();
+        assert!(healthy);
+
+        // Test delete
+        backend.delete(&call_id).await.unwrap();
+        let loaded_after_delete = backend.load(&call_id).await.unwrap();
+        assert!(loaded_after_delete.is_none());
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connection_state_transitions() {
+        use crate::persistence::ConnectionState;
+
+        // Test all connection states
+        let states = vec![
+            ConnectionState::Connected,
+            ConnectionState::Disconnected,
+            ConnectionState::Reconnecting,
+            ConnectionState::Failed,
+            ConnectionState::Terminated,
+        ];
+
+        assert_eq!(states.len(), 5);
+
+        // Test equality
+        assert_eq!(ConnectionState::Connected, ConnectionState::Connected);
+        assert_ne!(ConnectionState::Connected, ConnectionState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn test_restore_sessions_with_no_backend() {
+        // Manager without persistence should not error on restore
+        let manager = AISessionManager::new();
+        let result = manager.restore_sessions(None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_restore_sessions_with_empty_backend() {
+        let temp_dir = std::env::temp_dir().join(format!("forge-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let backend = Arc::new(
+            crate::persistence::DiskBackend::new(temp_dir.clone())
+                .await
+                .unwrap(),
+        ) as Arc<dyn crate::persistence::PersistenceBackend>;
+
+        let manager = AISessionManager::new_with_persistence(backend);
+
+        // Restore should succeed with no sessions
+        let result = manager.restore_sessions(None).await;
+        assert!(result.is_ok());
+        assert_eq!(manager.session_count(), 0);
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_try_reconnect_without_persistence() {
+        let manager = AISessionManager::new();
+        let call_id = CallId::generate();
+
+        // Should error because no persistence backend
+        let result = manager.try_reconnect(&call_id, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_try_reconnect_nonexistent_session() {
+        let temp_dir = std::env::temp_dir().join(format!("forge-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let backend = Arc::new(
+            crate::persistence::DiskBackend::new(temp_dir.clone())
+                .await
+                .unwrap(),
+        ) as Arc<dyn crate::persistence::PersistenceBackend>;
+
+        let manager = AISessionManager::new_with_persistence(backend);
+        let call_id = CallId::generate();
+
+        // Should error because session doesn't exist
+        let result = manager.try_reconnect(&call_id, None).await;
+        assert!(result.is_err());
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_ai_session_manager_clone() {
+        let manager1 = AISessionManager::new();
+        let manager2 = manager1.clone();
+
+        // Both should have same session count
+        assert_eq!(manager1.session_count(), manager2.session_count());
+    }
+
+    #[tokio::test]
+    async fn test_health_check_task_creation() {
+        let temp_dir = std::env::temp_dir().join(format!("forge-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let backend = Arc::new(
+            crate::persistence::DiskBackend::new(temp_dir.clone())
+                .await
+                .unwrap(),
+        ) as Arc<dyn crate::persistence::PersistenceBackend>;
+
+        let manager = Arc::new(AISessionManager::new_with_persistence(backend));
+
+        // Start health check task
+        let health_task = manager.clone().start_health_check_task(std::time::Duration::from_secs(1));
+
+        // Let it run for a bit
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Stop the task
+        health_task.abort();
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_persistence_config_serialization() {
+        use forge_core::{AIPersistenceConfig, PersistenceBackendType};
+
+        let config = AIPersistenceConfig {
+            enabled: true,
+            backend: PersistenceBackendType::Disk,
+            disk_path: "/tmp/test".into(),
+            redis_url: None,
+            redis_key_prefix: "test:".to_string(),
+            redis_ttl_secs: 3600,
+            max_reconnect_attempts: 5,
+            health_check_interval_secs: 10,
+            auto_reconnect: true,
+        };
+
+        // Test serialization
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"enabled\":true"));
+
+        // Test deserialization
+        let deserialized: AIPersistenceConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.enabled, true);
+        assert_eq!(deserialized.max_reconnect_attempts, 5);
+        assert_eq!(deserialized.backend, PersistenceBackendType::Disk);
     }
 }

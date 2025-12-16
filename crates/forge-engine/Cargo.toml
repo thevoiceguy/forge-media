@@ -27,8 +27,16 @@ parking_lot = { workspace = true }
 chrono = { workspace = true }
 bytes = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+
+# Optional: Redis for AI session persistence
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"], optional = true }
 
 [features]
 default = []
 xdp = ["forge-kernel"]
 opus = ["forge-codecs/opus"]
+persistence-redis = ["redis"]

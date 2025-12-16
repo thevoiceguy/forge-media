@@ -1159,6 +1159,7 @@ dependencies = [
  "forge-recorder",
  "metrics 0.21.1",
  "parking_lot",
+ "serde",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

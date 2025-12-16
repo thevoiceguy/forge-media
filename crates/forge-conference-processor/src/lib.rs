@@ -6,10 +6,15 @@ use thiserror::Error;
 
 mod conference;
 mod ai_manager;
+mod dtmf_commands;
 
 pub use conference::{ConferenceBridge, ConferenceRoom, RoomId};
 pub use ai_manager::{
     AudioMode, ConferenceAIConfig, ConferenceAIManager, ConferenceAIState, AI_PARTICIPANT_ID,
+};
+pub use dtmf_commands::{
+    ConferenceDtmfConfig, DtmfCommand, DtmfCommandHandler, HostCommands, ParticipantCommands,
+    ParticipantRole,
 };
 pub use forge_core::AudioFormat;
 pub use forge_mixer::{ParticipantMetadata, ParticipantState};

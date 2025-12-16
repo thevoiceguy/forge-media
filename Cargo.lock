@@ -1287,7 +1287,6 @@ dependencies = [
  "forge-recording",
  "forge-resampler",
  "forge-rtp",
- "forge-sbc",
  "forge-siprec",
  "forge-transcoder",
  "forge-transcription",
@@ -1389,16 +1388,6 @@ dependencies = [
  "sha1",
  "sha2",
  "socket2 0.5.10",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "forge-sbc"
-version = "0.1.0"
-dependencies = [
- "forge-core",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

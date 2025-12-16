@@ -13,7 +13,6 @@ members = [
     "crates/forge-injection",
     "crates/forge-webrtc",
     "crates/forge-sdp",
-    "crates/forge-sbc",
     "crates/forge-siprec",
     "crates/forge-ai-stream",
     "crates/forge-ha",
@@ -128,7 +127,6 @@ forge-dtmf = { path = "crates/forge-dtmf", optional = true }
 forge-transcription = { path = "crates/forge-transcription", optional = true }
 forge-injection = { path = "crates/forge-injection", optional = true }
 forge-webrtc = { path = "crates/forge-webrtc", optional = true }
-forge-sbc = { path = "crates/forge-sbc", optional = true }
 forge-siprec = { path = "crates/forge-siprec", optional = true }
 forge-ai-stream = { path = "crates/forge-ai-stream", optional = true }
 forge-ha = { path = "crates/forge-ha", optional = true }
@@ -161,7 +159,6 @@ full = [
     "transcription",
     "injection",
     "webrtc",
-    "sbc",
     "siprec",
     "ai-stream",
     "ha",
@@ -172,7 +169,6 @@ dtmf = ["dep:forge-dtmf"]
 transcription = ["dep:forge-transcription"]
 injection = ["dep:forge-injection"]
 webrtc = ["dep:forge-webrtc"]
-sbc = ["dep:forge-sbc"]
 siprec = ["dep:forge-siprec"]
 ai-stream = ["dep:forge-ai-stream"]
 ha = ["dep:forge-ha"]

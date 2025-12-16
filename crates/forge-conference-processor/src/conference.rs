@@ -3,15 +3,18 @@
 //! Manages multi-party audio conferences with mixing and recording
 
 use crate::{AudioFormat, ConferenceError, Result};
+use crate::dtmf_commands::{ConferenceDtmfConfig, DtmfCommand, DtmfCommandHandler, ParticipantRole};
 use bytes::Bytes;
 use dashmap::DashMap;
+use forge_core::{CallId, DtmfEventKind, EventBus, ForgeEvent};
 use forge_mixer::AudioMixer;
 use forge_recorder::{AudioRecorder, PlaybackSource};
 use metrics::{counter, gauge, histogram};
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
 
 /// Unique identifier for a conference room
 pub type RoomId = String;
@@ -26,6 +29,14 @@ pub struct ConferenceRoom {
     recorder: Arc<RwLock<Option<AudioRecorder>>>,
     /// Optional AI manager for this room
     ai_manager: Arc<RwLock<Option<crate::ai_manager::ConferenceAIManager>>>,
+    /// Optional DTMF command handler
+    dtmf_handler: Arc<RwLock<Option<DtmfCommandHandler>>>,
+    /// DTMF event processing task
+    dtmf_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// Mapping from call_id to participant_id
+    call_id_map: Arc<DashMap<CallId, String>>,
+    /// Conference is locked (no new participants allowed)
+    is_locked: Arc<RwLock<bool>>,
     /// Audio format
     format: AudioFormat,
     /// Frame size for mixing operations
@@ -50,6 +61,10 @@ impl ConferenceRoom {
             mixer: Arc::new(mixer),
             recorder: Arc::new(RwLock::new(None)),
             ai_manager: Arc::new(RwLock::new(None)),
+            dtmf_handler: Arc::new(RwLock::new(None)),
+            dtmf_task: Arc::new(RwLock::new(None)),
+            call_id_map: Arc::new(DashMap::new()),
+            is_locked: Arc::new(RwLock::new(false)),
             format,
             _frame_size: frame_size,
         })
@@ -378,6 +393,346 @@ impl ConferenceRoom {
     /// Get AI state if attached
     pub fn ai_state(&self) -> Option<crate::ai_manager::ConferenceAIState> {
         self.ai_manager.read().as_ref().map(|ai| ai.state())
+    }
+
+    // ============================================================================
+    // DTMF Command Management
+    // ============================================================================
+
+    /// Enable DTMF command processing for this conference room
+    ///
+    /// # Arguments
+    /// * `self_ref` - Arc reference to self (needed for spawning tasks)
+    /// * `event_bus` - EventBus to subscribe to DTMF events
+    /// * `config` - DTMF command configuration
+    pub async fn enable_dtmf_commands(
+        self: &Arc<Self>,
+        event_bus: Arc<EventBus>,
+        config: ConferenceDtmfConfig,
+    ) -> Result<()> {
+        info!("Enabling DTMF commands for room {}", self.id);
+
+        // Create DTMF command handler
+        let handler = DtmfCommandHandler::new(self.id.clone(), config);
+
+        // Store handler
+        *self.dtmf_handler.write() = Some(handler);
+
+        // Spawn DTMF event processing task
+        let task = self.spawn_dtmf_processing_task(event_bus).await;
+        *self.dtmf_task.write() = Some(task);
+
+        info!("DTMF commands enabled for room {}", self.id);
+        Ok(())
+    }
+
+    /// Disable DTMF command processing
+    pub async fn disable_dtmf_commands(&self) -> Result<()> {
+        info!("Disabling DTMF commands for room {}", self.id);
+
+        // Abort DTMF task
+        if let Some(handle) = self.dtmf_task.write().take() {
+            handle.abort();
+        }
+
+        // Remove handler
+        *self.dtmf_handler.write() = None;
+
+        info!("DTMF commands disabled for room {}", self.id);
+        Ok(())
+    }
+
+    /// Register a participant's call_id for DTMF event routing
+    ///
+    /// Call this when a participant joins with their SIP call_id
+    pub fn register_participant_call_id(&self, participant_id: String, call_id: CallId) {
+        debug!(
+            "Registering call_id {:?} for participant {} in room {}",
+            call_id, participant_id, self.id
+        );
+        self.call_id_map.insert(call_id, participant_id);
+    }
+
+    /// Unregister a participant's call_id
+    pub fn unregister_participant_call_id(&self, call_id: &CallId) {
+        if let Some((_, participant_id)) = self.call_id_map.remove(call_id) {
+            debug!(
+                "Unregistered call_id {:?} for participant {} in room {}",
+                call_id, participant_id, self.id
+            );
+
+            // Clear DTMF sequence state for this participant
+            if let Some(handler) = self.dtmf_handler.read().as_ref() {
+                handler.clear_participant(&participant_id);
+            }
+        }
+    }
+
+    /// Check if conference is locked
+    pub fn is_locked(&self) -> bool {
+        *self.is_locked.read()
+    }
+
+    /// Lock the conference (prevent new participants)
+    pub fn lock(&self) {
+        *self.is_locked.write() = true;
+        info!("Conference {} locked", self.id);
+    }
+
+    /// Unlock the conference
+    pub fn unlock(&self) {
+        *self.is_locked.write() = false;
+        info!("Conference {} unlocked", self.id);
+    }
+
+    /// Spawn task to process DTMF events from EventBus
+    async fn spawn_dtmf_processing_task(
+        self: &Arc<Self>,
+        event_bus: Arc<EventBus>,
+    ) -> JoinHandle<()> {
+        let room = Arc::clone(self);
+        let room_id = self.id.clone();
+
+        tokio::spawn(async move {
+            let mut rx = event_bus.subscribe();
+            debug!("DTMF processing task started for room {}", room_id);
+
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        // Filter for DTMF events
+                        if let ForgeEvent::DtmfDigitDetected {
+                            call_id,
+                            digit,
+                            event_type,
+                            ..
+                        } = event
+                        {
+                            // Only process End events to avoid duplicates
+                            if event_type != DtmfEventKind::End {
+                                continue;
+                            }
+
+                            // Check if this call_id belongs to our room
+                            if let Some(entry) = room.call_id_map.get(&call_id) {
+                                let participant_id = entry.value().clone();
+                                drop(entry); // Release the reference
+
+                                debug!(
+                                    "DTMF digit '{}' from participant {} in room {}",
+                                    digit, participant_id, room_id
+                                );
+
+                                // Process the digit
+                                room.process_dtmf_digit(&participant_id, digit).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Error receiving event in room {}: {}", room_id, e);
+                        break;
+                    }
+                }
+            }
+
+            debug!("DTMF processing task ended for room {}", room_id);
+        })
+    }
+
+    /// Process a DTMF digit from a participant
+    async fn process_dtmf_digit(&self, participant_id: &str, digit: char) {
+        // Process digit through handler (lock held briefly)
+        let command_result = {
+            let guard = self.dtmf_handler.read();
+            match guard.as_ref() {
+                Some(handler) => handler.process_digit(participant_id, digit),
+                None => return, // DTMF not enabled
+            }
+        }; // Lock released here
+
+        if let Some((command, role)) = command_result {
+            info!(
+                "Executing DTMF command {:?} from {} (role: {:?}) in room {}",
+                command, participant_id, role, self.id
+            );
+
+            // Execute the command
+            if let Err(e) = self.execute_dtmf_command(participant_id, command, role).await {
+                warn!(
+                    "Failed to execute DTMF command for {} in room {}: {}",
+                    participant_id, self.id, e
+                );
+            }
+        }
+    }
+
+    /// Execute a DTMF command
+    async fn execute_dtmf_command(
+        &self,
+        participant_id: &str,
+        command: DtmfCommand,
+        role: ParticipantRole,
+    ) -> Result<()> {
+        use forge_mixer::ParticipantState;
+
+        match command {
+            // Participant commands
+            DtmfCommand::MuteToggle => {
+                // Toggle mute state
+                let metadata = self.mixer.get_participant_metadata(participant_id)?;
+                let new_state = match metadata.state {
+                    ParticipantState::Active => ParticipantState::Muted,
+                    ParticipantState::Muted => ParticipantState::Active,
+                    other => other, // Keep OnHold as is
+                };
+                self.mixer.set_participant_state(participant_id, new_state)?;
+                info!(
+                    "Toggled mute for {} in room {}: {:?}",
+                    participant_id, self.id, new_state
+                );
+            }
+
+            DtmfCommand::VolumeUp => {
+                // TODO: Add set_participant_gain() method to AudioMixer
+                // For now, just log the request
+                info!(
+                    "Volume up requested for {} in room {} (not yet implemented)",
+                    participant_id, self.id
+                );
+            }
+
+            DtmfCommand::VolumeDown => {
+                // TODO: Add set_participant_gain() method to AudioMixer
+                // For now, just log the request
+                info!(
+                    "Volume down requested for {} in room {} (not yet implemented)",
+                    participant_id, self.id
+                );
+            }
+
+            DtmfCommand::Info => {
+                // Log conference info (in future, could play audio announcement)
+                let participant_count = self.mixer.participant_count();
+                info!(
+                    "Conference info requested by {} in room {}: {} participants",
+                    participant_id, self.id, participant_count
+                );
+                // TODO: Play audio announcement with conference info
+            }
+
+            DtmfCommand::Leave => {
+                // Participant wants to leave
+                info!("Participant {} leaving room {}", participant_id, self.id);
+                self.remove_participant(participant_id)?;
+            }
+
+            // Host commands (require host role)
+            DtmfCommand::MuteAll => {
+                if role != ParticipantRole::Host {
+                    warn!("Non-host {} tried to use MuteAll in room {}", participant_id, self.id);
+                    return Ok(());
+                }
+
+                // Mute all participants except the host
+                let participants = self.participants();
+                for pid in participants {
+                    if pid != participant_id {
+                        self.mixer.set_participant_state(&pid, ParticipantState::Muted)?;
+                    }
+                }
+                info!("Host {} muted all participants in room {}", participant_id, self.id);
+            }
+
+            DtmfCommand::UnmuteAll => {
+                if role != ParticipantRole::Host {
+                    warn!("Non-host {} tried to use UnmuteAll in room {}", participant_id, self.id);
+                    return Ok(());
+                }
+
+                // Unmute all participants
+                let participants = self.participants();
+                for pid in participants {
+                    let metadata = self.mixer.get_participant_metadata(&pid)?;
+                    if metadata.state == ParticipantState::Muted {
+                        self.mixer.set_participant_state(&pid, ParticipantState::Active)?;
+                    }
+                }
+                info!("Host {} unmuted all participants in room {}", participant_id, self.id);
+            }
+
+            DtmfCommand::LockConference => {
+                if role != ParticipantRole::Host {
+                    warn!("Non-host {} tried to lock room {}", participant_id, self.id);
+                    return Ok(());
+                }
+
+                self.lock();
+            }
+
+            DtmfCommand::UnlockConference => {
+                if role != ParticipantRole::Host {
+                    warn!("Non-host {} tried to unlock room {}", participant_id, self.id);
+                    return Ok(());
+                }
+
+                self.unlock();
+            }
+
+            DtmfCommand::KickParticipant(participant_num) => {
+                if role != ParticipantRole::Host {
+                    warn!("Non-host {} tried to kick participant in room {}", participant_id, self.id);
+                    return Ok(());
+                }
+
+                // Get participants list and kick by index
+                let participants = self.participants();
+                if participant_num > 0 && participant_num <= participants.len() {
+                    let target = &participants[participant_num - 1]; // 1-indexed
+                    info!(
+                        "Host {} kicking participant {} from room {}",
+                        participant_id, target, self.id
+                    );
+                    self.remove_participant(target)?;
+                } else {
+                    warn!(
+                        "Invalid participant number {} in room {} (total: {})",
+                        participant_num,
+                        self.id,
+                        participants.len()
+                    );
+                }
+            }
+
+            DtmfCommand::EndConference => {
+                if role != ParticipantRole::Host {
+                    warn!("Non-host {} tried to end conference {}", participant_id, self.id);
+                    return Ok(());
+                }
+
+                info!("Host {} ending conference {}", participant_id, self.id);
+                // Remove all participants
+                let participants = self.participants();
+                for pid in participants {
+                    self.remove_participant(&pid)?;
+                }
+            }
+
+            DtmfCommand::InvalidCommand => {
+                debug!("Invalid DTMF command from {} in room {}", participant_id, self.id);
+                // TODO: Play error tone
+            }
+
+            DtmfCommand::EnterHostPin => {
+                debug!("Host PIN accepted for {} in room {}", participant_id, self.id);
+                // TODO: Play success tone
+            }
+
+            DtmfCommand::Incomplete => {
+                // Waiting for more digits, do nothing
+            }
+        }
+
+        Ok(())
     }
 }
 

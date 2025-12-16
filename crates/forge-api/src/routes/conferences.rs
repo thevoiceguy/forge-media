@@ -26,6 +26,9 @@ pub struct CreateRoomRequest {
 pub struct AddParticipantRequest {
     #[validate(length(min = 1, max = 256))]
     pub participant_id: String,
+    /// Whether this participant should join as a host/moderator
+    #[serde(default)]
+    pub is_host: bool,
 }
 
 /// Request to start recording
@@ -61,6 +64,68 @@ pub struct UpdateParticipantStateRequest {
     /// New state: "active", "muted", or "on_hold"
     #[validate(length(min = 1, max = 32))]
     pub state: String,
+}
+
+/// Request to configure a room
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConfigureRoomRequest {
+    /// Room-specific guest PIN (overrides global)
+    pub guest_pin: Option<String>,
+    /// Room-specific host PIN (overrides global)
+    pub host_pin: Option<String>,
+    /// Require guest PIN for this room (overrides global)
+    pub require_guest_pin: Option<bool>,
+    /// Maximum PIN attempts for this room (overrides global)
+    pub max_pin_attempts: Option<u32>,
+    /// Lock this room by default (overrides global)
+    pub default_locked: Option<bool>,
+    /// Enable DTMF commands for this room (overrides global)
+    pub enable_dtmf: Option<bool>,
+    /// Maximum channels for this room (overrides global)
+    pub max_channels: Option<usize>,
+    /// Wait for moderator for this room (overrides global)
+    pub wait_for_moderator: Option<bool>,
+    /// Minimum users for this room (overrides global)
+    pub min_users: Option<usize>,
+    /// Minimum recording participants for this room (overrides global)
+    pub min_recording_participants: Option<usize>,
+}
+
+/// Response with room configuration
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RoomConfigResponse {
+    pub room_id: String,
+    pub require_guest_pin: bool,
+    pub has_guest_pin: bool,
+    pub has_host_pin: bool,
+    pub max_pin_attempts: u32,
+    pub default_locked: bool,
+    pub enable_dtmf: bool,
+    pub max_channels: usize,
+    pub wait_for_moderator: bool,
+    pub min_users: usize,
+    pub min_recording_participants: usize,
+}
+
+/// Response with participant details including host status
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ParticipantDetailResponse {
+    pub id: String,
+    pub is_host: bool,
+}
+
+/// List of participants with details
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ParticipantDetailListResponse {
+    pub participants: Vec<ParticipantDetailResponse>,
+    pub count: usize,
+}
+
+/// Request to promote a participant to host
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PromoteParticipantRequest {
+    /// PIN for host authentication (required)
+    pub host_pin: String,
 }
 
 /// Participant metadata response
@@ -127,8 +192,16 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(get_room).delete(delete_room),
         )
         .route(
+            "/v1/conferences/:room_id/configure",
+            post(configure_room),
+        )
+        .route(
+            "/v1/conferences/:room_id/config",
+            get(get_room_config),
+        )
+        .route(
             "/v1/conferences/:room_id/participants",
-            post(add_participant),
+            post(add_participant).get(list_participants_with_status),
         )
         .route(
             "/v1/conferences/:room_id/participants/metadata",
@@ -145,6 +218,14 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/conferences/:room_id/participants/:participant_id/state",
             axum::routing::put(update_participant_state),
+        )
+        .route(
+            "/v1/conferences/:room_id/participants/:participant_id/promote",
+            post(promote_participant),
+        )
+        .route(
+            "/v1/conferences/:room_id/waiting",
+            get(list_waiting_participants),
         )
         .route(
             "/v1/conferences/:room_id/recording",
@@ -294,7 +375,7 @@ async fn add_participant(
     // Add participant
     state
         .conference_bridge
-        .add_participant_to_room(&room_id, &request.participant_id)
+        .add_participant_to_room(&room_id, &request.participant_id, request.is_host)
         .map_err(|e| ApiError::Internal(format!("Failed to add participant: {}", e)))?;
 
     // Publish ParticipantJoined event
@@ -966,6 +1047,215 @@ async fn update_participant_state(
     state.event_bus.publish(event).await;
 
     Ok(no_content())
+}
+
+/// Configure a room with room-specific settings
+///
+/// POST /v1/conferences/:room_id/configure
+#[tracing::instrument(skip(state, request), fields(room_id = %room_id))]
+async fn configure_room(
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<String>,
+    Json(request): Json<ConfigureRoomRequest>,
+) -> ApiResult<axum::response::Response> {
+    tracing::info!("API request to configure room {}", room_id);
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Build RoomConfig from request
+    let room_config = forge_conference_processor::RoomConfig {
+        guest_pin: request.guest_pin,
+        host_pin: request.host_pin,
+        require_guest_pin: request.require_guest_pin,
+        max_pin_attempts: request.max_pin_attempts,
+        default_locked: request.default_locked,
+        enable_dtmf: request.enable_dtmf,
+        dtmf_commands: None, // DTMF command bindings not exposed via API yet
+        max_channels: request.max_channels,
+        wait_for_moderator: request.wait_for_moderator,
+        min_users: request.min_users,
+        min_recording_participants: request.min_recording_participants,
+        // Audio feedback sounds not exposed via API (use config file)
+        join_sound: None,
+        exit_sound: None,
+        alone_sound: None,
+        invalid_pin_sound: None,
+        locked_sound: None,
+        unlocked_sound: None,
+        kicked_sound: None,
+        max_members_sound: None,
+        moh_sound: None,
+        pin_prompt_sound: None,
+        recording_started_sound: None,
+        recording_stopped_sound: None,
+    };
+
+    // Load global config (this should come from AppState in a real implementation)
+    // For now, use default global config
+    let global_config = forge_conference_processor::ConferenceConfig::default();
+
+    // Configure room
+    room.configure(room_config, &global_config)
+        .map_err(|e| ApiError::Internal(format!("Failed to configure room: {}", e)))?;
+
+    Ok(no_content())
+}
+
+/// Get room configuration
+///
+/// GET /v1/conferences/:room_id/config
+#[tracing::instrument(skip(state), fields(room_id = %room_id))]
+async fn get_room_config(
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<String>,
+) -> ApiResult<Json<ApiSuccess<RoomConfigResponse>>> {
+    tracing::info!("API request to get config for room {}", room_id);
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Get effective config
+    let config = room
+        .get_effective_config()
+        .ok_or_else(|| ApiError::Internal("Room not configured".to_string()))?;
+
+    let response = RoomConfigResponse {
+        room_id: room_id.clone(),
+        require_guest_pin: config.security.require_guest_pin,
+        has_guest_pin: config.security.guest_pin.is_some(),
+        has_host_pin: config.security.host_pin.is_some(),
+        max_pin_attempts: config.security.max_pin_attempts,
+        default_locked: config.security.default_locked,
+        enable_dtmf: config.dtmf_enabled,
+        max_channels: config.max_channels,
+        wait_for_moderator: config.wait_for_moderator,
+        min_users: config.min_users,
+        min_recording_participants: config.min_recording_participants,
+    };
+
+    Ok(Json(success(response)))
+}
+
+/// List participants with host status
+///
+/// GET /v1/conferences/:room_id/participants
+#[tracing::instrument(skip(state), fields(room_id = %room_id))]
+async fn list_participants_with_status(
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<String>,
+) -> ApiResult<Json<ApiSuccess<ParticipantDetailListResponse>>> {
+    tracing::info!("API request to list participants with status for room {}", room_id);
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Get all participants
+    let participant_ids = room.participants();
+    let mut participants = Vec::new();
+
+    for participant_id in participant_ids {
+        participants.push(ParticipantDetailResponse {
+            id: participant_id.clone(),
+            is_host: room.is_host(&participant_id),
+        });
+    }
+
+    let count = participants.len();
+    let response = ParticipantDetailListResponse {
+        participants,
+        count,
+    };
+
+    Ok(Json(success(response)))
+}
+
+/// List waiting participants
+///
+/// GET /v1/conferences/:room_id/waiting
+#[tracing::instrument(skip(state), fields(room_id = %room_id))]
+async fn list_waiting_participants(
+    State(state): State<Arc<AppState>>,
+    Path(room_id): Path<String>,
+) -> ApiResult<Json<ApiSuccess<ParticipantDetailListResponse>>> {
+    tracing::info!("API request to list waiting participants for room {}", room_id);
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Get waiting participants
+    let waiting_ids = room.waiting_participants();
+    let participants: Vec<ParticipantDetailResponse> = waiting_ids
+        .into_iter()
+        .map(|id| ParticipantDetailResponse {
+            id,
+            is_host: false, // Waiting participants are not hosts
+        })
+        .collect();
+
+    let count = participants.len();
+    let response = ParticipantDetailListResponse {
+        participants,
+        count,
+    };
+
+    Ok(Json(success(response)))
+}
+
+/// Promote a participant to host
+///
+/// POST /v1/conferences/:room_id/participants/:participant_id/promote
+#[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = %participant_id))]
+async fn promote_participant(
+    State(state): State<Arc<AppState>>,
+    Path((room_id, participant_id)): Path<(String, String)>,
+    Json(request): Json<PromoteParticipantRequest>,
+) -> ApiResult<axum::response::Response> {
+    tracing::info!(
+        "API request to promote participant {} to host in room {}",
+        participant_id,
+        room_id
+    );
+
+    // Get room
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
+
+    // Authenticate with host PIN
+    let auth_result = room.authenticate_participant(&participant_id, &request.host_pin);
+
+    match auth_result {
+        forge_conference_processor::PinAuthResult::HostAuthenticated => {
+            // Promote participant to host
+            room.promote_to_host(&participant_id)
+                .map_err(|e| ApiError::Internal(format!("Failed to promote participant: {}", e)))?;
+
+            tracing::info!("Promoted participant {} to host in room {}", participant_id, room_id);
+            Ok(no_content())
+        }
+        _ => {
+            tracing::warn!(
+                "Failed to promote participant {} in room {}: invalid host PIN",
+                participant_id,
+                room_id
+            );
+            Err(ApiError::Unauthorized)
+        }
+    }
 }
 
 #[cfg(test)]

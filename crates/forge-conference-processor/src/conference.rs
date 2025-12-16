@@ -241,6 +241,40 @@ impl ConferenceRoom {
         self.waiting_participants.len()
     }
 
+    /// Get the list of waiting participant IDs
+    pub fn waiting_participants(&self) -> Vec<String> {
+        self.waiting_participants
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Get the effective room configuration
+    pub fn get_effective_config(&self) -> Option<crate::room_config::EffectiveRoomConfig> {
+        self.room_config.read().clone()
+    }
+
+    /// Promote a participant to host
+    pub fn promote_to_host(&self, participant_id: &str) -> Result<()> {
+        // Check if participant exists in the room
+        if !self.participants().contains(&participant_id.to_string()) {
+            return Err(ConferenceError::Internal(format!(
+                "Participant {} not found in room {}",
+                participant_id, self.id
+            )));
+        }
+
+        // Add to hosts
+        self.hosts.insert(participant_id.to_string(), ());
+
+        info!(
+            "Promoted participant {} to host in room {}",
+            participant_id, self.id
+        );
+
+        Ok(())
+    }
+
     /// Check if the minimum user requirement is met
     pub fn meets_min_users_requirement(&self) -> bool {
         let config = self.room_config.read();

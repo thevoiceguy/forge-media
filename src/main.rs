@@ -32,7 +32,8 @@ async fn main() -> Result<()> {
     info!("✓ Forge engine initialized");
 
     // Start API server
-    let api_config = ApiServerConfig {
+    #[cfg_attr(not(feature = "ha"), allow(unused_mut))]
+    let mut api_config = ApiServerConfig {
         bind_addr: config.api.http_bind.parse()?,
         enable_cors: config.api.enable_cors,
         port_range_min: config.engine.port_range.start,
@@ -41,6 +42,7 @@ async fn main() -> Result<()> {
         auth_tokens: config.api.auth_tokens.clone(),
         rate_limit_requests_per_window: config.api.rate_limit_requests_per_window,
         rate_limit_window_secs: config.api.rate_limit_window_secs,
+        trusted_proxies: Vec::new(),  // TODO: Add to ApiConfig
         enable_https: config.api.enable_https,
         https_bind: config
             .api
@@ -60,7 +62,14 @@ async fn main() -> Result<()> {
         xdp_interface: config.engine.xdp.interface.clone(),
         xdp_mode: format!("{:?}", config.engine.xdp.mode).to_lowercase(),
         ai_allowed_endpoints: config.api.ai_allowed_endpoints.clone(),
+        ..Default::default()
     };
+
+    // Set HA config if feature is enabled
+    #[cfg(feature = "ha")]
+    {
+        api_config.ha_config = config.engine.ha.clone();
+    }
 
     let api_server = ApiServer::new(api_config).await;
 

@@ -44,6 +44,9 @@ pub struct ApiServerConfig {
     pub xdp_interface: String,
     pub xdp_mode: String,
     pub ai_allowed_endpoints: Vec<String>,
+    /// High availability configuration (optional, requires 'ha' feature)
+    #[cfg(feature = "ha")]
+    pub ha_config: Option<forge_core::config::HAConfig>,
 }
 
 impl Default for ApiServerConfig {
@@ -72,6 +75,8 @@ impl Default for ApiServerConfig {
             xdp_interface: "lo".to_string(),
             xdp_mode: "generic".to_string(),
             ai_allowed_endpoints: forge_core::config::default_ai_allowed_endpoints(),
+            #[cfg(feature = "ha")]
+            ha_config: None,  // HA disabled by default
         }
     }
 }
@@ -84,6 +89,8 @@ pub struct ApiServer {
     rate_limiter: middleware::RateLimiter,
     #[allow(dead_code)]
     siprec_manager: Option<forge_siprec::SiprecManager>,
+    #[cfg(feature = "ha")]
+    ha_manager: Option<Arc<crate::ha::HAManager>>,
 }
 
 impl ApiServer {
@@ -204,6 +211,36 @@ impl ApiServer {
             info!("CORS enabled with empty allowlist; no origins will be permitted");
         }
 
+        // Initialize HA manager if enabled and compiled with 'ha' feature
+        #[cfg(feature = "ha")]
+        let ha_manager = if let Some(ref ha_cfg) = config.ha_config {
+            if ha_cfg.enabled {
+                info!("HA enabled, initializing HAManager...");
+                match crate::ha::HAManager::new(ha_cfg.clone(), Some(session_manager.clone())).await {
+                    Ok(mgr) => {
+                        // Start HA background tasks
+                        if let Err(e) = mgr.clone().start().await {
+                            error!("Failed to start HA background tasks: {}", e);
+                            None
+                        } else {
+                            info!("✓ HAManager initialized and started");
+                            Some(mgr)
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to initialize HAManager: {}", e);
+                        error!("Server will continue without HA support");
+                        None
+                    }
+                }
+            } else {
+                info!("HA configuration present but disabled");
+                None
+            }
+        } else {
+            None
+        };
+
         let state = Arc::new(AppState::new(
             session_manager,
             metrics_handle,
@@ -212,6 +249,8 @@ impl ApiServer {
             config.prompts_base_dir.clone(),
             config.ai_allowed_endpoints.clone(),
             event_bus.clone(),
+            #[cfg(feature = "ha")]
+            ha_manager.clone(),
         ));
         let auth_config = middleware::auth::AuthConfig::new(config.auth_tokens.clone());
         let rate_limiter = middleware::RateLimiter::new(
@@ -226,6 +265,8 @@ impl ApiServer {
             auth_config,
             rate_limiter,
             siprec_manager,
+            #[cfg(feature = "ha")]
+            ha_manager,
         }
     }
 
@@ -525,6 +566,17 @@ impl ApiServer {
 
         // Stop session timeout monitoring on shutdown
         self.state.session_manager.stop_monitoring().await;
+
+        // Stop HA manager if running
+        #[cfg(feature = "ha")]
+        if let Some(ref ha) = self.ha_manager {
+            info!("Stopping HA manager...");
+            if let Err(e) = ha.stop().await {
+                error!("Error stopping HA manager: {}", e);
+            } else {
+                info!("✓ HA manager stopped");
+            }
+        }
 
         result
     }

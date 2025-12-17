@@ -18,6 +18,7 @@ forge-siprec = { path = "../forge-siprec" }
 forge-webrtc = { path = "../forge-webrtc" }
 forge-ice = { path = "../forge-ice" }
 forge-ai-stream = { path = "../forge-ai-stream" }
+forge-ha = { path = "../forge-ha", optional = true }
 
 # Async runtime
 tokio = { workspace = true }
@@ -50,7 +51,7 @@ url = "2.5"
 
 [features]
 xdp = ["forge-engine/xdp"]
-ha = ["forge-engine/ha"]
+ha = ["dep:forge-ha", "forge-engine/ha"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt"] }

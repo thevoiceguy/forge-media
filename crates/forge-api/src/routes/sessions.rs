@@ -112,6 +112,8 @@ impl AppState {
         prompts_base_dir: std::path::PathBuf,
         ai_allowed_endpoints: Vec<String>,
         core_event_bus: Arc<forge_core::EventBus>,
+        #[cfg(feature = "ha")]
+        ha_manager: Option<Arc<crate::ha::HAManager>>,
     ) -> Self {
         // Create default storage manager
         let storage_manager =
@@ -143,7 +145,7 @@ impl AppState {
             webrtc_manager,
             ai_session_manager,
             #[cfg(feature = "ha")]
-            ha_manager: None, // TODO: Initialize when HAManager is fully integrated
+            ha_manager,
         }
     }
 }

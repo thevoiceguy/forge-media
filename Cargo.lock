@@ -1136,6 +1136,7 @@ dependencies = [
  "forge-conference-processor",
  "forge-core",
  "forge-engine",
+ "forge-ha",
  "forge-ice",
  "forge-media-processor",
  "forge-rtp",

@@ -175,7 +175,7 @@ injection = ["dep:forge-injection"]
 webrtc = ["dep:forge-webrtc"]
 siprec = ["dep:forge-siprec"]
 ai-stream = ["dep:forge-ai-stream"]
-ha = ["dep:forge-ha"]
+ha = ["dep:forge-ha", "forge-api/ha", "forge-engine/ha"]
 xdp = ["forge-engine/xdp", "forge-api/xdp"]
 
 [profile.dev]

@@ -6,6 +6,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
+[![Security](https://img.shields.io/badge/security-hardened-green.svg)](SECURITY_HARDENING.md)
 
 *Part of the [Ferrous Communications Platform (FCP)](https://github.com/ferrous-comms)*
 
@@ -24,22 +25,23 @@ Forge is a carrier-grade media server built in Rust that handles all media proce
 ### Key Features
 
 - **🎵 Audio Processing**: G.711, G.722, G.729, Opus codec support with transcoding
-- **📞 RTP/SRTP**: Full RFC-compliant RTP handling with SRTP encryption
+- **📞 RTP/SRTP**: Full RFC-compliant RTP handling with SRTP encryption (AES-128-GCM, AES-256-GCM)
 - **🌐 WebRTC**: ICE, DTLS, SRTP for browser-based communications
 - **👥 Conferencing**: Audio mixing, VAD, AGC, dominant speaker detection, host controls, capacity management
 - **🎙️ Conference Features**: PIN authentication, wait-for-moderator, audio feedback, per-room configuration
 - **📼 Recording**: Multi-format recording with multiple storage backends
 - **🤖 AI Integration**: Real-time voice AI with OpenAI Realtime API, bidirectional audio, DTMF support
-- **🔐 Enterprise Grade**: SIPREC, CAC, DoS protection, high availability
+- **🔐 Security**: Rate limiting, SSRF protection, path traversal prevention, randomized port allocation, secure defaults
+- **🛡️ Enterprise Grade**: SIPREC, CAC, DoS protection, production-ready security hardening
 - **⚡ Performance**: Async Rust, zero-copy parsing, optional kernel offload
 
 ---
 
 ## 🏗️ Project Status
 
-**Current Phase**: Phase 0 - Foundation ✅
+**Current Phase**: Production Ready 🚀
 
-The project structure is established and core types are defined. See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for detailed roadmap.
+Core functionality complete and security-hardened. Ready for production deployment with enterprise-grade security features.
 
 ### What's Working
 - ✅ Project structure and workspace
@@ -55,11 +57,17 @@ The project structure is established and core types are defined. See [DEVELOPMEN
 - ✅ AI integration (OpenAI Realtime API, multiple providers)
 - ✅ DTMF detection and handling
 - ✅ Prometheus metrics and monitoring
+- ✅ **Security Hardening**: Rate limiting, SSRF protection, path validation, secure defaults
+
+### What's Completed
+See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md) for the complete roadmap. Major milestones achieved:
+- **Phase 0-4**: ✅ Foundation through WebRTC & AI Integration (~95% complete)
+- **Security Hardening**: ✅ All 5 security issues (SEC-001 through SEC-005) resolved
 
 ### Coming Soon
 - 🔜 Advanced transcoding pipelines
-- 🔜 SIPREC recording
 - 🔜 High availability features
+- 🔜 Enhanced kernel offload (eBPF/XDP)
 
 ---
 
@@ -102,7 +110,7 @@ cargo build --release
 ### Run as Binary
 
 ```bash
-# Run with default configuration
+# Run with default configuration (localhost-only, safe for development)
 cargo run
 
 # Run with custom config
@@ -144,16 +152,101 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+---
+
+## 🔐 Security & Configuration
+
+Forge is designed with **security-first defaults** and comprehensive hardening for production deployments.
+
+### Security Features
+
+✅ **Secure by Default**
+- Localhost-only binding by default (`127.0.0.1:8080`)
+- CORS disabled by default
+- Startup guard prevents insecure configurations
+- Empty auth token list requires explicit configuration
+
+✅ **Rate Limiting**
+- Per-IP rate limiting with configurable windows
+- X-Forwarded-For validation with trusted proxy list
+- Protection against IP spoofing attacks
+
+✅ **SSRF Protection**
+- AI endpoint allowlist with validation
+- Private IP and loopback address blocking
+- HTTPS/WSS enforcement for external connections
+
+✅ **Path Traversal Prevention**
+- Jail-root validation for recording directories
+- Symlink rejection and canonicalization
+- PID-scoped writeability testing
+
+✅ **Port Randomization**
+- Double-randomized RTP port allocation
+- Prevents predictable port scanning
+- Reduces session hijacking risk
+
+✅ **Secret Management**
+- SecureString type with automatic redaction
+- API keys protected in logs, metrics, and JSON output
+- Safe deserialization with placeholder rejection
+
 ### Configuration
+
+**Development (Default):**
+```toml
+[api]
+http_bind = "127.0.0.1:8080"  # Localhost only
+enable_cors = false
+auth_tokens = []  # No auth required for localhost
+```
+
+**Production Deployment:**
+```toml
+[api]
+# Bind to public interface (requires auth + HTTPS)
+http_bind = "0.0.0.0:8080"
+enable_https = true
+https_bind = "0.0.0.0:8443"
+tls_cert = "/etc/forge/certs/fullchain.pem"
+tls_key = "/etc/forge/certs/privkey.pem"
+auth_tokens = ["your-secure-token-here"]
+
+# CORS (optional, only if needed)
+enable_cors = true
+cors_origins = ["https://app.example.com"]
+
+# Rate limiting
+rate_limit_requests_per_window = 100
+rate_limit_window_secs = 60
+
+# Trusted proxies (for X-Forwarded-For)
+trusted_proxies = ["10.0.1.100", "10.0.1.101"]
+
+[recording]
+base_dir = "/var/lib/forge/recordings"
+root_jail = "/var/lib/forge"  # All recordings must be within this directory
+
+[ai]
+allowed_endpoints = [
+    "https://api.openai.com",
+    "https://api.anthropic.com"
+]
+```
 
 Copy the example configuration and customize:
 
 ```bash
-cp config/forge.toml /etc/forge/config.toml
+cp config/forge.toml.example /etc/forge/config.toml
 # Edit /etc/forge/config.toml
 ```
 
-See [config/forge.toml](config/forge.toml) for all configuration options.
+See [config/forge.toml.example](config/forge.toml.example) for complete production deployment template with all security options.
+
+**📖 Security Documentation:**
+- [SECURITY_HARDENING.md](SECURITY_HARDENING.md) - Complete security guide with all 5 resolved issues
+- [config/forge.toml](config/forge.toml) - Example configuration with security comments
+- [Deployment Hardening](SECURITY_HARDENING.md#deployment-hardening) - System-level security
 
 ---
 
@@ -247,7 +340,7 @@ Forge follows a modular, layered architecture:
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    Control Plane                         │
-│  HTTP REST API │ WebSocket Events │ ng Protocol         │
+│  HTTP REST API │ WebSocket Events │ Metrics             │
 └──────────────────────┬──────────────────────────────────┘
                        │
 ┌──────────────────────┴──────────────────────────────────┐
@@ -258,7 +351,7 @@ Forge follows a modular, layered architecture:
                        │
 ┌──────────────────────┴──────────────────────────────────┐
 │              Kernel Offload (Optional)                   │
-│  xt_RTPENGINE │ eBPF/XDP │ Userspace Fallback          │
+│  eBPF/XDP │ Userspace Fallback                          │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -280,12 +373,13 @@ forge-media/
 ├── forge-dtmf                  # DTMF detection and generation
 ├── forge-transcription         # Real-time transcription
 ├── forge-injection             # Audio injection and TTS
-├── forge-webrtc                # WebRTC support
+├── forge-webrtc                # WebRTC support (ICE, DTLS)
 ├── forge-sdp                   # SDP parsing and generation
 ├── forge-siprec                # SIPREC (RFC 7865/7866)
 ├── forge-ai-stream             # AI streaming integration
 ├── forge-ha                    # High availability
-└── forge-api                   # HTTP/WebSocket API
+├── forge-kernel                # Kernel offload (eBPF/XDP)
+└── forge-api                   # HTTP/WebSocket API with security
 ```
 
 See [FORGE ARCHITECTURE.md](FORGE%20ARCHITECTURE.md) for detailed design.
@@ -303,7 +397,7 @@ Forge provides seamless integration with real-time AI services like OpenAI's Rea
 curl -X POST http://localhost:8080/v1/sessions/call-001/ai \
   -H "Content-Type: application/json" \
   -d '{
-    "provider": "openai",
+    "api_key": "sk-your-key-here",
     "model": "gpt-4o-realtime-preview-2024-12-17",
     "voice": "alloy",
     "instructions": "You are a helpful customer service agent."
@@ -317,6 +411,7 @@ curl -X POST http://localhost:8080/v1/sessions/call-001/ai \
 - **Function Calling**: Let AI trigger actions (transfers, lookups, etc.)
 - **Recording**: SIPREC support with AI metadata for compliance
 - **Multi-Codec**: G.711, Opus with automatic sample rate conversion
+- **Secure**: API keys redacted in all logs/metrics, SSRF protection with endpoint allowlist
 
 See [AI Integration Guide](docs/AI_INTEGRATION.md) for complete documentation.
 
@@ -405,7 +500,7 @@ POST /v1/recordings
 # Attach AI to session
 POST /v1/sessions/:call_id/ai
 {
-  "provider": "openai",
+  "api_key": "sk-your-key",
   "model": "gpt-4o-realtime-preview-2024-12-17",
   "voice": "alloy",
   "instructions": "You are a helpful assistant."
@@ -419,6 +514,15 @@ DELETE /v1/sessions/:call_id/ai
 
 # Send function response
 POST /v1/sessions/:call_id/ai/function-response
+```
+
+#### Metrics
+```bash
+# JSON metrics
+GET /v1/metrics
+
+# Prometheus metrics
+GET /metrics
 ```
 
 See [API Documentation](docs/API.md) for complete reference.
@@ -439,6 +543,10 @@ cargo test --test '*'
 
 # Run benchmarks
 cargo bench
+
+# Security tests
+cargo test --package forge-api validate
+cargo test --package forge-rtp port_pool
 ```
 
 ---
@@ -451,6 +559,23 @@ Forge is designed for carrier-grade performance:
 - **<1ms** packet forwarding latency (p99)
 - **<20ms** conference mixing latency
 - **100,000+** packets per second
+- **<10µs** RTP forwarding with kernel offload (XDP)
+
+### Benchmarks
+
+```bash
+# RTP packet processing
+cargo bench --package forge-rtp
+
+# SRTP encryption/decryption
+cargo bench --package forge-rtp srtp
+
+# Codec transcoding
+cargo bench --package forge-codecs
+
+# Conference mixing
+cargo bench --package forge-mixer
+```
 
 See [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md#performance-targets) for detailed targets.
 
@@ -480,14 +605,21 @@ cargo clippy -- -D warnings
 
 ## 📄 Documentation
 
+### Architecture & Design
 - [Development Plan](DEVELOPMENT_PLAN.md) - Phased roadmap and strategy
 - [Architecture](FORGE%20ARCHITECTURE.md) - Detailed technical design
+- [Feature Specifications](FORGE%20NEW%20FEATURES.MD) - New feature designs
+- [Enhancement Recommendations](FORGE%20ENHANCEMENTS.md) - Future improvements
+
+### Integration Guides
 - [G.729 Codec Integration Guide](docs/CODEC_G729_GUIDE.md) - G.729 installation and usage
 - [AI Integration Guide](docs/AI_INTEGRATION.md) - OpenAI Realtime API integration
 - [DTMF Integration](docs/DTMF_INTEGRATION.md) - DTMF detection and handling
-- [Feature Specifications](FORGE%20NEW%20FEATURES.MD) - New feature designs
-- [Enhancement Recommendations](FORGE%20ENHANCEMENTS.md) - Future improvements
 - [API Reference](docs/API.md) - HTTP API documentation
+
+### Security & Operations
+- [Security Hardening Guide](SECURITY_HARDENING.md) - Complete security documentation
+- [Configuration Guide](config/forge.toml.example) - Production deployment template
 - [Claude Guide](CLAUDE.MD) - Developer quick reference
 
 ---
@@ -518,6 +650,7 @@ Forge is built with these excellent Rust crates:
 - [Axum](https://github.com/tokio-rs/axum) - Web framework
 - [Opus](https://opus-codec.org/) - Audio codec
 - [RustCrypto](https://github.com/RustCrypto) - Cryptographic algorithms
+- [bcg729](https://github.com/BelledonneCommunications/bcg729) - G.729 codec implementation
 
 ---
 

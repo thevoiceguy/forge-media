@@ -16,7 +16,7 @@
 
 ## 🔨 What is Forge?
 
-Forge is a carrier-grade media server built in Rust that handles all media processing for real-time communications. It works alongside the [Siphon](https://github.com/ferrous-comms/siphon) SIP stack to provide comprehensive VoIP capabilities.
+Forge is a carrier-grade media server built in Rust that handles all media processing for real-time communications. It works alongside the [Siphon](https://github.com/thevoiceguy/siphon-rs) SIP stack to provide comprehensive VoIP capabilities.
 
 **Forge is both:**
 - **📚 A Library**: Use in your Rust projects (FCP, custom applications)

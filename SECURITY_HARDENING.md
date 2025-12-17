@@ -262,8 +262,7 @@ async fn load_from_aws_secrets(secret_id: &str) -> Result<SecureString, Error> {
 
 ### Remediation
 - Default API bind is now localhost-only; CORS disabled by default and allowlist starts empty.
-- Startup guard prevents binding on non-loopback without authentication tokens configured.
-- Sample configs updated to reflect secure defaults.
+- Startup guard prevents binding on non-loopback without authentication tokens configured; sample configs include a public-binding snippet requiring TLS and tokens.
 ```rust
 impl ApiServer {
     pub async fn new(config: ApiServerConfig) -> Result<Self, Error> {

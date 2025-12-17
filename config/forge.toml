@@ -4,6 +4,7 @@
 
 [api]
 # HTTP API server bind address (default: localhost-only for safety)
+# If you change this to a public interface, set auth_tokens and enable HTTPS with tls_cert/tls_key.
 http_bind = "127.0.0.1:8080"
 
 # CORS configuration (disabled by default)

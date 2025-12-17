@@ -51,6 +51,7 @@ async fn main() -> Result<()> {
         tls_cert: config.api.tls_cert.clone(),
         tls_key: config.api.tls_key.clone(),
         recording_base_dir: config.api.recording_base_dir.clone(),
+        recording_root_jail: config.api.recording_root_jail.clone(),
         prompts_base_dir: config.api.prompts_base_dir.clone(),
         siprec_enabled: config.api.siprec.enabled,
         siprec_output_dir: config.api.siprec.output_dir.clone(),

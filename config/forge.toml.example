@@ -10,8 +10,8 @@
 # API Server Configuration
 # ============================================================================
 [api]
-# HTTP API server bind address
-http_bind = "0.0.0.0:8080"
+# HTTP API server bind address (localhost-only by default for safety)
+http_bind = "127.0.0.1:8080"
 
 # HTTPS configuration (optional)
 enable_https = false
@@ -19,9 +19,9 @@ enable_https = false
 # tls_cert = "/path/to/cert.pem"
 # tls_key = "/path/to/key.pem"
 
-# CORS configuration
-enable_cors = true
-cors_origins = ["http://localhost:3000", "https://your-frontend.example.com"]
+# CORS configuration (disabled by default)
+enable_cors = false
+cors_origins = []
 
 # Authentication tokens (empty = no auth, not recommended for production)
 # Generate secure tokens: openssl rand -hex 32
@@ -44,6 +44,8 @@ ai_allowed_endpoints = [
 # Recording base directory
 # All recording paths are constrained within this directory
 recording_base_dir = "/var/lib/forge/recordings"
+# Root jail for recording paths (recording_base_dir must stay within this root)
+recording_root_jail = "/var/lib/forge"
 
 # ============================================================================
 # Media Engine Configuration

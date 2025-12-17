@@ -3,14 +3,12 @@
 # This file configures the Forge Media Engine including XDP/eBPF acceleration.
 
 [api]
-# HTTP API server bind address
-# Use 0.0.0.0 to listen on all interfaces (accessible from network)
-# Use 127.0.0.1 for localhost only
-http_bind = "0.0.0.0:8080"
+# HTTP API server bind address (default: localhost-only for safety)
+http_bind = "127.0.0.1:8080"
 
-# CORS configuration
-enable_cors = true
-cors_origins = ["http://localhost:3000"]
+# CORS configuration (disabled by default)
+enable_cors = false
+cors_origins = []
 
 # Authentication tokens (empty = no auth, not recommended for production)
 auth_tokens = []
@@ -24,6 +22,8 @@ ai_allowed_endpoints = ["https://api.openai.com", "https://api.anthropic.com", "
 
 # Recording base directory
 recording_base_dir = "/tmp/forge-recordings"
+# Recording root jail (recording_base_dir must remain within this root)
+recording_root_jail = "/tmp"
 
 [engine]
 # RTP/RTCP port allocation range

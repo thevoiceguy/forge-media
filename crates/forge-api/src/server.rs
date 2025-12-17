@@ -35,6 +35,7 @@ pub struct ApiServerConfig {
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub recording_base_dir: PathBuf,
+    pub recording_root_jail: PathBuf,
     pub prompts_base_dir: PathBuf,
     pub siprec_enabled: bool,
     pub siprec_output_dir: PathBuf,
@@ -48,11 +49,11 @@ pub struct ApiServerConfig {
 impl Default for ApiServerConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:8080".parse().unwrap(),
-            enable_cors: true,
+            bind_addr: "127.0.0.1:8080".parse().unwrap(),
+            enable_cors: false,
             port_range_min: 10000,
             port_range_max: 20000,
-            allowed_origins: vec!["http://localhost:3000".to_string()],
+            allowed_origins: vec![],
             auth_tokens: Vec::new(),
             rate_limit_requests_per_window: 120,
             rate_limit_window_secs: 60,
@@ -62,6 +63,7 @@ impl Default for ApiServerConfig {
             tls_cert: None,
             tls_key: None,
             recording_base_dir: PathBuf::from("/var/lib/forge/recordings"),
+            recording_root_jail: PathBuf::from("/var/lib/forge"),
             prompts_base_dir: PathBuf::from("/var/lib/forge/prompts"),
             siprec_enabled: false,
             siprec_output_dir: PathBuf::from("/var/lib/forge/siprec"),
@@ -90,6 +92,15 @@ impl ApiServer {
         // Initialize Prometheus metrics exporter
         let metrics_handle = Arc::new(MetricsHandle::init());
         info!("✓ Prometheus metrics initialized");
+
+        // Enforce safer defaults: require auth when binding beyond loopback
+        let bind_is_loopback = config.bind_addr.ip().is_loopback();
+        if !bind_is_loopback && config.auth_tokens.is_empty() {
+            panic!(
+                "Refusing to start API server on {} without authentication. Configure auth_tokens or bind to 127.0.0.1.",
+                config.bind_addr
+            );
+        }
 
         // Create session manager with port pool
         let port_pool_config = PortPoolConfig::new(config.port_range_min, config.port_range_max)
@@ -171,11 +182,14 @@ impl ApiServer {
         };
 
         // Validate recording base directory
-        Self::validate_recording_dir(&config.recording_base_dir)
-            .expect("Invalid recording base directory");
+        let canonical_recording_dir = Self::validate_recording_dir(
+            &config.recording_base_dir,
+            &config.recording_root_jail,
+        )
+        .expect("Invalid recording base directory");
         info!(
             "✓ Recording directory validated: {:?}",
-            config.recording_base_dir
+            canonical_recording_dir
         );
 
         // Validate CORS origins if CORS is enabled
@@ -186,6 +200,8 @@ impl ApiServer {
                 "✓ CORS origins validated: {} origins",
                 config.allowed_origins.len()
             );
+        } else if config.enable_cors {
+            info!("CORS enabled with empty allowlist; no origins will be permitted");
         }
 
         let state = Arc::new(AppState::new(
@@ -243,35 +259,65 @@ impl ApiServer {
         Ok(())
     }
 
-    /// Validate that the recording directory exists and is writable
-    fn validate_recording_dir(path: &PathBuf) -> Result<(), std::io::Error> {
+    /// Validate that the recording directory exists, is within the jail root, and is writable
+    fn validate_recording_dir(
+        path: &PathBuf,
+        jail_root: &PathBuf,
+    ) -> Result<PathBuf, std::io::Error> {
         use std::fs;
 
-        // Try to create the directory if it doesn't exist
+        // Ensure jail root exists and is not a symlink
+        if !jail_root.exists() {
+            fs::create_dir_all(jail_root)?;
+        }
+        if fs::symlink_metadata(jail_root)?.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Recording root {:?} must not be a symlink", jail_root),
+            ));
+        }
+
+        let jail_canonical = jail_root.canonicalize()?;
+
+        // If target exists and is a symlink, reject
+        if path.exists() && fs::symlink_metadata(path)?.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Recording directory {:?} must not be a symlink", path),
+            ));
+        }
+
+        // Create directory if needed, then canonicalize
         if !path.exists() {
             fs::create_dir_all(path)?;
             info!("Created recording directory: {:?}", path);
         }
+        let canonical = path.canonicalize()?;
 
-        // Verify it's a directory
-        if !path.is_dir() {
+        // Ensure path is under jail root
+        if !canonical.starts_with(&jail_canonical) {
             return Err(std::io::Error::new(
-                std::io::ErrorKind::NotADirectory,
-                format!("Recording path {:?} is not a directory", path),
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Recording directory {:?} must be inside {:?}",
+                    canonical, jail_canonical
+                ),
             ));
         }
 
-        // Check if writable by attempting to create a test file
-        let test_file = path.join(".forge_write_test");
+        // Check writeability with temp file inside the canonical path
+        let test_file = canonical.join(format!(
+            ".forge_write_test-{}",
+            std::process::id()
+        ));
         match fs::File::create(&test_file) {
             Ok(_) => {
-                // Clean up test file
                 let _ = fs::remove_file(&test_file);
-                Ok(())
+                Ok(canonical)
             }
             Err(e) => Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
-                format!("Recording directory {:?} is not writable: {}", path, e),
+                format!("Recording directory {:?} is not writable: {}", canonical, e),
             )),
         }
     }
@@ -490,14 +536,19 @@ mod tests {
 
     #[test]
     fn test_server_creation() {
-        let config = ApiServerConfig::default();
+        let mut config = ApiServerConfig::default();
+        let temp_root = std::env::temp_dir().join("forge-test-root");
+        config.recording_root_jail = temp_root.clone();
+        config.recording_base_dir = temp_root.join("recordings");
         let _server = ApiServer::new(config);
     }
 
     #[tokio::test]
     async fn test_router_building() {
         let mut config = ApiServerConfig::default();
-        config.recording_base_dir = std::env::temp_dir().join("forge-test-recordings");
+        let temp_root = std::env::temp_dir().join("forge-test-root-router");
+        config.recording_root_jail = temp_root.clone();
+        config.recording_base_dir = temp_root.join("recordings");
         config.prompts_base_dir = std::env::temp_dir().join("forge-test-prompts");
         let server = ApiServer::new(config).await;
         let _router = server.build_router();

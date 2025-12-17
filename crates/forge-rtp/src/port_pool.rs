@@ -4,6 +4,7 @@
 //! Ports are allocated in pairs (even for RTP, odd for RTCP) as per RFC 3550.
 
 use forge_core::{ForgeError, Result};
+use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -86,15 +87,30 @@ impl PortPair {
 #[derive(Clone)]
 pub struct PortPool {
     config: PortPoolConfig,
-    allocated: Arc<Mutex<HashSet<u16>>>,
+    state: Arc<Mutex<PoolState>>,
+}
+
+#[derive(Debug)]
+struct PoolState {
+    available: Vec<u16>,
+    allocated: HashSet<u16>,
 }
 
 impl PortPool {
-    /// Create a new port pool with the given configuration
+    /// Create a new port pool with the given configuration.
+    /// Ports are pre-shuffled to reduce predictability of allocations.
     pub fn new(config: PortPoolConfig) -> Self {
+        let mut ports: Vec<u16> = (config.min_port..config.max_port)
+            .filter(|p| p % 2 == 0)
+            .collect();
+        ports.shuffle(&mut thread_rng());
+
         Self {
             config,
-            allocated: Arc::new(Mutex::new(HashSet::new())),
+            state: Arc::new(Mutex::new(PoolState {
+                available: ports,
+                allocated: HashSet::new(),
+            })),
         }
     }
 
@@ -102,22 +118,20 @@ impl PortPool {
     ///
     /// Returns the next available RTP/RTCP port pair, or an error if the pool is exhausted.
     pub async fn allocate(&self) -> Result<PortPair> {
-        let mut allocated = self.allocated.lock().await;
+        let mut state = self.state.lock().await;
 
-        // Iterate through available ports (step by 2 for RTP/RTCP pairs)
-        let mut current_port = self.config.min_port;
-        while current_port < self.config.max_port - 1 {
-            if !allocated.contains(&current_port) {
-                // Found an available port, allocate the pair
-                allocated.insert(current_port);
-                return PortPair::new(current_port);
-            }
-            current_port += 2;
+        if state.available.is_empty() {
+            return Err(ForgeError::ResourceLimit(
+                "No available ports in pool".to_string(),
+            ));
         }
 
-        Err(ForgeError::ResourceLimit(
-            "No available ports in pool".to_string(),
-        ))
+        // Choose a random available port to reduce predictability
+        let idx = thread_rng().gen_range(0..state.available.len());
+        let rtp_port = state.available.swap_remove(idx);
+        state.allocated.insert(rtp_port);
+
+        PortPair::new(rtp_port)
     }
 
     /// Allocate a specific port pair (if available)
@@ -136,16 +150,25 @@ impl PortPool {
             ));
         }
 
-        let mut allocated = self.allocated.lock().await;
+        let mut state = self.state.lock().await;
 
-        if allocated.contains(&rtp_port) {
+        if state.allocated.contains(&rtp_port) {
             return Err(ForgeError::ResourceLimit(format!(
                 "Port {} already allocated",
                 rtp_port
             )));
         }
 
-        allocated.insert(rtp_port);
+        if let Some(pos) = state.available.iter().position(|p| *p == rtp_port) {
+            state.available.swap_remove(pos);
+        } else {
+            return Err(ForgeError::ResourceLimit(format!(
+                "Port {} already allocated",
+                rtp_port
+            )));
+        }
+
+        state.allocated.insert(rtp_port);
         PortPair::new(rtp_port)
     }
 
@@ -153,20 +176,22 @@ impl PortPool {
     ///
     /// Returns the port pair to the pool for reuse.
     pub async fn deallocate(&self, pair: PortPair) {
-        let mut allocated = self.allocated.lock().await;
-        allocated.remove(&pair.rtp_port);
+        let mut state = self.state.lock().await;
+        if state.allocated.remove(&pair.rtp_port) {
+            state.available.push(pair.rtp_port);
+        }
     }
 
     /// Get the number of currently allocated port pairs
     pub async fn allocated_count(&self) -> usize {
-        let allocated = self.allocated.lock().await;
-        allocated.len()
+        let state = self.state.lock().await;
+        state.allocated.len()
     }
 
     /// Get the number of available port pairs
     pub async fn available_count(&self) -> usize {
-        let allocated = self.allocated.lock().await;
-        self.config.capacity() - allocated.len()
+        let state = self.state.lock().await;
+        state.available.len()
     }
 
     /// Check if the pool is exhausted
@@ -221,13 +246,16 @@ mod tests {
 
         // Allocate first pair
         let pair1 = pool.allocate().await.unwrap();
-        assert_eq!(pair1.rtp_port, 10000);
-        assert_eq!(pair1.rtcp_port, 10001);
+        assert_eq!(pair1.rtcp_port, pair1.rtp_port + 1);
+        assert!(pair1.rtp_port % 2 == 0);
+        assert!((10000..10100).contains(&pair1.rtp_port));
 
-        // Allocate second pair
+        // Allocate second pair (should be different and still valid)
         let pair2 = pool.allocate().await.unwrap();
-        assert_eq!(pair2.rtp_port, 10002);
-        assert_eq!(pair2.rtcp_port, 10003);
+        assert_ne!(pair1.rtp_port, pair2.rtp_port);
+        assert_eq!(pair2.rtcp_port, pair2.rtp_port + 1);
+        assert!(pair2.rtp_port % 2 == 0);
+        assert!((10000..10100).contains(&pair2.rtp_port));
 
         // Check counts
         assert_eq!(pool.allocated_count().await, 2);
@@ -241,13 +269,15 @@ mod tests {
 
         let pair = pool.allocate().await.unwrap();
         assert_eq!(pool.allocated_count().await, 1);
+        let available_after_alloc = pool.available_count().await;
 
         pool.deallocate(pair).await;
         assert_eq!(pool.allocated_count().await, 0);
+        assert_eq!(pool.available_count().await, available_after_alloc + 1);
 
-        // Should be able to allocate the same port again
+        // Should be able to allocate again
         let pair2 = pool.allocate().await.unwrap();
-        assert_eq!(pair2.rtp_port, pair.rtp_port);
+        assert_eq!(pair2.rtcp_port, pair2.rtp_port + 1);
     }
 
     #[tokio::test]

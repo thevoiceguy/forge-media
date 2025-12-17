@@ -309,6 +309,10 @@ pub struct ApiConfig {
     #[serde(default = "default_recording_base_dir")]
     pub recording_base_dir: std::path::PathBuf,
 
+    /// Root jail for recording paths (recording_base_dir must stay within this root)
+    #[serde(default = "default_recording_root_jail")]
+    pub recording_root_jail: std::path::PathBuf,
+
     /// Base directory for playback prompts/announcements
     #[serde(default = "default_prompts_base_dir")]
     pub prompts_base_dir: std::path::PathBuf,
@@ -331,12 +335,13 @@ impl Default for ApiConfig {
             tls_cert: None,
             tls_key: None,
             ws_bind: None,
-            enable_cors: true,
+            enable_cors: false,
             cors_origins: default_cors_origins(),
             auth_tokens: Vec::new(),
             rate_limit_requests_per_window: default_rate_limit_requests(),
             rate_limit_window_secs: default_rate_limit_window_secs(),
             recording_base_dir: default_recording_base_dir(),
+            recording_root_jail: default_recording_root_jail(),
             prompts_base_dir: default_prompts_base_dir(),
             siprec: SiprecConfig::default(),
             ai_allowed_endpoints: default_ai_allowed_endpoints(),
@@ -345,7 +350,7 @@ impl Default for ApiConfig {
 }
 
 fn default_http_bind() -> String {
-    "0.0.0.0:8080".to_string()
+    "127.0.0.1:8080".to_string()
 }
 
 fn default_true() -> bool {
@@ -353,7 +358,7 @@ fn default_true() -> bool {
 }
 
 fn default_cors_origins() -> Vec<String> {
-    vec!["http://localhost:3000".to_string()]
+    vec![]
 }
 
 fn default_rate_limit_requests() -> usize {
@@ -366,6 +371,10 @@ fn default_rate_limit_window_secs() -> u64 {
 
 fn default_recording_base_dir() -> std::path::PathBuf {
     "/var/lib/forge/recordings".into()
+}
+
+fn default_recording_root_jail() -> std::path::PathBuf {
+    "/var/lib/forge".into()
 }
 
 fn default_prompts_base_dir() -> std::path::PathBuf {

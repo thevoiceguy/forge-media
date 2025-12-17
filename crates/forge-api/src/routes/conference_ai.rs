@@ -285,6 +285,7 @@ mod tests {
             api_key: "".to_string(),
             model: None,
             voice: None,
+            endpoint: None,
             instructions: None,
             temperature: None,
             audio_mode: None,

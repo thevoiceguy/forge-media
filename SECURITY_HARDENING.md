@@ -14,9 +14,9 @@ This document outlines critical security vulnerabilities discovered during code 
 |----|----------|-----------|--------|------------------|
 | SEC-001 | 🔴 HIGH | Rate Limiting | ✅ FIXED | - |
 | SEC-002 | 🔴 HIGH | AI API Keys | ✅ FIXED | 4-6 hours |
-| SEC-003 | 🟡 MEDIUM | Recording Paths | ⚠️ PENDING | 2-3 hours |
-| SEC-004 | 🟡 MEDIUM | RTP Port Allocation | ⚠️ PENDING | 2-3 hours |
-| SEC-005 | 🔵 LOW | Security Defaults | ⚠️ PENDING | 2-3 hours |
+| SEC-003 | 🟡 MEDIUM | Recording Paths | ✅ FIXED | 2-3 hours |
+| SEC-004 | 🟡 MEDIUM | RTP Port Allocation | ✅ FIXED | 2-3 hours |
+| SEC-005 | 🔵 LOW | Security Defaults | ✅ FIXED | 2-3 hours |
 
 ---
 
@@ -234,244 +234,36 @@ async fn load_from_aws_secrets(secret_id: &str) -> Result<SecureString, Error> {
 
 ---
 
-## SEC-003: Recording Directory Path Traversal [PENDING]
+## SEC-003: Recording Directory Path Traversal [FIXED]
 
-### Severity: 🟡 MEDIUM
-
-### Vulnerability
-Recording directory validation follows symlinks and creates directories at any configured path without bounds checking.
-
-**Vulnerable Code:**
-```rust
-// crates/forge-api/src/server.rs:240-260
-let recording_dir = PathBuf::from(&config.recording_base_dir);
-fs::create_dir_all(&recording_dir)?;  // No canonicalization
-fs::write(recording_dir.join("test.txt"), "test")?;  // Follows symlinks
-```
-
-### Impact
-- **Path Traversal**: Malicious config could write to `/etc/passwd`, `/root/.ssh/authorized_keys`
-- **Symlink Attack**: Attacker with filesystem access could symlink recording dir to sensitive location
-- **Arbitrary File Write**: Test write could overwrite existing files
+### Severity: 🟡 MEDIUM / Status: ✅ FIXED (jail + canonicalization)
 
 ### Remediation
-
-**Implementation:**
-```rust
-use std::fs;
-use std::path::{Path, PathBuf};
-
-/// Validate and create recording directory securely
-fn setup_recording_directory(base_dir: &Path, root: &Path) -> Result<PathBuf, Error> {
-    // 1. Canonicalize the requested path
-    let canonical = base_dir.canonicalize()
-        .or_else(|_| {
-            // If doesn't exist, create then canonicalize
-            fs::create_dir_all(base_dir)?;
-            base_dir.canonicalize()
-        })?;
-
-    // 2. Ensure it's within allowed root
-    if !canonical.starts_with(root) {
-        return Err(Error::new(
-            ErrorKind::PermissionDenied,
-            format!("Recording directory must be under {}", root.display())
-        ));
-    }
-
-    // 3. Check for symlinks in path components
-    for component in canonical.components() {
-        let component_path = PathBuf::from(component.as_os_str());
-        if component_path.is_symlink() {
-            return Err(Error::new(
-                ErrorKind::PermissionDenied,
-                "Symlinks not allowed in recording path"
-            ));
-        }
-    }
-
-    // 4. Test write to temp file (not .txt which could clash)
-    let test_path = canonical.join(format!(".forge-test-{}", std::process::id()));
-    fs::write(&test_path, b"test")?;
-    fs::remove_file(&test_path)?;
-
-    Ok(canonical)
-}
-```
-
-**Configuration:**
-```rust
-impl Default for ApiServerConfig {
-    fn default() -> Self {
-        Self {
-            // ...
-            recording_base_dir: PathBuf::from("/var/lib/forge/recordings"),
-            recording_root_jail: PathBuf::from("/var/lib/forge"),  // NEW: Jail root
-        }
-    }
-}
-```
-
-**Apply in ApiServer::new():**
-```rust
-// Validate recording directory
-let recording_dir = setup_recording_directory(
-    &config.recording_base_dir,
-    &config.recording_root_jail,
-).map_err(|e| format!("Invalid recording directory: {}", e))?;
-
-info!("✓ Recording directory validated: {}", recording_dir.display());
-```
-
-**Deployment Best Practices:**
-1. Run Forge under dedicated low-privilege user (`forge:forge`)
-2. Set strict permissions on `/var/lib/forge`: `chmod 750`, `chown forge:forge`
-3. Use AppArmor/SELinux profiles to restrict file access
-4. Mount recording directory with `nosuid,nodev,noexec` options
+- Added `recording_root_jail` to config (defaults to `/var/lib/forge`) and require `recording_base_dir` to canonicalize inside it.
+- Reject symlinked jail roots or recording dirs; create missing dirs safely; enforce writable check with PID-scoped temp file.
+- Config samples updated with `recording_root_jail` for explicit bounding.
 
 ---
 
-## SEC-004: RTP Port Prediction [PENDING]
+## SEC-004: RTP Port Prediction [FIXED]
 
-### Severity: 🟡 MEDIUM
-
-### Vulnerability
-RTP port allocation is sequential and deterministic, making active ports easy to predict for traffic analysis and hijacking attempts.
-
-**Vulnerable Code:**
-```rust
-// crates/forge-rtp/src/port_pool.rs:50-82
-pub async fn allocate_pair(&self) -> Result<(u16, u16), PortAllocationError> {
-    for port in (self.range_start..=self.range_end).step_by(2) {
-        if self.allocated.insert(port) {
-            return Ok((port, port + 1));
-        }
-    }
-    // Sequential allocation is predictable
-}
-```
-
-### Impact
-- **Port Scanning**: Attacker can predict which ports are likely in use
-- **Traffic Analysis**: Sequential allocation reveals call volume patterns
-- **Session Hijacking**: Easier to target active RTP streams
-- **DoS**: Can pre-emptively bind predicted ports
+### Severity: 🟡 MEDIUM / Status: ✅ FIXED (randomized allocations)
 
 ### Remediation
-
-**Randomized Allocation:**
-```rust
-use rand::seq::SliceRandom;
-use rand::thread_rng;
-
-pub struct PortPool {
-    allocated: DashSet<u16>,
-    available: Vec<u16>,  // Pre-shuffled port list
-    exhaustion_threshold: f32,  // Alert at 80% usage
-}
-
-impl PortPool {
-    pub fn new(range_start: u16, range_end: u16) -> Self {
-        // Generate list of even ports (RTP uses even, RTCP uses odd)
-        let mut ports: Vec<u16> = (range_start..=range_end)
-            .step_by(2)
-            .collect();
-
-        // Shuffle for random allocation
-        ports.shuffle(&mut thread_rng());
-
-        Self {
-            allocated: DashSet::new(),
-            available: ports,
-            exhaustion_threshold: 0.8,
-        }
-    }
-
-    pub async fn allocate_pair(&self) -> Result<(u16, u16), PortAllocationError> {
-        // Check for exhaustion
-        let usage = self.allocated.len() as f32 / self.available.len() as f32;
-        if usage > self.exhaustion_threshold {
-            tracing::warn!(
-                "Port pool {}% exhausted ({}/{})",
-                (usage * 100.0) as u32,
-                self.allocated.len(),
-                self.available.len()
-            );
-        }
-
-        // Try random ports from pre-shuffled list
-        for &port in &self.available {
-            if self.allocated.insert(port) {
-                return Ok((port, port + 1));
-            }
-        }
-
-        Err(PortAllocationError::Exhausted)
-    }
-}
-```
-
-**Additional Hardening:**
-1. **Per-Tenant Pools**: Isolate port ranges by tenant/customer
-2. **Exhaustion Metrics**: Expose `forge_rtp_port_pool_utilization` gauge
-3. **Rate Limiting**: Limit session creation rate per IP/tenant
+- Port pool now pre-shuffles even ports and picks a random available port on each allocation to reduce predictability (`crates/forge-rtp/src/port_pool.rs`).
+- Deallocation returns ports to the pool while keeping randomness; specific-port allocations still enforced for range/evenness.
+- Added `rand` dependency and updated tests to validate allocation validity without relying on deterministic ordering.
 
 ---
 
-## SEC-005: Insecure Defaults [PENDING]
+## SEC-005: Insecure Defaults [FIXED]
 
-### Severity: 🔵 LOW (but important for production)
-
-### Vulnerability
-Default configuration is permissive for development convenience but insecure for production.
-
-**Current Defaults:**
-```rust
-// crates/forge-api/src/server.rs:46-70
-impl Default for ApiServerConfig {
-    fn default() -> Self {
-        Self {
-            enable_cors: true,  // ❌ Enabled by default
-            allowed_origins: vec!["http://localhost:3000".to_string()],  // ❌ HTTP
-            auth_tokens: Vec::new(),  // ❌ No auth by default
-            enable_https: false,  // ❌ HTTPS disabled
-            trusted_proxies: Vec::new(),  // ✅ Good - deny by default
-            // ...
-        }
-    }
-}
-```
-
-### Impact
-- **CORS Bypass**: Any origin can access API in default config
-- **No Authentication**: API fully open without auth tokens
-- **Plaintext Communication**: HTTPS not enforced
-- **Credential Sniffing**: Auth tokens transmitted over HTTP
+### Severity: 🔵 LOW / Status: ✅ FIXED (safer defaults + guardrails)
 
 ### Remediation
-
-**Secure Defaults:**
-```rust
-impl Default for ApiServerConfig {
-    fn default() -> Self {
-        Self {
-            bind_addr: "127.0.0.1:8080".parse().unwrap(),  // Localhost only
-            enable_cors: false,  // Require explicit enablement
-            allowed_origins: Vec::new(),  // Must configure
-            auth_tokens: Vec::new(),  // Must configure
-            require_auth: true,  // NEW: Fail if no auth configured
-            enable_https: true,  // NEW: Require HTTPS by default
-            https_bind: Some("0.0.0.0:8443".parse().unwrap()),
-            tls_cert: None,  // Must configure
-            tls_key: None,  // Must configure
-            trusted_proxies: Vec::new(),  // Deny by default
-            // ...
-        }
-    }
-}
-```
-
-**Startup Validation:**
+- Default API bind is now localhost-only; CORS disabled by default and allowlist starts empty.
+- Startup guard prevents binding on non-loopback without authentication tokens configured.
+- Sample configs updated to reflect secure defaults.
 ```rust
 impl ApiServer {
     pub async fn new(config: ApiServerConfig) -> Result<Self, Error> {

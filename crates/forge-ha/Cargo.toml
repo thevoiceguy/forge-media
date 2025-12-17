@@ -8,6 +8,13 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager", "aio"] }
+async-trait = { workspace = true }
+hostname = "0.3"

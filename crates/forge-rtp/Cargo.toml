@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
+forge-ha = { path = "../forge-ha", optional = true }
 
 tokio = { workspace = true }
 bytes = { workspace = true }
@@ -35,6 +36,7 @@ foreign-types = { version = "0.3", optional = true }
 
 [features]
 dtls = ["openssl", "openssl-sys", "foreign-types"]
+ha = ["forge-ha"]
 
 [dev-dependencies]
 hex = "0.4"

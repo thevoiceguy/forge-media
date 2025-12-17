@@ -1418,6 +1418,7 @@ dependencies = [
  "bytes",
  "foreign-types",
  "forge-core",
+ "forge-ha",
  "hex",
  "hmac",
  "libc",

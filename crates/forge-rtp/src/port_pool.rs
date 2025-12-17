@@ -9,6 +9,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[cfg(feature = "ha")]
+use forge_ha::{PortPoolStateSync, RedisHAClient};
+
 /// Configuration for port pool
 #[derive(Debug, Clone)]
 pub struct PortPoolConfig {
@@ -114,6 +117,49 @@ impl PortPool {
         }
     }
 
+    /// Create a new port pool with pre-allocated ports (for HA recovery)
+    ///
+    /// This constructor is used during failover to restore the port pool state
+    /// with previously allocated ports marked as unavailable.
+    #[cfg(feature = "ha")]
+    pub fn new_with_allocated(config: PortPoolConfig, allocated_ports: HashSet<u16>) -> Result<Self> {
+        // Validate that all allocated ports are within range and even
+        for &port in &allocated_ports {
+            if port < config.min_port || port >= config.max_port {
+                return Err(ForgeError::InvalidConfig(format!(
+                    "Allocated port {} is outside configured range {}-{}",
+                    port, config.min_port, config.max_port
+                )));
+            }
+            if port % 2 != 0 {
+                return Err(ForgeError::InvalidConfig(format!(
+                    "Allocated port {} must be even (RTP ports only)",
+                    port
+                )));
+            }
+        }
+
+        // Create list of available ports (all ports in range except allocated ones)
+        let mut available: Vec<u16> = (config.min_port..config.max_port)
+            .filter(|p| p % 2 == 0 && !allocated_ports.contains(p))
+            .collect();
+        available.shuffle(&mut thread_rng());
+
+        tracing::info!(
+            "Created port pool with {} pre-allocated ports, {} available",
+            allocated_ports.len(),
+            available.len()
+        );
+
+        Ok(Self {
+            config,
+            state: Arc::new(Mutex::new(PoolState {
+                available,
+                allocated: allocated_ports,
+            })),
+        })
+    }
+
     /// Allocate a new port pair
     ///
     /// Returns the next available RTP/RTCP port pair, or an error if the pool is exhausted.
@@ -202,6 +248,36 @@ impl PortPool {
     /// Get the pool configuration
     pub fn config(&self) -> &PortPoolConfig {
         &self.config
+    }
+
+    /// Get list of currently allocated ports (for HA state sync)
+    #[cfg(feature = "ha")]
+    pub async fn get_allocated_ports(&self) -> Vec<u16> {
+        let state = self.state.lock().await;
+        state.allocated.iter().copied().collect()
+    }
+
+    /// Sync port pool state to Redis (for HA replication)
+    #[cfg(feature = "ha")]
+    pub async fn sync_state(
+        &self,
+        redis: &RedisHAClient,
+        instance_id: &str,
+        ttl: std::time::Duration,
+    ) -> Result<()> {
+        let allocated_ports = self.get_allocated_ports().await;
+
+        PortPoolStateSync::sync(redis, instance_id, &allocated_ports, ttl)
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to sync port pool state: {}", e)))?;
+
+        tracing::debug!(
+            "Synced {} allocated ports to Redis for instance {}",
+            allocated_ports.len(),
+            instance_id
+        );
+
+        Ok(())
     }
 }
 

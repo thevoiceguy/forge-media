@@ -14,6 +14,41 @@ use tokio::task::JoinHandle;
 #[cfg(all(target_os = "linux", feature = "xdp"))]
 use forge_kernel::XdpManager;
 
+#[cfg(feature = "ha")]
+use forge_ha::{RedisHAClient, SessionStateSync, RecoveryCallbacks, SessionState, ConferenceState};
+
+/// High Availability backend for session state replication
+#[cfg(feature = "ha")]
+#[derive(Clone)]
+pub struct HABackend {
+    /// Redis client for state synchronization
+    pub redis: Arc<RedisHAClient>,
+    /// Instance ID for this server
+    pub instance_id: String,
+    /// TTL for session state in Redis
+    pub session_ttl: Duration,
+    /// TTL for conference state in Redis
+    pub conference_ttl: Duration,
+}
+
+#[cfg(feature = "ha")]
+impl HABackend {
+    /// Create a new HA backend
+    pub fn new(
+        redis: Arc<RedisHAClient>,
+        instance_id: String,
+        session_ttl: Duration,
+        conference_ttl: Duration,
+    ) -> Self {
+        Self {
+            redis,
+            instance_id,
+            session_ttl,
+            conference_ttl,
+        }
+    }
+}
+
 /// Session manager configuration
 #[derive(Debug, Clone)]
 pub struct SessionManagerConfig {
@@ -52,6 +87,9 @@ pub struct SessionManager {
     /// XDP manager for kernel-level packet forwarding (Linux only)
     #[cfg(all(target_os = "linux", feature = "xdp"))]
     xdp_manager: Option<Arc<XdpManager>>,
+    /// HA backend for state replication
+    #[cfg(feature = "ha")]
+    ha_backend: Option<Arc<HABackend>>,
 }
 
 impl SessionManager {
@@ -68,6 +106,32 @@ impl SessionManager {
             shutdown: Arc::new(AtomicBool::new(false)),
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_manager: None,
+            #[cfg(feature = "ha")]
+            ha_backend: None,
+        });
+
+        manager
+    }
+
+    /// Create a new session manager with HA backend
+    #[cfg(feature = "ha")]
+    pub fn new_with_ha(
+        config: SessionManagerConfig,
+        event_bus: Option<Arc<EventBus>>,
+        ha_backend: Arc<HABackend>,
+    ) -> Arc<Self> {
+        let port_pool = Arc::new(PortPool::new(config.port_pool_config.clone()));
+
+        let manager = Arc::new(Self {
+            sessions: DashMap::new(),
+            port_pool,
+            config,
+            event_bus,
+            monitoring_task: Arc::new(Mutex::new(None)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            #[cfg(all(target_os = "linux", feature = "xdp"))]
+            xdp_manager: None,
+            ha_backend: Some(ha_backend),
         });
 
         manager
@@ -127,6 +191,69 @@ impl SessionManager {
             monitoring_task: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
             xdp_manager,
+            #[cfg(feature = "ha")]
+            ha_backend: None,
+        });
+
+        manager
+    }
+
+    /// Create a new session manager with XDP and HA support
+    #[cfg(all(target_os = "linux", feature = "xdp", feature = "ha"))]
+    pub async fn new_with_xdp_and_ha(
+        config: SessionManagerConfig,
+        xdp_config: forge_core::config::XdpConfig,
+        event_bus: Option<Arc<EventBus>>,
+        ha_backend: Arc<HABackend>,
+    ) -> Arc<Self> {
+        let port_pool = Arc::new(PortPool::new(config.port_pool_config.clone()));
+
+        // Try to initialize XDP if enabled
+        let xdp_manager = if xdp_config.enabled {
+            tracing::info!(
+                "Initializing XDP on interface {} with mode {:?}",
+                xdp_config.interface,
+                xdp_config.mode
+            );
+
+            // Convert config XdpMode to kernel XdpMode
+            let xdp_mode = match xdp_config.mode {
+                forge_core::config::XdpMode::Native => forge_kernel::XdpMode::Native,
+                forge_core::config::XdpMode::Generic => forge_kernel::XdpMode::Generic,
+            };
+
+            match XdpManager::new(&xdp_config.interface, xdp_mode).await {
+                Ok(manager) => {
+                    tracing::info!("XDP manager initialized successfully");
+                    Some(Arc::new(manager))
+                }
+                Err(e) => {
+                    if xdp_config.fallback {
+                        tracing::warn!(
+                            "Failed to initialize XDP, falling back to userspace: {}",
+                            e
+                        );
+                        None
+                    } else {
+                        tracing::error!("Failed to initialize XDP: {}", e);
+                        None
+                    }
+                }
+            }
+        } else {
+            tracing::info!("XDP disabled in configuration");
+            None
+        };
+
+        let manager = Arc::new(Self {
+            sessions: DashMap::new(),
+            port_pool,
+            config,
+            event_bus,
+            monitoring_task: Arc::new(Mutex::new(None)),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            xdp_manager,
+            ha_backend: Some(ha_backend),
         });
 
         manager
@@ -221,6 +348,21 @@ impl SessionManager {
         // Store session
         self.sessions.insert(call_id.clone(), Arc::clone(&session));
 
+        // Sync to Redis if HA is enabled
+        #[cfg(feature = "ha")]
+        if let Some(ha) = &self.ha_backend {
+            if let Err(e) = session
+                .sync_to_redis(&ha.redis, &ha.instance_id, ha.session_ttl)
+                .await
+            {
+                tracing::error!("Failed to sync session {} to Redis: {}", call_id.0, e);
+                // Don't fail the session creation, but log the error
+                // The session can still operate locally
+            } else {
+                tracing::debug!("Synced session {} to Redis for HA", call_id.0);
+            }
+        }
+
         let session_count = self.sessions.len();
 
         tracing::info!(
@@ -288,6 +430,21 @@ impl SessionManager {
 
         // Store session
         self.sessions.insert(call_id.clone(), Arc::clone(&session));
+
+        // Sync to Redis if HA is enabled
+        #[cfg(feature = "ha")]
+        if let Some(ha) = &self.ha_backend {
+            if let Err(e) = session
+                .sync_to_redis(&ha.redis, &ha.instance_id, ha.session_ttl)
+                .await
+            {
+                tracing::error!("Failed to sync session {} to Redis: {}", call_id.0, e);
+                // Don't fail the session creation, but log the error
+                // The session can still operate locally
+            } else {
+                tracing::debug!("Synced session {} to Redis for HA", call_id.0);
+            }
+        }
 
         let session_count = self.sessions.len();
 
@@ -463,6 +620,140 @@ impl SessionManager {
         }
 
         tracing::info!("Timeout monitoring stopped");
+    }
+
+    /// Recover all sessions from Redis (called during failover)
+    #[cfg(feature = "ha")]
+    pub async fn recover_sessions_from_redis(&self) -> Result<usize> {
+        let ha = self
+            .ha_backend
+            .as_ref()
+            .ok_or_else(|| ForgeError::Internal("HA backend not configured".to_string()))?;
+
+        tracing::info!("Starting session recovery from Redis");
+
+        // Load all sessions from Redis
+        let states = SessionStateSync::load_all(&ha.redis)
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to load sessions from Redis: {}", e)))?;
+
+        let mut recovered = 0;
+        let mut failed = 0;
+
+        for state in states {
+            let call_id = CallId(state.call_id.clone());
+
+            // Skip if session already exists (shouldn't happen, but be defensive)
+            if self.sessions.contains_key(&call_id) {
+                tracing::warn!("Session {} already exists during recovery, skipping", call_id.0);
+                continue;
+            }
+
+            // Recover the session from state
+            match MediaSession::from_state(
+                state,
+                &self.port_pool,
+                self.config.session_config.clone(),
+                self.event_bus.clone(),
+            )
+            .await
+            {
+                Ok(session) => {
+                    let session = Arc::new(session);
+
+                    // Start forwarding immediately
+                    if let Err(e) = session.start_forwarding().await {
+                        tracing::error!(
+                            "Failed to start forwarding for recovered session {}: {}",
+                            call_id.0,
+                            e
+                        );
+                        failed += 1;
+                        continue;
+                    }
+
+                    // Store the recovered session
+                    self.sessions.insert(call_id.clone(), session);
+                    recovered += 1;
+
+                    tracing::info!("Successfully recovered session {}", call_id.0);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to recover session {}: {}", call_id.0, e);
+                    failed += 1;
+                }
+            }
+        }
+
+        let session_count = self.sessions.len();
+        tracing::info!(
+            "Session recovery complete: {} recovered, {} failed, {} total active",
+            recovered,
+            failed,
+            session_count
+        );
+
+        // Update metrics
+        gauge!("forge_active_sessions", session_count as f64);
+
+        Ok(recovered)
+    }
+
+    /// Recover a single session from state (used by RecoveryCallbacks)
+    #[cfg(feature = "ha")]
+    async fn recover_session_from_state(&self, state: SessionState) -> Result<()> {
+        let call_id = CallId(state.call_id.clone());
+
+        // Skip if session already exists
+        if self.sessions.contains_key(&call_id) {
+            tracing::debug!("Session {} already exists, skipping recovery", call_id.0);
+            return Ok(());
+        }
+
+        // Recover the session
+        let session = MediaSession::from_state(
+            state,
+            &self.port_pool,
+            self.config.session_config.clone(),
+            self.event_bus.clone(),
+        )
+        .await?;
+
+        let session = Arc::new(session);
+
+        // Start forwarding
+        session.start_forwarding().await?;
+
+        // Store the session
+        self.sessions.insert(call_id.clone(), session);
+
+        tracing::info!("Recovered session {}", call_id.0);
+
+        Ok(())
+    }
+}
+
+/// Implement RecoveryCallbacks trait for SessionManager
+#[cfg(feature = "ha")]
+#[async_trait::async_trait]
+impl RecoveryCallbacks for SessionManager {
+    async fn recover_session(&self, state: SessionState) -> Result<()> {
+        self.recover_session_from_state(state).await
+    }
+
+    async fn recover_conference(&self, state: ConferenceState) -> Result<()> {
+        // TODO: Conference recovery will be implemented when ConferenceManager is integrated
+        tracing::warn!("Conference recovery not yet implemented: {}", state.room_id);
+        Ok(())
+    }
+
+    async fn get_session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    async fn get_conference_count(&self) -> usize {
+        // TODO: Return actual conference count when ConferenceManager is integrated
+        0
     }
 }
 

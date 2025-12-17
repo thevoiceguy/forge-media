@@ -1230,8 +1230,6 @@ impl MediaSession {
         config: MediaSessionConfig,
         event_bus: Option<Arc<EventBus>>,
     ) -> Result<Self> {
-        use std::str::FromStr;
-
         tracing::info!(
             "Recovering session {} from HA state (ports: RTP={}, RTCP={})",
             state.call_id,

@@ -1,0 +1,111 @@
+# Keepalived Configuration Template for Forge Media Engine HA
+#
+# This template provides VRRP-based High Availability for on-premises
+# deployments of Forge Media Engine.
+#
+# Usage:
+# 1. Copy this file to /etc/keepalived/keepalived.conf
+# 2. Replace the ${VARIABLE} placeholders with actual values
+# 3. Ensure the health check script is executable
+# 4. Restart keepalived: systemctl restart keepalived
+#
+# Variables to replace:
+# - ${FORGE_VIP}: Virtual IP address (e.g., 10.0.1.100)
+# - ${FORGE_INTERFACE}: Network interface (e.g., eth0)
+# - ${FORGE_ROUTER_ID}: VRRP router ID 1-255 (must be unique per cluster)
+# - ${FORGE_PRIORITY}: Priority (100=primary, 50=standby)
+# - ${FORGE_AUTH_PASSWORD}: VRRP authentication password
+# - ${FORGE_HEALTH_CHECK_SCRIPT}: Path to health check script
+
+global_defs {
+    # Unique identifier for this Keepalived instance
+    router_id FORGE_MEDIA_${FORGE_ROUTER_ID}
+
+    # Enable script security (recommended)
+    enable_script_security
+
+    # Run scripts as this user (must have permission to execute health checks)
+    script_user forge
+}
+
+# Health check script definition
+vrrp_script check_forge {
+    # Path to the health check script
+    script "${FORGE_HEALTH_CHECK_SCRIPT}"
+
+    # Check interval (seconds)
+    interval 5
+
+    # Weight to subtract on failure (causes priority drop)
+    weight -30
+
+    # Number of consecutive failures before considering down
+    fall 3
+
+    # Number of consecutive successes before considering up
+    rise 2
+
+    # Timeout for script execution (seconds)
+    timeout 3
+}
+
+# VRRP instance definition
+vrrp_instance FORGE_HA {
+    # Initial state: MASTER on primary, BACKUP on standby
+    # Note: Actual primary is determined by priority and health checks
+    state ${FORGE_STATE}  # MASTER or BACKUP
+
+    # Network interface to use for VRRP
+    interface ${FORGE_INTERFACE}
+
+    # Virtual router ID (must be same across cluster, unique per network)
+    virtual_router_id ${FORGE_ROUTER_ID}
+
+    # Priority (higher = preferred primary)
+    # Primary: 100
+    # Standby: 50
+    # Actual primary determined by: priority + health_check_weight
+    priority ${FORGE_PRIORITY}
+
+    # VRRP advertisement interval (seconds)
+    advert_int 1
+
+    # Authentication for VRRP packets (prevents rogue instances)
+    authentication {
+        auth_type PASS
+        auth_pass ${FORGE_AUTH_PASSWORD}
+    }
+
+    # Virtual IP address(es) to manage
+    virtual_ipaddress {
+        ${FORGE_VIP}/${FORGE_VIP_PREFIX} dev ${FORGE_INTERFACE}
+    }
+
+    # Track the health check script
+    # When script fails, priority drops by 30 (weight)
+    # This causes failover to standby
+    track_script {
+        check_forge
+    }
+
+    # Notify scripts (optional)
+    # Uncomment to enable custom actions on state changes
+
+    # notify_master "/usr/local/bin/forge-ha-notify.sh MASTER"
+    # notify_backup "/usr/local/bin/forge-ha-notify.sh BACKUP"
+    # notify_fault "/usr/local/bin/forge-ha-notify.sh FAULT"
+
+    # SMTP notifications (optional)
+    # smtp_alert
+}
+
+# Example configuration for multiple VIPs (uncomment if needed)
+# virtual_ipaddress {
+#     ${FORGE_VIP}/24 dev ${FORGE_INTERFACE}
+#     ${FORGE_VIP2}/24 dev ${FORGE_INTERFACE}
+# }
+
+# Advanced options (usually not needed)
+# vrrp_strict                   # Enforce VRRP compliance (may cause issues)
+# vrrp_garp_master_delay 10     # Delay before sending gratuitous ARP as master
+# vrrp_garp_master_repeat 1     # Number of gratuitous ARP packets to send

@@ -1105,6 +1105,282 @@ impl MediaSession {
     pub async fn set_ai_manager(&self, manager: Arc<crate::ai_integration::AISessionManager>) {
         *self.ai_manager.write().await = Some(manager);
     }
+
+    // =====================================================================
+    // High Availability (HA) Methods
+    // =====================================================================
+
+    /// Serialize session state for HA replication (requires 'ha' feature)
+    #[cfg(feature = "ha")]
+    pub async fn to_state(&self) -> forge_ha::SessionState {
+        use chrono::Utc;
+
+        let state = *self.state.read().await;
+        let participant_a = self.participant_a.read().await.clone();
+        let participant_b = self.participant_b.read().await.clone();
+        let last_activity = *self.last_activity.read().await;
+
+        // Convert state enum to string
+        let state_str = match state {
+            SessionState::Initializing => "Initializing",
+            SessionState::Active => "Active",
+            SessionState::OnHold => "OnHold",
+            SessionState::Terminating => "Terminating",
+            SessionState::Terminated => "Terminated",
+        }
+        .to_string();
+
+        // Convert participants
+        let participant_a_state = forge_ha::types::ParticipantState {
+            id: participant_a.id.0.to_string(),
+            remote_addr: participant_a.remote_addr,
+            codec: forge_ha::types::CodecConfig {
+                payload_type: participant_a.codec_config.payload_type,
+                codec: format!("{:?}", participant_a.codec_config.codec),
+                clock_rate: participant_a.codec_config.clock_rate,
+            },
+            stats: forge_ha::types::ParticipantStats {
+                packets_received: participant_a.stats.packets_received,
+                bytes_received: participant_a.stats.bytes_received,
+                packets_sent: participant_a.stats.packets_sent,
+                bytes_sent: participant_a.stats.bytes_sent,
+                packets_lost: participant_a.stats.packets_lost,
+            },
+        };
+
+        let participant_b_state = forge_ha::types::ParticipantState {
+            id: participant_b.id.0.to_string(),
+            remote_addr: participant_b.remote_addr,
+            codec: forge_ha::types::CodecConfig {
+                payload_type: participant_b.codec_config.payload_type,
+                codec: format!("{:?}", participant_b.codec_config.codec),
+                clock_rate: participant_b.codec_config.clock_rate,
+            },
+            stats: forge_ha::types::ParticipantStats {
+                packets_received: participant_b.stats.packets_received,
+                bytes_received: participant_b.stats.bytes_received,
+                packets_sent: participant_b.stats.packets_sent,
+                bytes_sent: participant_b.stats.bytes_sent,
+                packets_lost: participant_b.stats.packets_lost,
+            },
+        };
+
+        // Convert ports
+        let ports = forge_ha::types::PortPair {
+            rtp_port: self.ports.rtp_port,
+            rtcp_port: self.ports.rtcp_port,
+        };
+
+        // Convert times (Instant can't be serialized, use Utc::now() as approximation)
+        let created_at = Utc::now() - chrono::Duration::from_std(self.created_at.elapsed()).unwrap_or_default();
+        let last_activity_time = Utc::now() - chrono::Duration::from_std(last_activity.elapsed()).unwrap_or_default();
+
+        // Check if transcoders are active
+        let transcoder_a_to_b_active = self.transcoder_a_to_b.lock().await.is_some();
+        let transcoder_b_to_a_active = self.transcoder_b_to_a.lock().await.is_some();
+
+        let transcoder_state = if transcoder_a_to_b_active || transcoder_b_to_a_active {
+            Some(forge_ha::types::TranscoderState {
+                a_to_b_active: transcoder_a_to_b_active,
+                b_to_a_active: transcoder_b_to_a_active,
+                source_codec: Some(format!("{:?}", participant_a.codec_config.codec)),
+                dest_codec: Some(format!("{:?}", participant_b.codec_config.codec)),
+            })
+        } else {
+            None
+        };
+
+        // Check if XDP is active
+        #[cfg(all(target_os = "linux", feature = "xdp"))]
+        let xdp_active = self.xdp_active.load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(all(target_os = "linux", feature = "xdp")))]
+        let xdp_active = false;
+
+        // Get AI session ID if present
+        let ai_session_id = if self.ai_manager.read().await.is_some() {
+            Some(self.call_id.0.to_string())
+        } else {
+            None
+        };
+
+        forge_ha::SessionState {
+            call_id: self.call_id.0.to_string(),
+            state: state_str,
+            participant_a: participant_a_state,
+            participant_b: participant_b_state,
+            ports,
+            created_at,
+            last_activity: last_activity_time,
+            sdp: self.sdp.clone(),
+            from_tag: self.from_tag.clone(),
+            to_tag: self.to_tag.clone(),
+            transcoder_state,
+            xdp_active,
+            ai_session_id,
+            version: 1,
+            instance_id: "".to_string(), // Will be filled by caller
+        }
+    }
+
+    /// Deserialize and recover session from HA state (requires 'ha' feature)
+    #[cfg(feature = "ha")]
+    pub async fn from_state(
+        state: forge_ha::SessionState,
+        port_pool: &Arc<PortPool>,
+        config: MediaSessionConfig,
+        event_bus: Option<Arc<EventBus>>,
+    ) -> Result<Self> {
+        use std::str::FromStr;
+
+        tracing::info!(
+            "Recovering session {} from HA state (ports: RTP={}, RTCP={})",
+            state.call_id,
+            state.ports.rtp_port,
+            state.ports.rtcp_port
+        );
+
+        // Reconstruct port pair
+        let ports = forge_rtp::PortPair {
+            rtp_port: state.ports.rtp_port,
+            rtcp_port: state.ports.rtcp_port,
+        };
+
+        // Create socket pair with recovered ports
+        let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
+
+        // Parse participant IDs (stored as UUID strings in state)
+        let participant_a_id = ParticipantId(state.participant_a.id.clone());
+        let participant_b_id = ParticipantId(state.participant_b.id.clone());
+
+        // Parse codec
+        let parse_codec = |codec_str: &str| -> forge_core::AudioCodec {
+            match codec_str {
+                "PCMU" => forge_core::AudioCodec::PCMU,
+                "PCMA" => forge_core::AudioCodec::PCMA,
+                "Opus" => forge_core::AudioCodec::Opus,
+                "G729" => forge_core::AudioCodec::G729,
+                _ => forge_core::AudioCodec::PCMU, // Default fallback
+            }
+        };
+
+        let participant_a = Participant {
+            id: participant_a_id,
+            remote_addr: state.participant_a.remote_addr,
+            payload_type: state.participant_a.codec.payload_type,
+            codec_config: ParticipantCodecConfig {
+                payload_type: state.participant_a.codec.payload_type,
+                codec: parse_codec(&state.participant_a.codec.codec),
+                clock_rate: state.participant_a.codec.clock_rate,
+            },
+            stats: ParticipantStats {
+                packets_received: state.participant_a.stats.packets_received,
+                bytes_received: state.participant_a.stats.bytes_received,
+                packets_sent: state.participant_a.stats.packets_sent,
+                bytes_sent: state.participant_a.stats.bytes_sent,
+                packets_lost: state.participant_a.stats.packets_lost,
+                last_packet_at: None, // Will be updated when packets arrive
+            },
+        };
+
+        let participant_b = Participant {
+            id: participant_b_id,
+            remote_addr: state.participant_b.remote_addr,
+            payload_type: state.participant_b.codec.payload_type,
+            codec_config: ParticipantCodecConfig {
+                payload_type: state.participant_b.codec.payload_type,
+                codec: parse_codec(&state.participant_b.codec.codec),
+                clock_rate: state.participant_b.codec.clock_rate,
+            },
+            stats: ParticipantStats {
+                packets_received: state.participant_b.stats.packets_received,
+                bytes_received: state.participant_b.stats.bytes_received,
+                packets_sent: state.participant_b.stats.packets_sent,
+                bytes_sent: state.participant_b.stats.bytes_sent,
+                packets_lost: state.participant_b.stats.packets_lost,
+                last_packet_at: None,
+            },
+        };
+
+        // Parse session state
+        let session_state = match state.state.as_str() {
+            "Initializing" => SessionState::Initializing,
+            "Active" => SessionState::Active,
+            "OnHold" => SessionState::OnHold,
+            "Terminating" => SessionState::Terminating,
+            "Terminated" => SessionState::Terminated,
+            _ => SessionState::Active, // Default to active for recovery
+        };
+
+        let call_id = CallId(state.call_id.clone());
+
+        let now = Instant::now();
+
+        let session = Self {
+            call_id,
+            state: Arc::new(RwLock::new(session_state)),
+            participant_a: Arc::new(RwLock::new(participant_a)),
+            participant_b: Arc::new(RwLock::new(participant_b)),
+            sockets: Arc::new(sockets),
+            ports,
+            port_pool: Arc::clone(port_pool),
+            ports_deallocated: Arc::new(AtomicBool::new(false)),
+            created_at: now, // Use current time as approximation
+            last_activity: Arc::new(RwLock::new(now)),
+            config,
+            event_bus: event_bus.clone(),
+            dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
+            inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
+            dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            #[cfg(feature = "opus")]
+            opus_decoder: Arc::new(Mutex::new({
+                let opus_config = forge_codecs::opus::OpusConfig {
+                    sample_rate: 48000,
+                    channels: 1,
+                    application: forge_codecs::opus::OpusApplication::Voip,
+                    bitrate: 24000,
+                    frame_duration_ms: 20,
+                };
+                forge_codecs::opus::OpusCodec::with_config(opus_config)
+                    .expect("Failed to create Opus decoder for DTMF detection")
+            })),
+            transcoder_a_to_b: Arc::new(Mutex::new(None)),
+            transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
+            sdp: state.sdp,
+            from_tag: state.from_tag,
+            to_tag: state.to_tag,
+            #[cfg(all(target_os = "linux", feature = "xdp"))]
+            xdp_manager: None,
+            #[cfg(all(target_os = "linux", feature = "xdp"))]
+            xdp_active: Arc::new(AtomicBool::new(state.xdp_active)),
+            ai_manager: Arc::new(RwLock::new(None)),
+        };
+
+        tracing::info!(
+            "Session {} recovered successfully from HA state",
+            session.call_id.0
+        );
+
+        Ok(session)
+    }
+
+    /// Synchronize session state to Redis for HA (requires 'ha' feature)
+    #[cfg(feature = "ha")]
+    pub async fn sync_to_redis(
+        &self,
+        redis: &forge_ha::RedisHAClient,
+        instance_id: &str,
+        ttl: std::time::Duration,
+    ) -> Result<()> {
+        let mut state = self.to_state().await;
+        state.instance_id = instance_id.to_string();
+
+        forge_ha::SessionStateSync::sync(redis, &self.call_id.0.to_string(), &state, ttl)
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to sync session to Redis: {}", e)))?;
+
+        Ok(())
+    }
 }
 
 impl Drop for MediaSession {

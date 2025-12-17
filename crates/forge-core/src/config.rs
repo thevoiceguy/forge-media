@@ -58,6 +58,10 @@ pub struct EngineConfig {
     /// AI session persistence configuration
     #[serde(default)]
     pub ai_persistence: AIPersistenceConfig,
+
+    /// High Availability configuration
+    #[serde(default)]
+    pub ha: Option<HAConfig>,
 }
 
 impl Default for EngineConfig {
@@ -70,6 +74,7 @@ impl Default for EngineConfig {
             ip_version: IpVersionConfig::DualStack,
             xdp: XdpConfig::default(),
             ai_persistence: AIPersistenceConfig::default(),
+            ha: None,
         }
     }
 }
@@ -422,4 +427,218 @@ fn default_siprec_output_dir() -> PathBuf {
 
 fn default_siprec_audio_format() -> AudioFormat {
     AudioFormat::pcm_mono()
+}
+
+// ============================================================================
+// High Availability Configuration
+// ============================================================================
+
+/// High Availability configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HAConfig {
+    /// Whether HA is enabled
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Instance ID (auto-generated if not specified)
+    pub instance_id: Option<String>,
+
+    /// Initial role configuration
+    #[serde(default)]
+    pub role: RoleConfig,
+
+    /// Deployment mode (cloud or on-premises)
+    #[serde(default)]
+    pub deployment_mode: DeploymentMode,
+
+    /// Port range for this instance
+    pub port_range: PortRange,
+
+    /// Redis configuration for state synchronization
+    pub redis: RedisHAConfig,
+
+    /// Cloud-specific configuration
+    pub cloud: Option<CloudHAConfig>,
+
+    /// On-premises VRRP configuration
+    pub onprem: Option<OnPremHAConfig>,
+}
+
+impl Default for HAConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            instance_id: None,
+            role: RoleConfig::Auto,
+            deployment_mode: DeploymentMode::Cloud,
+            port_range: PortRange {
+                start: 30000,
+                end: 34999,
+            },
+            redis: RedisHAConfig::default(),
+            cloud: None,
+            onprem: None,
+        }
+    }
+}
+
+/// Role configuration for HA
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RoleConfig {
+    /// Automatically determine role via election
+    Auto,
+    /// Force primary role (use with caution)
+    Primary,
+    /// Force standby role
+    Standby,
+}
+
+impl Default for RoleConfig {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+/// Deployment mode for HA
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DeploymentMode {
+    /// Cloud deployment (uses load balancer health checks)
+    Cloud,
+    /// On-premises deployment (uses VRRP/Keepalived)
+    OnPrem,
+}
+
+impl Default for DeploymentMode {
+    fn default() -> Self {
+        Self::Cloud
+    }
+}
+
+/// Redis configuration for HA state synchronization
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisHAConfig {
+    /// Redis connection URL
+    pub url: String,
+
+    /// Key prefix for all HA keys
+    #[serde(default = "default_ha_redis_key_prefix")]
+    pub key_prefix: String,
+
+    /// Heartbeat interval in seconds
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+
+    /// Failover detection timeout in seconds
+    #[serde(default = "default_failover_timeout_secs")]
+    pub failover_timeout_secs: u64,
+
+    /// Session state TTL in seconds
+    #[serde(default = "default_session_ttl_secs")]
+    pub session_ttl_secs: u64,
+
+    /// Conference state TTL in seconds
+    #[serde(default = "default_conference_ttl_secs")]
+    pub conference_ttl_secs: u64,
+}
+
+impl Default for RedisHAConfig {
+    fn default() -> Self {
+        Self {
+            url: "redis://localhost:6379/0".to_string(),
+            key_prefix: default_ha_redis_key_prefix(),
+            heartbeat_interval_secs: default_heartbeat_interval_secs(),
+            failover_timeout_secs: default_failover_timeout_secs(),
+            session_ttl_secs: default_session_ttl_secs(),
+            conference_ttl_secs: default_conference_ttl_secs(),
+        }
+    }
+}
+
+fn default_ha_redis_key_prefix() -> String {
+    "forge:ha:".to_string()
+}
+
+fn default_heartbeat_interval_secs() -> u64 {
+    10
+}
+
+fn default_failover_timeout_secs() -> u64 {
+    25
+}
+
+fn default_session_ttl_secs() -> u64 {
+    3600
+}
+
+fn default_conference_ttl_secs() -> u64 {
+    7200
+}
+
+/// Cloud deployment configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudHAConfig {
+    /// Cloud provider
+    #[serde(default)]
+    pub provider: CloudProvider,
+
+    /// Health check endpoint path
+    #[serde(default = "default_health_check_path")]
+    pub health_check_path: String,
+
+    /// Whether standby instances should return 503 on health checks
+    #[serde(default = "default_standby_returns_503")]
+    pub standby_returns_503: bool,
+}
+
+impl Default for CloudHAConfig {
+    fn default() -> Self {
+        Self {
+            provider: CloudProvider::Gcp,
+            health_check_path: default_health_check_path(),
+            standby_returns_503: default_standby_returns_503(),
+        }
+    }
+}
+
+fn default_health_check_path() -> String {
+    "/health".to_string()
+}
+
+fn default_standby_returns_503() -> bool {
+    true
+}
+
+/// Cloud provider options
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CloudProvider {
+    Gcp,
+    Aws,
+    Azure,
+    Linode,
+    Other,
+}
+
+impl Default for CloudProvider {
+    fn default() -> Self {
+        Self::Gcp
+    }
+}
+
+/// On-premises VRRP/Keepalived configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnPremHAConfig {
+    /// Virtual IP address
+    pub vip: String,
+
+    /// Network interface for VRRP
+    pub interface: String,
+
+    /// VRRP virtual router ID (1-255)
+    pub virtual_router_id: u8,
+
+    /// VRRP priority (higher = preferred primary)
+    pub priority: u8,
+
+    /// VRRP authentication password
+    pub auth_password: String,
 }

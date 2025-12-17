@@ -98,6 +98,9 @@ pub struct AppState {
     pub core_event_bus: Arc<forge_core::EventBus>,
     pub webrtc_manager: Arc<super::webrtc::WebRtcManager>,
     pub ai_session_manager: Arc<forge_engine::AISessionManager>,
+    /// HA manager for cluster coordination (optional, feature-gated)
+    #[cfg(feature = "ha")]
+    pub ha_manager: Option<Arc<crate::ha::HAManager>>,
 }
 
 impl AppState {
@@ -139,6 +142,8 @@ impl AppState {
             core_event_bus,
             webrtc_manager,
             ai_session_manager,
+            #[cfg(feature = "ha")]
+            ha_manager: None, // TODO: Initialize when HAManager is fully integrated
         }
     }
 }

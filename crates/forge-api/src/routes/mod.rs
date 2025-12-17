@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod conference_ai;
 pub mod conferences;
+pub mod ha;
 pub mod health;
 pub mod metrics;
 pub mod prometheus;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 pub fn create_router() -> Router<Arc<sessions::AppState>> {
     Router::new()
         .merge(health::routes())
+        .merge(ha::routes())
         .merge(sessions::routes())
         .merge(conferences::routes())
         .merge(conference_ai::routes())

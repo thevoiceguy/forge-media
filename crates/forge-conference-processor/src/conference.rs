@@ -763,7 +763,11 @@ impl ConferenceRoom {
         self.mixer.add_participant(ai_manager.participant_id(), None)?;
 
         // Start AI manager (spawns audio routing tasks) - no lock held
-        ai_manager.start(Arc::clone(self), event_bus).await?;
+        if let Err(err) = ai_manager.start(Arc::clone(self), event_bus).await {
+            // Roll back the mixer participant on failure so we don't leak a track
+            let _ = self.mixer.remove_participant(ai_manager.participant_id());
+            return Err(err);
+        }
 
         info!("Attached AI to conference room {}", self.id);
 
@@ -868,6 +872,11 @@ impl ConferenceRoom {
             call_id, participant_id, self.id
         );
         self.call_id_map.insert(call_id, participant_id);
+    }
+
+    /// Look up participant_id for a given call_id (used for DTMF scoping)
+    pub(crate) fn participant_id_for_call_id(&self, call_id: &CallId) -> Option<String> {
+        self.call_id_map.get(call_id).map(|entry| entry.value().clone())
     }
 
     /// Unregister a participant's call_id

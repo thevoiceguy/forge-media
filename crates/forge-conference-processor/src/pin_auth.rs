@@ -103,8 +103,8 @@ impl PinAuthenticator {
     /// # Returns
     /// `PinAuthResult` indicating success, failure, or lockout
     pub fn authenticate(&self, participant_id: &str, pin: &str) -> PinAuthResult {
-        // Check if no PIN is required
-        if !self.config.require_guest_pin {
+        // If no PIN is required and no host PIN is configured, allow immediately
+        if !self.config.require_guest_pin && self.config.host_pin.is_none() {
             return PinAuthResult::NoPinRequired;
         }
 
@@ -128,6 +128,11 @@ impl PinAuthenticator {
                 debug!("Participant {} authenticated as host", participant_id);
                 return PinAuthResult::HostAuthenticated;
             }
+        }
+
+        // If guest PIN not required, allow join even if host PIN was wrong
+        if !self.config.require_guest_pin {
+            return PinAuthResult::NoPinRequired;
         }
 
         // Check guest PIN

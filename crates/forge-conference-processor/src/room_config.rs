@@ -107,24 +107,30 @@ impl RoomConfig {
 
     /// Merge room config with global config to produce effective configuration
     pub fn merge_with_global(&self, global: &ConferenceConfig) -> EffectiveRoomConfig {
+        let security = SecurityConfig {
+            require_guest_pin: self.require_guest_pin
+                .unwrap_or(global.security.require_guest_pin),
+            guest_pin: self.guest_pin.clone()
+                .or_else(|| global.security.guest_pin.clone()),
+            host_pin: self.host_pin.clone()
+                .or_else(|| global.security.host_pin.clone()),
+            pin_requirements: global.security.pin_requirements.clone(),
+            max_pin_attempts: self.max_pin_attempts
+                .unwrap_or(global.security.max_pin_attempts),
+            lockout_duration_secs: global.security.lockout_duration_secs,
+            default_locked: self.default_locked
+                .unwrap_or(global.security.default_locked),
+        };
+
+        // Build DTMF config and wire in the effective host PIN
+        let mut dtmf_config = self.build_dtmf_config(&global.dtmf);
+        dtmf_config.host_pin = security.host_pin.clone();
+
         EffectiveRoomConfig {
-            security: SecurityConfig {
-                require_guest_pin: self.require_guest_pin
-                    .unwrap_or(global.security.require_guest_pin),
-                guest_pin: self.guest_pin.clone()
-                    .or_else(|| global.security.guest_pin.clone()),
-                host_pin: self.host_pin.clone()
-                    .or_else(|| global.security.host_pin.clone()),
-                pin_requirements: global.security.pin_requirements.clone(),
-                max_pin_attempts: self.max_pin_attempts
-                    .unwrap_or(global.security.max_pin_attempts),
-                lockout_duration_secs: global.security.lockout_duration_secs,
-                default_locked: self.default_locked
-                    .unwrap_or(global.security.default_locked),
-            },
+            security,
             dtmf_enabled: self.enable_dtmf
                 .unwrap_or(global.dtmf.enabled),
-            dtmf_config: self.build_dtmf_config(&global.dtmf),
+            dtmf_config,
 
             // Capacity settings
             max_channels: self.max_channels

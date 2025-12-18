@@ -271,7 +271,9 @@ impl ConferenceAIManager {
         // Spawn DTMF forwarding task if event bus is provided
         if let Some(event_bus) = event_bus {
             info!("Enabling DTMF forwarding for AI in room {}", self.room_id);
-            let dtmf_task = self.spawn_dtmf_forwarding_task(event_bus).await;
+            let dtmf_task = self
+                .spawn_dtmf_forwarding_task(event_bus, room.clone())
+                .await;
             *self.dtmf_task.write() = Some(dtmf_task);
         }
 
@@ -403,6 +405,7 @@ impl ConferenceAIManager {
     async fn spawn_dtmf_forwarding_task(
         &self,
         event_bus: Arc<forge_core::EventBus>,
+        room: Arc<crate::conference::ConferenceRoom>,
     ) -> JoinHandle<()> {
         let ai_session_manager = Arc::clone(&self.ai_session_manager);
         let call_id = self.call_id.clone();
@@ -430,8 +433,11 @@ impl ConferenceAIManager {
                                 continue;
                             }
 
-                            // For conference DTMF, the call_id will be the participant's call_id
-                            // We want to forward all conference participant DTMF to the AI
+                            // Only forward DTMF for participants registered to this room
+                            if room.participant_id_for_call_id(&event_call_id).is_none() {
+                                continue;
+                            }
+
                             debug!(
                                 "Forwarding DTMF '{}' from {} to AI in room {}",
                                 digit, event_call_id.0, room_id

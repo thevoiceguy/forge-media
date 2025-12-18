@@ -99,11 +99,11 @@ impl AudioFeedbackPlayer {
                     .collect()
             }
             8 => {
-                // Convert 8-bit samples to i16 (scale from 0-255 to -32768-32767)
+                // Convert 8-bit PCM (read as i8) to i16
                 reader
-                    .samples::<i16>()
+                    .samples::<i8>()
                     .filter_map(|s| s.ok())
-                    .map(|s| ((s as i32 - 128) * 256) as i16)
+                    .map(|s| (s as i16) << 8)
                     .collect()
             }
             24 | 32 => {

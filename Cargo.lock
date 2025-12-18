@@ -1266,15 +1266,17 @@ dependencies = [
 
 [[package]]
 name = "forge-ice"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "forge-core",
  "futures",
  "hex",
+ "hmac",
  "if-addrs",
  "rand 0.8.5",
  "serde",
+ "sha1",
  "socket2 0.5.10",
  "thiserror 1.0.69",
  "tokio",

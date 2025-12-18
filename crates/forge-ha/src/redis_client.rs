@@ -1,8 +1,9 @@
 //! Redis client for HA state management
 
+use crate::config::RedisConfig;
 use forge_core::{ForgeError, Result};
 use redis::aio::ConnectionManager;
-use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
+use redis::{AsyncCommands, FromRedisValue, Script, ToRedisArgs};
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -18,25 +19,27 @@ pub struct RedisHAClient {
 impl RedisHAClient {
     /// Create a new Redis HA client
     pub async fn new(redis_url: &str, key_prefix: &str) -> Result<Self> {
-        info!("Connecting to Redis at {}", redis_url);
+        let sanitized = sanitize_redis_url(redis_url);
+        info!("Connecting to Redis at {}", sanitized);
+        Self::connect(redis_url, key_prefix).await
+    }
 
-        // Create Redis client
-        let client = redis::Client::open(redis_url).map_err(|e| {
-            ForgeError::Internal(format!("Failed to create Redis client: {}", e))
-        })?;
+    /// Create a new Redis client from HA config (uses sentinel discovery when configured)
+    pub async fn from_config(config: &RedisConfig) -> Result<Self> {
+        if let Some(ref sentinels) = config.sentinels {
+            let master_name = config.master_name.as_ref().ok_or_else(|| {
+                ForgeError::Internal("master_name is required when sentinels are configured".into())
+            })?;
+            let master_url = Self::discover_master_via_sentinel(
+                sentinels,
+                master_name,
+                &config.url,
+            )
+            .await?;
+            return Self::new(&master_url, &config.key_prefix).await;
+        }
 
-        // Create connection manager for automatic reconnection
-        let conn_manager = ConnectionManager::new(client.clone())
-            .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to connect to Redis: {}", e)))?;
-
-        info!("Successfully connected to Redis");
-
-        Ok(Self {
-            client,
-            conn_manager,
-            key_prefix: key_prefix.to_string(),
-        })
+        Self::new(&config.url, &config.key_prefix).await
     }
 
     /// Build a full Redis key with prefix
@@ -206,6 +209,41 @@ impl RedisHAClient {
         Ok(result)
     }
 
+    /// Compare-and-expire: only refresh TTL if the current value matches `expected_value`
+    pub async fn compare_and_expire(
+        &self,
+        key: &str,
+        expected_value: &str,
+        ttl: Duration,
+    ) -> Result<bool> {
+        let full_key = self.build_key(key);
+        debug!(
+            "CAS+EXPIRE {} (expecting {}, ttl={:?})",
+            full_key, expected_value, ttl
+        );
+
+        let mut conn = self.conn_manager.clone();
+        let script = Script::new(
+            r#"
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+                return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+            else
+                return 0
+            end
+        "#,
+        );
+
+        let refreshed: i32 = script
+            .key(&full_key)
+            .arg(expected_value)
+            .arg(ttl.as_millis() as i64)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Redis compare-and-expire failed: {}", e)))?;
+
+        Ok(refreshed == 1)
+    }
+
     /// Check if key exists
     pub async fn exists(&self, key: &str) -> Result<bool> {
         let full_key = self.build_key(key);
@@ -318,6 +356,112 @@ impl RedisHAClient {
                 response
             )))
         }
+    }
+
+    async fn connect(redis_url: &str, key_prefix: &str) -> Result<Self> {
+        // Create Redis client
+        let client = redis::Client::open(redis_url).map_err(|e| {
+            ForgeError::Internal(format!("Failed to create Redis client: {}", e))
+        })?;
+
+        // Create connection manager for automatic reconnection
+        let conn_manager = ConnectionManager::new(client.clone())
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to connect to Redis: {}", e)))?;
+
+        info!("Successfully connected to Redis");
+
+        Ok(Self {
+            client,
+            conn_manager,
+            key_prefix: key_prefix.to_string(),
+        })
+    }
+
+    async fn discover_master_via_sentinel(
+        sentinels: &[String],
+        master_name: &str,
+        base_url: &str,
+    ) -> Result<String> {
+        for sentinel_url in sentinels {
+            let sanitized = sanitize_redis_url(sentinel_url);
+            info!(
+                "Querying Redis Sentinel {} for master {}",
+                sanitized, master_name
+            );
+
+            let client = redis::Client::open(sentinel_url.as_str()).map_err(|e| {
+                ForgeError::Internal(format!("Failed to create Sentinel client: {}", e))
+            })?;
+
+            match client.get_async_connection().await {
+                Ok(mut conn) => {
+                    let response: Vec<String> = redis::cmd("SENTINEL")
+                        .arg("get-master-addr-by-name")
+                        .arg(master_name)
+                        .query_async(&mut conn)
+                        .await
+                        .map_err(|e| {
+                            ForgeError::Internal(format!(
+                                "Sentinel {} query failed: {}",
+                                sanitized, e
+                            ))
+                        })?;
+
+                    if response.len() == 2 {
+                        let master_host = &response[0];
+                        let master_port = &response[1];
+                        let master_url =
+                            build_master_url_with_credentials(base_url, master_host, master_port);
+                        info!(
+                            "Discovered Redis master {}:{} via Sentinel {}",
+                            master_host, master_port, sanitized
+                        );
+                        return Ok(master_url);
+                    } else {
+                        warn!(
+                            "Unexpected Sentinel response from {}: {:?}",
+                            sanitized, response
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to connect to Sentinel {}: {} (will try next)",
+                        sanitized, e
+                    );
+                }
+            }
+        }
+
+        Err(ForgeError::Internal(
+            "Failed to discover Redis master via all provided sentinels".to_string(),
+        ))
+    }
+}
+
+fn sanitize_redis_url(url: &str) -> String {
+    if let Some(at_idx) = url.rfind('@') {
+        if url.contains("://") {
+            return format!("***:***@{}", &url[at_idx + 1..]);
+        }
+    }
+    url.to_string()
+}
+
+fn build_master_url_with_credentials(base_url: &str, host: &str, port: &str) -> String {
+    let mut credentials = String::new();
+    if let Some(start) = base_url.find("://") {
+        let remainder = &base_url[start + 3..];
+        if let Some(at_idx) = remainder.find('@') {
+            credentials.push_str(&remainder[..=at_idx]);
+        }
+    }
+
+    if credentials.is_empty() {
+        format!("redis://{}:{}", host, port)
+    } else {
+        format!("redis://{}{}:{}", credentials, host, port)
     }
 }
 

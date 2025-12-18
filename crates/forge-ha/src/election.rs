@@ -95,35 +95,20 @@ impl PrimaryElection {
         debug!("Renewing primary lock");
 
         // Check if we still own the lock
-        if let Some(current_primary) = self.redis.get_raw(PRIMARY_ELECTION_KEY).await? {
-            if current_primary != self.instance_id.to_string() {
-                error!(
-                    "Lock ownership mismatch! Expected {}, found {}",
-                    self.instance_id, current_primary
-                );
-                *self.is_primary.write().await = false;
-                *self.role.write().await = HARole::Standby;
-                return Err(ForgeError::Internal("Lost primary lock".to_string()));
-            }
-        } else {
-            error!("Primary lock disappeared!");
-            *self.is_primary.write().await = false;
-            *self.role.write().await = HARole::Standby;
-            return Err(ForgeError::Internal("Primary lock disappeared".to_string()));
-        }
-
-        // Renew the lock by refreshing TTL
         let ttl = Duration::from_secs(PRIMARY_LOCK_TTL_SECS);
         let renewed = self
             .redis
-            .expire(PRIMARY_ELECTION_KEY, ttl)
+            .compare_and_expire(PRIMARY_ELECTION_KEY, &self.instance_id.to_string(), ttl)
             .await?;
 
         if renewed {
             debug!("Primary lock renewed successfully");
             Ok(())
         } else {
-            error!("Failed to renew primary lock");
+            error!(
+                "Failed to renew primary lock (value no longer matches {}). Stepping down.",
+                self.instance_id
+            );
             *self.is_primary.write().await = false;
             *self.role.write().await = HARole::Standby;
             Err(ForgeError::Internal(

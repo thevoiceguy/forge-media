@@ -1,10 +1,11 @@
 //! Failover orchestration and state machine
 
 use crate::election::{ElectionCoordinator, PrimaryElection};
-use crate::heartbeat::HeartbeatMonitor;
+use crate::heartbeat::{HeartbeatMonitor, HeartbeatService};
 use crate::redis_client::RedisHAClient;
 use crate::state_sync::{ConferenceStateSync, SessionStateSync};
 use crate::types::{ConferenceState, HARole, InstanceId, SessionState};
+use crate::vip_manager::VIPManager;
 use chrono::Utc;
 use forge_core::{ForgeError, Result};
 use std::sync::Arc;
@@ -55,6 +56,8 @@ pub struct FailoverOrchestrator {
     current_state: Arc<RwLock<FailoverState>>,
     failover_count: Arc<RwLock<u64>>,
     last_failover: Arc<RwLock<Option<chrono::DateTime<Utc>>>>,
+    vip_manager: Option<Arc<dyn VIPManager>>,
+    heartbeat_service: Option<Arc<HeartbeatService>>,
 }
 
 impl FailoverOrchestrator {
@@ -64,6 +67,8 @@ impl FailoverOrchestrator {
         redis: RedisHAClient,
         election_coordinator: Arc<ElectionCoordinator>,
         heartbeat_monitor: Arc<HeartbeatMonitor>,
+        vip_manager: Option<Arc<dyn VIPManager>>,
+        heartbeat_service: Option<Arc<HeartbeatService>>,
     ) -> Self {
         Self {
             instance_id,
@@ -73,6 +78,8 @@ impl FailoverOrchestrator {
             current_state: Arc::new(RwLock::new(FailoverState::Normal)),
             failover_count: Arc::new(RwLock::new(0)),
             last_failover: Arc::new(RwLock::new(None)),
+            vip_manager,
+            heartbeat_service,
         }
     }
 
@@ -121,7 +128,8 @@ impl FailoverOrchestrator {
         // Phase 3: Promoting
         self.set_state(FailoverState::Promoting).await;
         info!("Phase 3: Promoting to primary role");
-        // Role has been updated by election coordinator
+        // Role has been updated by election coordinator; activate VIP + publish fresh heartbeat
+        self.promote_to_primary().await?;
 
         // Phase 4: Recovering
         self.set_state(FailoverState::Recovering).await;
@@ -230,6 +238,21 @@ impl FailoverOrchestrator {
     async fn set_state(&self, state: FailoverState) {
         *self.current_state.write().await = state;
         info!("Failover state transition: {:?}", state);
+    }
+
+    /// Perform promotion side-effects (VIP activation and immediate heartbeat publish)
+    async fn promote_to_primary(&self) -> Result<()> {
+        if let Some(ref vip) = self.vip_manager {
+            vip.activate().await.map_err(|e| {
+                ForgeError::Internal(format!("Failed to activate VIP during promotion: {}", e))
+            })?;
+        }
+
+        if let Some(ref heartbeat) = self.heartbeat_service {
+            heartbeat.publish_now().await?;
+        }
+
+        Ok(())
     }
 
     /// Start the failover orchestrator (spawns background task)

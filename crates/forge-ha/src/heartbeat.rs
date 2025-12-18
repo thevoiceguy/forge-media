@@ -24,6 +24,7 @@ pub struct HeartbeatService {
     conference_count: Arc<RwLock<usize>>,
     start_time: std::time::Instant,
     version: String,
+    local_ip: String,
 }
 
 impl HeartbeatService {
@@ -47,6 +48,7 @@ impl HeartbeatService {
             conference_count: Arc::new(RwLock::new(0)),
             start_time: std::time::Instant::now(),
             version,
+            local_ip: Self::resolve_local_ip(),
         }
     }
 
@@ -77,7 +79,7 @@ impl HeartbeatService {
             instance_id: self.instance_id.clone(),
             role,
             state,
-            ip_address: Self::get_local_ip(),
+            ip_address: self.local_ip.clone(),
             advertised_address: None, // Could be configured separately
             port_range: self.port_range,
             last_heartbeat: Utc::now(),
@@ -88,22 +90,18 @@ impl HeartbeatService {
         }
     }
 
-    /// Get local IP address
+    /// Resolve local IP address once to avoid repeated external calls
     ///
-    /// Attempts to determine the actual IP address by creating a UDP socket
-    /// that would be used to reach an external address (doesn't actually send).
-    /// This reveals which local interface and IP would be used for external communication.
-    fn get_local_ip() -> String {
-        use std::net::{UdpSocket, IpAddr};
+    /// Uses a non-routable destination to let the OS pick the outbound interface
+    /// without requiring real egress, then falls back to hostname resolution.
+    fn resolve_local_ip() -> String {
+        use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
 
-        // Try to determine local IP by connecting to an external address
-        // This doesn't actually send data, just determines which interface would be used
+        // Use a non-routable address to avoid external dependency
         if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-            // Use a well-known external DNS server to determine outbound interface
-            if socket.connect("8.8.8.8:80").is_ok() {
+            if socket.connect("192.0.2.1:9").is_ok() {
                 if let Ok(local_addr) = socket.local_addr() {
                     let ip = local_addr.ip();
-                    // Don't return loopback addresses
                     if !ip.is_loopback() {
                         return ip.to_string();
                     }
@@ -114,8 +112,6 @@ impl HeartbeatService {
         // Fallback: try to get IP from hostname resolution
         if let Ok(hostname) = hostname::get() {
             if let Some(hostname_str) = hostname.to_str() {
-                // Try to resolve hostname to IP
-                use std::net::ToSocketAddrs;
                 let addr = format!("{}:0", hostname_str);
                 if let Ok(mut addrs) = addr.to_socket_addrs() {
                     if let Some(socket_addr) = addrs.next() {
@@ -150,6 +146,11 @@ impl HeartbeatService {
         self.redis.set_ex(&key, &health, ttl).await?;
 
         Ok(())
+    }
+
+    /// Publish a heartbeat immediately (useful after promotion)
+    pub async fn publish_now(&self) -> Result<()> {
+        self.publish_heartbeat().await
     }
 
     /// Start the heartbeat service (spawns background task)
@@ -374,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_get_local_ip() {
-        let ip = HeartbeatService::get_local_ip();
+        let ip = HeartbeatService::resolve_local_ip();
         assert!(!ip.is_empty());
     }
 

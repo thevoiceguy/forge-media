@@ -4,13 +4,16 @@ use crate::error::{InjectionError, Result};
 use crate::source::AudioSource;
 use forge_core::AudioFrame;
 use std::path::Path;
-use symphonia::core::audio::AudioBufferRef;
+use symphonia::core::audio::{AudioBuffer, AudioBufferRef, Signal};
+use symphonia::core::conv::FromSample;
+use symphonia::core::sample::Sample;
+use symphonia::core::units::{Time, TimeBase};
 use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Audio file source using Symphonia for decoding
 ///
@@ -43,6 +46,9 @@ pub struct FileSource {
     /// Track ID being decoded
     track_id: u32,
 
+    /// Track time base
+    time_base: TimeBase,
+
     /// Sample rate in Hz
     sample_rate: u32,
 
@@ -57,10 +63,6 @@ pub struct FileSource {
 
     /// Buffer for decoded samples
     sample_buffer: Vec<i16>,
-
-    /// Target sample rate (if resampling)
-    /// TODO: Implement resampling using rubato (requires Send + Sync wrapper)
-    target_sample_rate: Option<u32>,
 
     /// File path for debugging
     file_path: String,
@@ -137,6 +139,10 @@ impl FileSource {
             .ok_or_else(|| InjectionError::InvalidParameters("Unknown channel count".to_string()))?
             .count() as u8;
 
+        let time_base = codec_params
+            .time_base
+            .unwrap_or_else(|| TimeBase::new(1, sample_rate));
+
         let total_samples = codec_params.n_frames;
 
         debug!(
@@ -155,12 +161,12 @@ impl FileSource {
             format,
             decoder,
             track_id,
+            time_base,
             sample_rate,
             channels,
             total_samples,
             position: 0,
             sample_buffer: Vec::new(),
-            target_sample_rate: None,
             file_path,
             finished: false,
         })
@@ -177,15 +183,14 @@ impl FileSource {
     ///
     /// # Note
     ///
-    /// Resampling is not yet implemented. This sets the target but doesn't
-    /// perform the actual resampling.
-    pub fn with_sample_rate(mut self, target_rate: u32) -> Result<Self> {
+    /// Resampling is not yet implemented. This currently returns an error if
+    /// the requested rate differs from the source.
+    pub fn with_sample_rate(self, target_rate: u32) -> Result<Self> {
         if target_rate != self.sample_rate {
-            warn!(
-                "Resampling not yet implemented: {} Hz -> {} Hz",
-                self.sample_rate, target_rate
-            );
-            self.target_sample_rate = Some(target_rate);
+            return Err(InjectionError::ResamplingError(format!(
+                "Requested sample rate {}Hz differs from source {}Hz (resampling not implemented)",
+                target_rate, self.sample_rate
+            )));
         }
 
         Ok(self)
@@ -193,49 +198,81 @@ impl FileSource {
 
     /// Decode the next packet and fill the sample buffer
     fn decode_next_packet(&mut self) -> Result<()> {
-        // Read the next packet
-        let packet = match self.format.next_packet() {
-            Ok(packet) => packet,
-            Err(symphonia::core::errors::Error::IoError(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                self.finished = true;
-                return Err(InjectionError::EndOfFile);
-            }
-            Err(e) => {
-                self.finished = true;
-                return Err(e.into());
-            }
-        };
-
-        // Skip packets that aren't for our track
-        if packet.track_id() != self.track_id {
-            return self.decode_next_packet();
-        }
-
-        // Decode the packet
-        let decoded = self.decoder.decode(&packet)?;
-
-        // Extract samples (inline to avoid borrow checker issues)
-        self.sample_buffer.clear();
-        match &decoded {
-            AudioBufferRef::S16(buf) => {
-                // Direct copy for S16
-                for plane in buf.planes().planes() {
-                    for &sample in plane.iter() {
-                        self.sample_buffer.push(sample);
-                    }
+        loop {
+            // Read the next packet
+            let packet = match self.format.next_packet() {
+                Ok(packet) => packet,
+                Err(symphonia::core::errors::Error::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    self.finished = true;
+                    return Err(InjectionError::EndOfFile);
                 }
-            }
-            _ => {
-                // Convert other formats
-                // TODO: Implement proper conversion for all sample formats
-                warn!("Audio format conversion not fully implemented, using silence");
-                self.sample_buffer.resize(1024, 0);
-            }
-        }
+                Err(e) => {
+                    self.finished = true;
+                    return Err(e.into());
+                }
+            };
 
-        Ok(())
+            // Skip packets that aren't for our track
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+
+            // Decode the packet
+            let decoded = self.decoder.decode(&packet)?;
+
+            // Extract samples (inline to avoid borrow checker issues)
+            self.sample_buffer.clear();
+            match &decoded {
+                AudioBufferRef::S16(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+                AudioBufferRef::F32(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+                AudioBufferRef::F64(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+                AudioBufferRef::U8(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+                AudioBufferRef::U16(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+                AudioBufferRef::U24(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+                AudioBufferRef::U32(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+                AudioBufferRef::S8(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+                AudioBufferRef::S24(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+                AudioBufferRef::S32(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+            }
+
+            return Ok(());
+        }
+    }
+}
+
+fn interleave_to_buffer<T>(buffer: &mut Vec<i16>, buf: &AudioBuffer<T>)
+where
+    T: Sample,
+    i16: FromSample<T>,
+{
+    let channels = buf.spec().channels.count();
+    let frames = buf.frames();
+    buffer.reserve(frames * channels);
+
+    for frame_idx in 0..frames {
+        for ch in 0..channels {
+            let sample = buf.chan(ch)[frame_idx];
+            buffer.push(i16::from_sample(sample));
+        }
+    }
+}
+
+impl FileSource {
+    /// Convert frame count to sample count (frames × channels)
+    ///
+    /// Audio frames represent time units, while samples are individual channel values.
+    /// For stereo audio, 1 frame = 2 samples (left + right).
+    fn frames_to_samples(&self, frames: usize) -> usize {
+        frames * self.channels as usize
+    }
+
+    /// Convert sample count to frame count (samples / channels)
+    ///
+    /// Divides total sample count by number of channels to get frame count.
+    fn samples_to_frames(&self, samples: usize) -> usize {
+        samples / self.channels as usize
     }
 }
 
@@ -245,9 +282,10 @@ impl AudioSource for FileSource {
             return Err(InjectionError::EndOfFile);
         }
 
-        let mut output = Vec::with_capacity(num_samples);
+        let mut frames_needed = num_samples;
+        let mut output = Vec::with_capacity(self.frames_to_samples(num_samples));
 
-        while output.len() < num_samples {
+        while frames_needed > 0 {
             // If buffer is empty, decode next packet
             if self.sample_buffer.is_empty() {
                 if let Err(e) = self.decode_next_packet() {
@@ -260,17 +298,20 @@ impl AudioSource for FileSource {
             }
 
             // Copy samples from buffer
-            let needed = num_samples - output.len();
-            let available = self.sample_buffer.len();
-            let to_copy = needed.min(available);
+            let available_frames = self.samples_to_frames(self.sample_buffer.len());
+            if available_frames == 0 {
+                break;
+            }
 
-            output.extend_from_slice(&self.sample_buffer[..to_copy]);
-            self.sample_buffer.drain(..to_copy);
+            let frames_to_copy = frames_needed.min(available_frames);
+            let samples_to_copy = self.frames_to_samples(frames_to_copy);
 
-            self.position += to_copy as u64;
+            output.extend_from_slice(&self.sample_buffer[..samples_to_copy]);
+            self.sample_buffer.drain(..samples_to_copy);
+
+            self.position += frames_to_copy as u64;
+            frames_needed -= frames_to_copy;
         }
-
-        // TODO: Apply resampling if needed
 
         if output.is_empty() {
             Err(InjectionError::EndOfFile)
@@ -280,7 +321,7 @@ impl AudioSource for FileSource {
     }
 
     fn sample_rate(&self) -> u32 {
-        self.target_sample_rate.unwrap_or(self.sample_rate)
+        self.sample_rate
     }
 
     fn channels(&self) -> u8 {
@@ -321,7 +362,11 @@ impl AudioSource for FileSource {
     }
 
     fn seek(&mut self, seconds: f64) -> Result<()> {
-        let timestamp = (seconds * self.sample_rate as f64) as u64;
+        let whole_seconds = seconds.trunc();
+        let frac = (seconds - whole_seconds).clamp(0.0, 0.999_999_999);
+        let timestamp = self
+            .time_base
+            .calc_timestamp(Time::new(whole_seconds as u64, frac));
 
         self.format
             .seek(
@@ -367,7 +412,8 @@ mod tests {
     #[ignore]
     fn test_file_source_read_frames() {
         let mut source = FileSource::new("test.wav").unwrap();
+        let channels = source.channels() as usize;
         let frame = source.read_frame(960).unwrap();
-        assert_eq!(frame.len(), 960);
+        assert_eq!(frame.len(), 960 * channels);
     }
 }

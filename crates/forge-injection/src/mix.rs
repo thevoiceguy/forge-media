@@ -1,5 +1,6 @@
 //! Audio mixing modes for injection
 
+use crate::error::{InjectionError, Result};
 use forge_core::AudioSample;
 
 /// Audio mixing mode for injection
@@ -53,12 +54,12 @@ impl MixMode {
         call_audio: &mut [AudioSample],
         injected_audio: &[AudioSample],
         injection_volume: f32,
-    ) {
-        assert_eq!(
-            call_audio.len(),
-            injected_audio.len(),
-            "Audio buffer length mismatch"
-        );
+    ) -> Result<()> {
+        if call_audio.len() != injected_audio.len() {
+            return Err(InjectionError::InvalidParameters(
+                "Audio buffer length mismatch".to_string(),
+            ));
+        }
 
         match self {
             MixMode::Mix => {
@@ -85,6 +86,8 @@ impl MixMode {
                 }
             }
         }
+
+        Ok(())
     }
 }
 
@@ -115,6 +118,10 @@ impl FadeEnvelope {
     /// * `fade_out_ms` - Fade-out duration in milliseconds
     /// * `sample_rate` - Audio sample rate in Hz
     /// * `total_samples` - Total audio duration in samples (for fade-out)
+    ///
+    /// # Note
+    ///
+    /// If fade durations exceed the total audio duration, a warning is logged.
     pub fn new(
         fade_in_ms: u32,
         fade_out_ms: u32,
@@ -123,6 +130,20 @@ impl FadeEnvelope {
     ) -> Self {
         let fade_in_samples = (sample_rate as f32 * fade_in_ms as f32 / 1000.0) as usize;
         let fade_out_samples = (sample_rate as f32 * fade_out_ms as f32 / 1000.0) as usize;
+
+        // Validate fade durations don't exceed total duration
+        if let Some(total) = total_samples {
+            let total_fade = fade_in_samples.saturating_add(fade_out_samples);
+            if total_fade > total {
+                tracing::warn!(
+                    "Fade durations ({}ms in + {}ms out = {} samples) exceed total duration ({} samples), audio may be entirely faded",
+                    fade_in_ms,
+                    fade_out_ms,
+                    total_fade,
+                    total
+                );
+            }
+        }
 
         Self {
             fade_in_samples,
@@ -148,13 +169,15 @@ impl FadeEnvelope {
     /// Compute the current gain value (0.0 to 1.0)
     fn compute_gain(&self) -> f32 {
         // Fade-in
-        if self.position < self.fade_in_samples {
+        if self.fade_in_samples > 0 && self.position < self.fade_in_samples {
             return self.position as f32 / self.fade_in_samples as f32;
         }
 
         // Fade-out
         if let Some(total) = self.total_samples {
-            if self.position >= total.saturating_sub(self.fade_out_samples) {
+            if self.fade_out_samples > 0
+                && self.position >= total.saturating_sub(self.fade_out_samples)
+            {
                 let fade_out_position = self.position - (total - self.fade_out_samples);
                 return 1.0 - (fade_out_position as f32 / self.fade_out_samples as f32);
             }
@@ -179,7 +202,9 @@ mod tests {
         let mut call_audio = vec![100i16; 10];
         let injected_audio = vec![50i16; 10];
 
-        MixMode::Mix.apply(&mut call_audio, &injected_audio, 1.0);
+        MixMode::Mix
+            .apply(&mut call_audio, &injected_audio, 1.0)
+            .unwrap();
 
         // Should add the two signals
         assert_eq!(call_audio[0], 150);
@@ -190,7 +215,9 @@ mod tests {
         let mut call_audio = vec![100i16; 10];
         let injected_audio = vec![200i16; 10];
 
-        MixMode::Replace.apply(&mut call_audio, &injected_audio, 1.0);
+        MixMode::Replace
+            .apply(&mut call_audio, &injected_audio, 1.0)
+            .unwrap();
 
         // Should replace with injected audio
         assert_eq!(call_audio[0], 200);
@@ -201,7 +228,9 @@ mod tests {
         let mut call_audio = vec![1000i16; 10];
         let injected_audio = vec![100i16; 10];
 
-        MixMode::Duck { duck_factor: 0.5 }.apply(&mut call_audio, &injected_audio, 1.0);
+        MixMode::Duck { duck_factor: 0.5 }
+            .apply(&mut call_audio, &injected_audio, 1.0)
+            .unwrap();
 
         // Should duck call audio and add injection
         // 1000 * 0.5 + 100 = 600
@@ -227,5 +256,26 @@ mod tests {
         // At 960 samples (start of fade-out: 1000 - 80 + 40), gain should be ~0.5
         envelope.position = 960;
         assert!((envelope.compute_gain() - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_fade_duration_validation() {
+        let sample_rate = 8000;
+
+        // Test 1: Fade durations that exceed total duration (logs warning)
+        let total_samples = Some(1000); // 125ms total at 8kHz
+        let _envelope = FadeEnvelope::new(100, 100, sample_rate, total_samples);
+        // This should log a warning: 100ms + 100ms = 1600 samples > 1000 samples
+
+        // Test 2: Reasonable fade durations (no warning)
+        let total_samples = Some(8000); // 1s total
+        let _envelope = FadeEnvelope::new(50, 50, sample_rate, total_samples);
+        // This should not log a warning: 50ms + 50ms = 800 samples < 8000 samples
+
+        // Test 3: Zero-duration fades (no warning)
+        let _envelope = FadeEnvelope::new(0, 0, sample_rate, total_samples);
+
+        // Test 4: No total duration specified (no warning possible)
+        let _envelope = FadeEnvelope::new(100, 100, sample_rate, None);
     }
 }

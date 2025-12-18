@@ -33,6 +33,9 @@ pub struct ToneGenerator {
 
     /// Amplitude (0.0 to 1.0)
     amplitude: f32,
+
+    /// PRNG state for noise generation
+    rng_state: u64,
 }
 
 /// Type of tone to generate
@@ -78,6 +81,7 @@ impl ToneGenerator {
             position: 0,
             duration: None,
             amplitude: 0.5, // -6dB to avoid clipping when both tones are mixed
+            rng_state: 0x853c49e6748fea9b ^ sample_rate as u64,
         })
     }
 
@@ -94,12 +98,13 @@ impl ToneGenerator {
             position: 0,
             duration: None,
             amplitude: 0.8, // -2dB
+            rng_state: 0x853c49e6748fea9b ^ sample_rate as u64,
         }
     }
 
     /// Create a comfort noise generator
     ///
-    /// Generates pink noise at -40dBm0.
+    /// Generates white noise at -40dBm0.
     ///
     /// # Arguments
     ///
@@ -111,6 +116,7 @@ impl ToneGenerator {
             position: 0,
             duration: None,
             amplitude: 0.01, // -40dBm0
+            rng_state: 0x853c49e6748fea9b ^ sample_rate as u64,
         }
     }
 
@@ -126,6 +132,7 @@ impl ToneGenerator {
             position: 0,
             duration: None,
             amplitude: 0.0,
+            rng_state: 0x853c49e6748fea9b ^ sample_rate as u64,
         }
     }
 
@@ -172,15 +179,15 @@ impl ToneGenerator {
                 }
             }
             ToneType::ComfortNoise => {
-                use std::collections::hash_map::RandomState;
-                use std::hash::{BuildHasher, Hasher};
-
-                let hasher = RandomState::new();
-                for i in 0..num_samples {
-                    // Simple pseudo-random noise
-                    let mut h = hasher.build_hasher();
-                    h.write_u64(self.position + i as u64);
-                    let random = (h.finish() as f32 / u64::MAX as f32) * 2.0 - 1.0;
+                for _ in 0..num_samples {
+                    // Linear Congruential Generator (LCG) for white noise
+                    // Using PCG (Permuted Congruential Generator) multiplier for good statistical properties
+                    // Deterministic and fast, suitable for comfort noise generation
+                    self.rng_state = self
+                        .rng_state
+                        .wrapping_mul(6364136223846793005) // PCG multiplier
+                        .wrapping_add(1); // PCG increment
+                    let random = (self.rng_state as f32 / u64::MAX as f32) * 2.0 - 1.0;
                     let sample = random * self.amplitude * i16::MAX as f32;
                     samples.push(sample as i16);
                 }
@@ -230,6 +237,7 @@ impl AudioSource for ToneGenerator {
 
     fn reset(&mut self) -> Result<()> {
         self.position = 0;
+        self.rng_state = 0x853c49e6748fea9b ^ self.sample_rate as u64;
         Ok(())
     }
 

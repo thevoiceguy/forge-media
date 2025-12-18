@@ -52,7 +52,7 @@ impl MetricsHandle {
 
 /// Create Prometheus routes
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/metrics", get(get_prometheus_metrics))
+    Router::new().route("/metrics/prometheus", get(get_prometheus_metrics))
 }
 
 /// GET /metrics

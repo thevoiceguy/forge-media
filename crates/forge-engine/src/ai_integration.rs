@@ -695,6 +695,13 @@ impl AISessionManager {
         }
     }
 
+    /// Get the stored configuration for an AI session (if attached)
+    pub fn get_config(&self, call_id: &CallId) -> Option<AISessionConfig> {
+        self.configs
+            .get(call_id)
+            .map(|entry| entry.value().clone())
+    }
+
     /// List all active AI session call IDs
     pub fn list_sessions(&self) -> Vec<CallId> {
         self.sessions

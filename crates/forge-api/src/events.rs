@@ -150,6 +150,10 @@ impl EventBus {
             if let Err(e) = tx.send(event.clone()) {
                 warn!("Failed to send event to room {} channel: {}", room_id, e);
             }
+            if tx.receiver_count() == 0 {
+                drop(channels);
+                self.prune_room(&room_id).await;
+            }
         } else {
             debug!("No subscribers for room {}, event not sent", room_id);
         }
@@ -187,6 +191,17 @@ impl EventBus {
         }
     }
 
+    /// Remove a room channel if no subscribers remain
+    pub async fn prune_room(&self, room_id: &str) {
+        let mut channels = self.room_channels.write().await;
+        if let Some(sender) = channels.get(room_id) {
+            if sender.receiver_count() == 0 {
+                channels.remove(room_id);
+                debug!("Pruned empty event channel for room {}", room_id);
+            }
+        }
+    }
+
     /// Get the number of active room subscriptions
     pub async fn active_rooms(&self) -> usize {
         self.room_channels.read().await.len()
@@ -195,6 +210,16 @@ impl EventBus {
     /// Get the number of subscribers to the global channel
     pub fn global_subscriber_count(&self) -> usize {
         self.global_channel.receiver_count()
+    }
+
+    /// Get subscriber counts for each room
+    pub async fn room_subscriber_counts(&self) -> Vec<(String, usize)> {
+        self.room_channels
+            .read()
+            .await
+            .iter()
+            .map(|(room, tx)| (room.clone(), tx.receiver_count()))
+            .collect()
     }
 }
 

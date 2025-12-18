@@ -424,6 +424,10 @@ impl ApiServer {
         let tls_config = self.tls_config().await?;
 
         info!("Starting Forge API server on {}", self.config.bind_addr);
+
+        // Start session timeout monitoring (ensure idle sessions are cleaned up)
+        self.state.session_manager.start_monitoring().await;
+
         let listener = TcpListener::bind(&self.config.bind_addr).await?;
 
         // Log available endpoints for HTTP
@@ -445,7 +449,10 @@ impl ApiServer {
         let http_server = {
             let router = router.clone();
             async move {
-                axum::serve(listener, router.into_make_service())
+                axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
                     .await
                     .map_err(|e| {
                         error!("HTTP server error: {}", e);
@@ -469,7 +476,7 @@ impl ApiServer {
 
             let https = async move {
                 bind_rustls(https_addr, tls)
-                    .serve(router.into_make_service())
+                    .serve(router.into_make_service_with_connect_info::<SocketAddr>())
                     .await
                     .map_err(|e| {
                         error!("HTTPS server error: {}", e);
@@ -528,7 +535,10 @@ impl ApiServer {
             let router = router.clone();
             let shutdown = shutdown_notify.clone();
             async move {
-                axum::serve(listener, router.into_make_service())
+                axum::serve(
+                    listener,
+                    router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
                     .with_graceful_shutdown(async move {
                         shutdown.notified().await;
                     })
@@ -544,7 +554,9 @@ impl ApiServer {
             let https_addr = self.config.https_bind.unwrap_or(self.config.bind_addr);
 
             info!("✓ HTTPS server listening on {}", https_addr);
-            let https_router = router.clone().into_make_service();
+            let https_router = router
+                .clone()
+                .into_make_service_with_connect_info::<SocketAddr>();
             let shutdown = shutdown_notify.clone();
             let https_server = async move {
                 tokio::select! {

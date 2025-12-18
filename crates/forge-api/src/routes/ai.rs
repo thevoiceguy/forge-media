@@ -50,6 +50,8 @@ pub struct AISessionResponse {
     pub voice: Option<String>,
     pub enable_vad: bool,
     pub enable_barge_in: bool,
+    pub endpoint: Option<String>,
+    pub temperature: Option<f32>,
 }
 
 /// Function call response request
@@ -61,6 +63,13 @@ pub struct FunctionResponseRequest {
     /// Function output/result as JSON string
     #[validate(length(max = 65536))]
     pub output: String,
+}
+
+/// List of active AI sessions
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AISessionListResponse {
+    pub sessions: Vec<AISessionResponse>,
+    pub count: usize,
 }
 
 pub(crate) fn validate_ai_endpoint(
@@ -192,6 +201,8 @@ async fn attach_ai(
         voice: config.voice,
         enable_vad: config.enable_vad,
         enable_barge_in: config.enable_barge_in,
+        endpoint: config.endpoint,
+        temperature: config.temperature,
     };
 
     tracing::info!("AI attached to session: {}", response.call_id);
@@ -225,14 +236,20 @@ async fn get_ai_status(
         .await
         .unwrap_or(AISessionState::Terminated);
 
-    // TODO: Store and retrieve config details
+    let config = state
+        .ai_session_manager
+        .get_config(&call_id)
+        .ok_or_else(|| ApiError::NotFound(format!("No AI session found for call {}", call_id.0)))?;
+
     let response = AISessionResponse {
         call_id: call_id.0,
         state: format!("{:?}", ai_state),
-        model: "gpt-4o-realtime-preview".to_string(), // TODO: Get from stored config
-        voice: Some("alloy".to_string()),              // TODO: Get from stored config
-        enable_vad: true,                              // TODO: Get from stored config
-        enable_barge_in: true,                         // TODO: Get from stored config
+        model: config.model,
+        voice: config.voice,
+        enable_vad: config.enable_vad,
+        enable_barge_in: config.enable_barge_in,
+        endpoint: config.endpoint,
+        temperature: config.temperature,
     };
 
     Ok(success(response))
@@ -260,6 +277,41 @@ async fn detach_ai(
     tracing::info!("AI detached from session: {}", call_id.0);
 
     Ok(no_content())
+}
+
+/// List active AI sessions
+///
+/// GET /v1/sessions/ai
+#[tracing::instrument(skip(state))]
+async fn list_ai_sessions(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<ApiSuccess<AISessionListResponse>> {
+    let call_ids = state.ai_session_manager.list_sessions();
+    let mut sessions = Vec::new();
+
+    for call_id in call_ids {
+        let ai_state = state
+            .ai_session_manager
+            .get_state(&call_id)
+            .await
+            .unwrap_or(AISessionState::Terminated);
+
+        if let Some(config) = state.ai_session_manager.get_config(&call_id) {
+            sessions.push(AISessionResponse {
+                call_id: call_id.0,
+                state: format!("{:?}", ai_state),
+                model: config.model,
+                voice: config.voice,
+                enable_vad: config.enable_vad,
+                enable_barge_in: config.enable_barge_in,
+                endpoint: config.endpoint,
+                temperature: config.temperature,
+            });
+        }
+    }
+
+    let count = sessions.len();
+    Ok(success(AISessionListResponse { sessions, count }))
 }
 
 /// Send function call response to AI
@@ -298,6 +350,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/sessions/:id/ai", post(attach_ai))
         .route("/v1/sessions/:id/ai", get(get_ai_status))
         .route("/v1/sessions/:id/ai", delete(detach_ai))
+        .route("/v1/sessions/ai", get(list_ai_sessions))
         .route(
             "/v1/sessions/:id/ai/function-response",
             post(send_function_response),

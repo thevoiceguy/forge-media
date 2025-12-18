@@ -124,7 +124,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     info!("WebSocket client {} connected", client_id);
 
     // Track current subscription
-    let mut current_subscription: Option<tokio::sync::broadcast::Receiver<ConferenceEvent>> = None;
+    struct RoomSubscription {
+        room_id: Option<String>,
+        rx: tokio::sync::broadcast::Receiver<ConferenceEvent>,
+    }
+
+    let mut current_subscription: Option<RoomSubscription> = None;
 
     loop {
         tokio::select! {
@@ -139,17 +144,42 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                 let response = match req {
                                     SubscriptionRequest::SubscribeGlobal => {
                                         debug!("Client {} subscribing to global events", client_id);
-                                        current_subscription = Some(state.event_bus.subscribe_global());
+                                        if let Some(RoomSubscription { room_id: Some(room), .. }) =
+                                            current_subscription.take()
+                                        {
+                                            state.event_bus.prune_room(&room).await;
+                                        } else {
+                                            current_subscription = None;
+                                        }
+                                        current_subscription = Some(RoomSubscription {
+                                            room_id: None,
+                                            rx: state.event_bus.subscribe_global(),
+                                        });
                                         SubscriptionResponse::SubscribedGlobal
                                     }
                                     SubscriptionRequest::SubscribeRoom { room_id } => {
                                         debug!("Client {} subscribing to room {}", client_id, room_id);
-                                        current_subscription = Some(state.event_bus.subscribe_room(&room_id).await);
+                                        if let Some(RoomSubscription { room_id: Some(room), .. }) =
+                                            current_subscription.take()
+                                        {
+                                            state.event_bus.prune_room(&room).await;
+                                        } else {
+                                            current_subscription = None;
+                                        }
+                                        current_subscription = Some(RoomSubscription {
+                                            room_id: Some(room_id.clone()),
+                                            rx: state.event_bus.subscribe_room(&room_id).await,
+                                        });
                                         SubscriptionResponse::SubscribedRoom { room_id }
                                     }
                                     SubscriptionRequest::Unsubscribe => {
                                         debug!("Client {} unsubscribing", client_id);
-                                        current_subscription = None;
+                                        if let Some(RoomSubscription { room_id: Some(room), .. }) = current_subscription.take() {
+                                            // Drop receiver before pruning
+                                            state.event_bus.prune_room(&room).await;
+                                        } else {
+                                            current_subscription = None;
+                                        }
                                         SubscriptionResponse::Unsubscribed
                                     }
                                     SubscriptionRequest::Ping => {
@@ -200,7 +230,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             }
             // Handle events from subscription
             event = async {
-                if let Some(ref mut rx) = current_subscription {
+                if let Some(RoomSubscription { rx, .. }) = &mut current_subscription {
                     rx.recv().await.ok()
                 } else {
                     std::future::pending().await
@@ -219,6 +249,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 }
             }
         }
+    }
+
+    // Clean up any room-specific subscription to prevent channel leaks
+    if let Some(RoomSubscription { room_id: Some(room), .. }) = current_subscription {
+        state.event_bus.prune_room(&room).await;
     }
 
     info!("WebSocket client {} disconnected", client_id);
@@ -314,5 +349,90 @@ mod tests {
         // Simple test to verify router can be created
         let state = create_test_state();
         let _router = create_test_router(state);
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_channel_cleanup() {
+        // Test that room channels are properly cleaned up when subscribers disconnect
+        let state = create_test_state();
+
+        // Initially, no rooms should be active
+        assert_eq!(state.event_bus.active_rooms().await, 0);
+
+        // Subscribe to a room
+        let room_id = "test-cleanup-room";
+        let _rx = state.event_bus.subscribe_room(room_id).await;
+
+        // Room should now be active
+        assert_eq!(state.event_bus.active_rooms().await, 1);
+        let counts = state.event_bus.room_subscriber_counts().await;
+        assert_eq!(counts.len(), 1);
+        assert_eq!(counts[0].0, room_id);
+        assert_eq!(counts[0].1, 1); // One subscriber
+
+        // Drop the receiver (simulates disconnect)
+        drop(_rx);
+
+        // Manually prune (in production, this happens in websocket handler)
+        state.event_bus.prune_room(room_id).await;
+
+        // Room should be cleaned up
+        assert_eq!(state.event_bus.active_rooms().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_multiple_subscribers() {
+        // Test that channels are only pruned when last subscriber disconnects
+        let state = create_test_state();
+        let room_id = "multi-subscriber-room";
+
+        // Create multiple subscribers
+        let rx1 = state.event_bus.subscribe_room(room_id).await;
+        let rx2 = state.event_bus.subscribe_room(room_id).await;
+        let rx3 = state.event_bus.subscribe_room(room_id).await;
+
+        // Should have 3 subscribers
+        let counts = state.event_bus.room_subscriber_counts().await;
+        assert_eq!(counts[0].1, 3);
+
+        // Drop first two subscribers
+        drop(rx1);
+        drop(rx2);
+
+        // Prune should NOT remove the channel (still 1 subscriber)
+        state.event_bus.prune_room(room_id).await;
+        assert_eq!(state.event_bus.active_rooms().await, 1);
+
+        // Drop last subscriber
+        drop(rx3);
+        state.event_bus.prune_room(room_id).await;
+
+        // Now channel should be removed
+        assert_eq!(state.event_bus.active_rooms().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_event_bus_auto_prune_on_publish() {
+        // Test that channels are auto-pruned when publishing to rooms with no subscribers
+        let state = create_test_state();
+        let room_id = "auto-prune-room";
+
+        // Subscribe and immediately drop
+        let rx = state.event_bus.subscribe_room(room_id).await;
+        assert_eq!(state.event_bus.active_rooms().await, 1);
+        drop(rx);
+
+        // Publish an event (should trigger auto-prune)
+        state
+            .event_bus
+            .publish(ConferenceEvent::ParticipantJoined {
+                room_id: room_id.to_string(),
+                participant_id: "test".to_string(),
+                timestamp: 0,
+            })
+            .await;
+
+        // Channel should be auto-pruned
+        assert_eq!(state.event_bus.active_rooms().await, 0);
     }
 }

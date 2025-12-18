@@ -18,6 +18,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/ha/status", get(get_ha_status))
         .route("/ha/transfer-primary", post(transfer_primary))
+        .route("/ha/health", get(health_probe))
 }
 
 /// HA cluster status response
@@ -188,6 +189,25 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoRespon
         // HA not compiled in - always healthy
         StatusCode::OK
     }
+}
+
+/// GET /ha/health - HA-aware health probe for load balancers
+///
+/// - 200 when primary and healthy (or HA disabled)
+/// - 503 when standby or degraded
+pub async fn health_probe(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    #[cfg(feature = "ha")]
+    {
+        if let Some(ha_manager) = &state.ha_manager {
+            if ha_manager.is_primary().await && ha_manager.is_healthy().await {
+                return StatusCode::OK;
+            }
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    }
+
+    // HA disabled or not compiled; treat as healthy
+    StatusCode::OK
 }
 
 #[cfg(test)]

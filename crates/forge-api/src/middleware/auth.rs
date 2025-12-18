@@ -35,7 +35,7 @@ impl AuthConfig {
 }
 
 /// Public endpoints that don't require authentication
-const PUBLIC_ENDPOINTS: &[&str] = &["/health", "/ha/health", "/metrics/prometheus"];
+const PUBLIC_ENDPOINTS: &[&str] = &["/health", "/ha/health"];
 
 /// Simple bearer-token authorization middleware
 pub async fn auth_middleware(
@@ -122,8 +122,8 @@ mod tests {
             "Health endpoint should be public"
         );
         assert!(
-            PUBLIC_ENDPOINTS.contains(&"/metrics/prometheus"),
-            "Metrics endpoint should be public"
+            PUBLIC_ENDPOINTS.contains(&"/ha/health"),
+            "HA health endpoint should be public"
         );
         assert!(
             !PUBLIC_ENDPOINTS.contains(&"/v1/sessions"),

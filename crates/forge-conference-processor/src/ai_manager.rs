@@ -215,6 +215,11 @@ impl ConferenceAIManager {
         *self.state.read()
     }
 
+    /// Get the configuration
+    pub fn config(&self) -> &ConferenceAIConfig {
+        &self.config
+    }
+
     /// Get the audio mode
     pub fn audio_mode(&self) -> AudioMode {
         self.config.audio_mode

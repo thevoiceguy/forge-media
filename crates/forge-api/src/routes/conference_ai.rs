@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
 };
 use forge_conference_processor::{AudioMode, ConferenceAIConfig, ConferenceAIManager};
-use forge_engine::ai_integration::AISessionConfig;
+use forge_engine::ai_integration::{AISessionConfig, AISessionState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
@@ -26,6 +26,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/conferences/:room_id/ai", post(attach_ai))
         .route("/v1/conferences/:room_id/ai", get(get_ai_status))
         .route("/v1/conferences/:room_id/ai", delete(detach_ai))
+        .route("/v1/conferences/ai", get(list_conference_ai))
 }
 
 /// Request to attach AI to a conference room
@@ -64,11 +65,20 @@ pub struct AttachConferenceAIRequest {
 pub struct ConferenceAIResponse {
     pub room_id: String,
     pub state: String,
+    pub ai_session_state: String,
     pub model: String,
     pub voice: Option<String>,
     pub audio_mode: String,
     pub enable_transcription: bool,
     pub participants_heard: Vec<String>,
+    pub endpoint: Option<String>,
+    pub temperature: Option<f32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConferenceAIListResponse {
+    pub conferences: Vec<ConferenceAIResponse>,
+    pub count: usize,
 }
 
 /// Attach AI to a conference room
@@ -169,12 +179,25 @@ async fn attach_ai(
     // Build response
     let response = ConferenceAIResponse {
         room_id: room_id.clone(),
-        state: format!("{:?}", room.ai_state().unwrap_or(forge_conference_processor::ConferenceAIState::Connecting)),
+        state: format!(
+            "{:?}",
+            room.ai_state().unwrap_or(forge_conference_processor::ConferenceAIState::Connecting)
+        ),
+        ai_session_state: format!(
+            "{:?}",
+            state
+                .ai_session_manager
+                .get_state(&CallId::from(format!("conference-{}", room_id)))
+                .await
+                .unwrap_or(AISessionState::Active)
+        ),
         model: ai_config.model,
         voice: ai_config.voice,
         audio_mode: format!("{:?}", audio_mode),
         enable_transcription: request.enable_transcription.unwrap_or(false),
         participants_heard: room.participants(),
+        endpoint: ai_config.endpoint,
+        temperature: ai_config.temperature,
     };
 
     Ok(created(response))
@@ -200,20 +223,91 @@ async fn get_ai_status(
         )));
     }
 
-    let ai_state = room.ai_state().unwrap_or(forge_conference_processor::ConferenceAIState::Terminated);
+    let ai_state = room
+        .ai_state()
+        .unwrap_or(forge_conference_processor::ConferenceAIState::Terminated);
 
-    // Build response (simplified for now - would need to store more info)
+    let call_id = CallId::from(format!("conference-{}", room_id));
+    let config = state
+        .ai_session_manager
+        .get_config(&call_id)
+        .ok_or_else(|| ApiError::NotFound(format!("No AI session found for room {}", room_id)))?;
+    let ai_session_state = state
+        .ai_session_manager
+        .get_state(&call_id)
+        .await
+        .unwrap_or(AISessionState::Terminated);
+
+    // Get audio_mode from conference AI config
+    let audio_mode = room
+        .ai_config()
+        .map(|cfg| format!("{:?}", cfg.audio_mode))
+        .unwrap_or_else(|| "Unknown".to_string());
+
     let response = ConferenceAIResponse {
         room_id: room_id.clone(),
         state: format!("{:?}", ai_state),
-        model: "unknown".to_string(), // Would need to store this
-        voice: None,
-        audio_mode: "Mixed".to_string(), // Would need to store this
+        ai_session_state: format!("{:?}", ai_session_state),
+        model: config.model,
+        voice: config.voice,
+        audio_mode,
         enable_transcription: false,
         participants_heard: room.participants(),
+        endpoint: config.endpoint,
+        temperature: config.temperature,
     };
 
     Ok(Json(response).into_response())
+}
+
+/// List conference AI attachments
+///
+/// GET /v1/conferences/ai
+async fn list_conference_ai(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<axum::response::Response> {
+    let room_ids = state.conference_bridge.list_rooms();
+    let mut conferences = Vec::new();
+
+    for room_id in room_ids {
+        if let Ok(room) = state.conference_bridge.get_room(&room_id) {
+            if room.has_ai() {
+                let call_id = CallId::from(format!("conference-{}", room_id));
+                if let Some(config) = state.ai_session_manager.get_config(&call_id) {
+                    let ai_state = room
+                        .ai_state()
+                        .unwrap_or(forge_conference_processor::ConferenceAIState::Terminated);
+                    let ai_session_state = state
+                        .ai_session_manager
+                        .get_state(&call_id)
+                        .await
+                        .unwrap_or(AISessionState::Terminated);
+
+                    // Get audio_mode from conference AI config
+                    let audio_mode = room
+                        .ai_config()
+                        .map(|cfg| format!("{:?}", cfg.audio_mode))
+                        .unwrap_or_else(|| "Unknown".to_string());
+
+                    conferences.push(ConferenceAIResponse {
+                        room_id: room_id.clone(),
+                        state: format!("{:?}", ai_state),
+                        ai_session_state: format!("{:?}", ai_session_state),
+                        model: config.model.clone(),
+                        voice: config.voice.clone(),
+                        audio_mode,
+                        enable_transcription: false,
+                        participants_heard: room.participants(),
+                        endpoint: config.endpoint.clone(),
+                        temperature: config.temperature,
+                    });
+                }
+            }
+        }
+    }
+
+    let count = conferences.len();
+    Ok(Json(ConferenceAIListResponse { conferences, count }).into_response())
 }
 
 /// Detach AI from a conference room
@@ -299,11 +393,14 @@ mod tests {
         let response = ConferenceAIResponse {
             room_id: "test-room".to_string(),
             state: "Active".to_string(),
+            ai_session_state: "Active".to_string(),
             model: "gpt-4o-realtime-preview-2024-12-17".to_string(),
             voice: Some("alloy".to_string()),
             audio_mode: "Mixed".to_string(),
             enable_transcription: false,
             participants_heard: vec!["alice".to_string(), "bob".to_string()],
+            endpoint: Some("https://api.example.com".to_string()),
+            temperature: Some(0.8),
         };
 
         let json = serde_json::to_string(&response).unwrap();

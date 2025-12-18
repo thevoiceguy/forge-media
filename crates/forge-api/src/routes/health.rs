@@ -6,8 +6,12 @@ use axum::Router;
 use axum::{extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use super::sessions::AppState;
+
+static START_TIME: OnceLock<Instant> = OnceLock::new();
 
 /// Health check response
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,6 +46,11 @@ async fn health_check(State(state): State<Arc<AppState>>) -> axum::response::Res
         }
     };
 
+    // Calculate uptime
+    let start = START_TIME.get_or_init(Instant::now);
+    let uptime_seconds = start.elapsed().as_secs();
+
+    // Build response
     let body = HealthResponse {
         status: if status == StatusCode::OK {
             "healthy".to_string()
@@ -49,7 +58,7 @@ async fn health_check(State(state): State<Arc<AppState>>) -> axum::response::Res
             "standby".to_string()
         },
         version: env!("CARGO_PKG_VERSION").to_string(),
-        uptime_seconds: 0, // TODO: Track actual uptime
+        uptime_seconds,
     };
 
     (status, axum::Json(body)).into_response()

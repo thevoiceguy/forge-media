@@ -807,6 +807,11 @@ impl ConferenceRoom {
         self.ai_manager.read().as_ref().map(|ai| ai.state())
     }
 
+    /// Get AI configuration if attached
+    pub fn ai_config(&self) -> Option<crate::ai_manager::ConferenceAIConfig> {
+        self.ai_manager.read().as_ref().map(|ai| ai.config().clone())
+    }
+
     // ============================================================================
     // DTMF Command Management
     // ============================================================================

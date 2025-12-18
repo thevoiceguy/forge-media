@@ -243,7 +243,16 @@ impl FailoverOrchestrator {
     /// Perform promotion side-effects (VIP activation and immediate heartbeat publish)
     async fn promote_to_primary(&self) -> Result<()> {
         if let Some(ref vip) = self.vip_manager {
+            #[cfg(feature = "metrics")]
+            let _timer = crate::metrics::VIP_ACTIVATION_DURATION.start_timer();
+
+            #[cfg(feature = "metrics")]
+            crate::metrics::VIP_ACTIVATIONS_TOTAL.inc();
+
             vip.activate().await.map_err(|e| {
+                #[cfg(feature = "metrics")]
+                crate::metrics::VIP_ACTIVATION_FAILURES.inc();
+
                 ForgeError::Internal(format!("Failed to activate VIP during promotion: {}", e))
             })?;
         }

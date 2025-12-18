@@ -13,6 +13,7 @@ pub mod heartbeat;
 pub mod election;
 pub mod failover;
 pub mod vip_manager;
+pub mod metrics;
 
 // Re-export commonly used types
 pub use config::{HAConfig, RedisConfig, CloudConfig, OnPremConfig, RoleConfig};

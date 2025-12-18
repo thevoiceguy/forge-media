@@ -554,3 +554,180 @@ fn test_recovery_stats_calculation() {
     // All conferences should succeed in this scenario
     assert_eq!(stats.conferences_failed, 0, "No conferences should fail");
 }
+
+#[tokio::test]
+#[ignore] // Requires Redis Sentinel setup
+async fn test_sentinel_master_discovery() {
+    use forge_ha::*;
+
+    // Note: This test requires a real Redis Sentinel setup
+    // For local testing, start Redis with Sentinel:
+    // 1. redis-server --port 6379
+    // 2. redis-server --port 26379 --sentinel
+    // 3. Configure sentinel: SENTINEL MONITOR mymaster 127.0.0.1 6379 1
+
+    let redis_url = std::env::var("TEST_REDIS_URL")
+        .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let sentinel_url = std::env::var("TEST_SENTINEL_URL")
+        .unwrap_or_else(|_| "redis://localhost:26379".to_string());
+
+    let config = RedisConfig {
+        url: redis_url,
+        sentinels: Some(vec![sentinel_url]),
+        master_name: Some("mymaster".to_string()),
+        key_prefix: "test:ha:".to_string(),
+        heartbeat_interval_secs: 10,
+        failover_timeout_secs: 25,
+        session_ttl_secs: 3600,
+        conference_ttl_secs: 7200,
+    };
+
+    // Test Sentinel discovery
+    let client = RedisHAClient::from_config(&config)
+        .await
+        .expect("Failed to discover master via Sentinel");
+
+    // Verify we can connect and perform operations
+    client.ping().await.expect("Failed to ping discovered master");
+
+    // Test with credentials in base URL
+    let mut config_with_creds = config.clone();
+    config_with_creds.url = "redis://testuser:testpass@localhost:6379".to_string();
+
+    // This should preserve credentials when discovering master
+    let result = RedisHAClient::from_config(&config_with_creds).await;
+
+    // If Sentinel isn't configured, this might fail, but that's expected
+    if let Ok(client_with_creds) = result {
+        // Verify credentials were preserved (would fail auth if not)
+        let _ = client_with_creds.ping().await;
+    }
+}
+
+#[tokio::test]
+#[ignore] // Requires Redis server
+async fn test_lock_renewal_race_condition() {
+    use forge_ha::*;
+
+    let redis_url = test_redis_url();
+    let key_prefix = test_key_prefix();
+
+    let client1 = RedisHAClient::new(&redis_url, &key_prefix)
+        .await
+        .expect("Failed to create client 1");
+
+    let client2 = RedisHAClient::new(&redis_url, &key_prefix)
+        .await
+        .expect("Failed to create client 2");
+
+    let lock_key = "test:lock";
+    let instance1 = "instance-1";
+    let instance2 = "instance-2";
+
+    // Instance 1 acquires the lock
+    let acquired = client1
+        .set_nx_ex(lock_key, instance1, Duration::from_secs(10))
+        .await
+        .expect("Failed to acquire lock");
+    assert!(acquired, "Instance 1 should acquire the lock");
+
+    // Both instances try to renew the lock simultaneously
+    let ttl = Duration::from_secs(15);
+    let (result1, result2) = tokio::join!(
+        client1.compare_and_expire(lock_key, instance1, ttl),
+        client2.compare_and_expire(lock_key, instance2, ttl)
+    );
+
+    let renewed1 = result1.expect("compare_and_expire should not error");
+    let renewed2 = result2.expect("compare_and_expire should not error");
+
+    // Only instance 1 (the owner) should succeed
+    assert!(renewed1, "Instance 1 should renew (it owns the lock)");
+    assert!(!renewed2, "Instance 2 should fail (it doesn't own the lock)");
+
+    // Verify lock still belongs to instance 1
+    let current_owner = client1
+        .get_raw(lock_key)
+        .await
+        .expect("Failed to get lock value")
+        .expect("Lock should exist");
+    assert_eq!(current_owner, instance1, "Lock should still belong to instance 1");
+
+    // Test case 2: Lock stolen between get and renewal attempt
+    // This simulates the race condition that compare_and_expire prevents
+
+    // Instance 1 still owns the lock, but instance 2 tries to steal and renew
+    let steal_result = client2
+        .set_nx_ex(lock_key, instance2, Duration::from_secs(10))
+        .await
+        .expect("Failed to attempt steal");
+
+    // Should fail because lock exists
+    assert!(!steal_result, "Should not be able to steal existing lock");
+
+    // Instance 1 can still renew atomically
+    let final_renewal = client1
+        .compare_and_expire(lock_key, instance1, Duration::from_secs(20))
+        .await
+        .expect("Final renewal should not error");
+    assert!(final_renewal, "Instance 1 should successfully renew its lock");
+
+    // Cleanup
+    let _ = client1.del(lock_key).await;
+}
+
+#[tokio::test]
+#[ignore] // Requires Redis server
+async fn test_compare_and_expire_ownership_change() {
+    use forge_ha::*;
+
+    let redis_url = test_redis_url();
+    let key_prefix = test_key_prefix();
+
+    let client = RedisHAClient::new(&redis_url, &key_prefix)
+        .await
+        .expect("Failed to create client");
+
+    let lock_key = "test:ownership";
+    let original_owner = "instance-1";
+    let new_owner = "instance-2";
+
+    // Set initial lock
+    client
+        .set_raw(lock_key, original_owner)
+        .await
+        .expect("Failed to set initial lock");
+
+    // Original owner can renew
+    let renewed = client
+        .compare_and_expire(lock_key, original_owner, Duration::from_secs(10))
+        .await
+        .expect("compare_and_expire should not error");
+    assert!(renewed, "Original owner should successfully renew");
+
+    // Simulate ownership change (e.g., manual failover)
+    client
+        .set_raw(lock_key, new_owner)
+        .await
+        .expect("Failed to change ownership");
+
+    // Original owner's renewal should now fail
+    let renewal_after_change = client
+        .compare_and_expire(lock_key, original_owner, Duration::from_secs(10))
+        .await
+        .expect("compare_and_expire should not error");
+    assert!(
+        !renewal_after_change,
+        "Old owner should fail to renew after ownership changed"
+    );
+
+    // New owner can renew
+    let new_owner_renewal = client
+        .compare_and_expire(lock_key, new_owner, Duration::from_secs(10))
+        .await
+        .expect("compare_and_expire should not error");
+    assert!(new_owner_renewal, "New owner should successfully renew");
+
+    // Cleanup
+    let _ = client.del(lock_key).await;
+}

@@ -321,6 +321,114 @@ mod config_tests {
         assert!(matches!(primary, RoleConfig::Primary));
         assert!(matches!(standby, RoleConfig::Standby));
     }
+
+    #[test]
+    fn test_sentinel_config_validation_missing_master_name() {
+        use crate::types::{DeploymentMode, PortRange};
+
+        let config = HAConfig {
+            enabled: true,
+            instance_id: None,
+            role: RoleConfig::Auto,
+            deployment_mode: DeploymentMode::Cloud,
+            cloud: Some(CloudConfig {
+                provider: CloudProvider::Gcp,
+                health_check_path: "/health".to_string(),
+                standby_returns_503: true,
+            }),
+            onprem: None,
+            redis: RedisConfig {
+                url: "redis://localhost:6379".to_string(),
+                sentinels: Some(vec!["redis://sentinel1:26379".to_string()]),
+                master_name: None, // Missing master_name!
+                key_prefix: "forge:ha:".to_string(),
+                heartbeat_interval_secs: 10,
+                failover_timeout_secs: 25,
+                session_ttl_secs: 3600,
+                conference_ttl_secs: 7200,
+            },
+            port_range: PortRange::new(30000, 35000),
+        };
+
+        let result = config.validate();
+        assert!(result.is_err(), "Should fail validation when sentinels configured without master_name");
+        assert!(
+            result.unwrap_err().contains("master_name is required"),
+            "Error should mention master_name requirement"
+        );
+    }
+
+    #[test]
+    fn test_sentinel_config_validation_empty_sentinels() {
+        use crate::types::{DeploymentMode, PortRange};
+
+        let config = HAConfig {
+            enabled: true,
+            instance_id: None,
+            role: RoleConfig::Auto,
+            deployment_mode: DeploymentMode::Cloud,
+            cloud: Some(CloudConfig {
+                provider: CloudProvider::Gcp,
+                health_check_path: "/health".to_string(),
+                standby_returns_503: true,
+            }),
+            onprem: None,
+            redis: RedisConfig {
+                url: "redis://localhost:6379".to_string(),
+                sentinels: Some(vec![]), // Empty sentinel list!
+                master_name: Some("mymaster".to_string()),
+                key_prefix: "forge:ha:".to_string(),
+                heartbeat_interval_secs: 10,
+                failover_timeout_secs: 25,
+                session_ttl_secs: 3600,
+                conference_ttl_secs: 7200,
+            },
+            port_range: PortRange::new(30000, 35000),
+        };
+
+        let result = config.validate();
+        assert!(result.is_err(), "Should fail validation with empty sentinels list");
+        assert!(
+            result.unwrap_err().contains("sentinels list cannot be empty"),
+            "Error should mention empty sentinels list"
+        );
+    }
+
+    #[test]
+    fn test_sentinel_config_validation_valid() {
+        use crate::types::{DeploymentMode, PortRange};
+
+        let config = HAConfig {
+            enabled: true,
+            instance_id: None,
+            role: RoleConfig::Auto,
+            deployment_mode: DeploymentMode::Cloud,
+            cloud: Some(CloudConfig {
+                provider: CloudProvider::Gcp,
+                health_check_path: "/health".to_string(),
+                standby_returns_503: true,
+            }),
+            onprem: None,
+            redis: RedisConfig {
+                url: "redis://localhost:6379".to_string(),
+                sentinels: Some(vec![
+                    "redis://sentinel1:26379".to_string(),
+                    "redis://sentinel2:26379".to_string(),
+                    "redis://sentinel3:26379".to_string(),
+                ]),
+                master_name: Some("mymaster".to_string()),
+                key_prefix: "forge:ha:".to_string(),
+                heartbeat_interval_secs: 10,
+                failover_timeout_secs: 25,
+                session_ttl_secs: 3600,
+                conference_ttl_secs: 7200,
+            },
+            port_range: PortRange::new(30000, 35000),
+        };
+
+        let result = config.validate();
+        assert!(result.is_ok(), "Valid sentinel config should pass validation");
+    }
 }
 
 #[cfg(test)]

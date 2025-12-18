@@ -383,6 +383,12 @@ impl RedisHAClient {
         master_name: &str,
         base_url: &str,
     ) -> Result<String> {
+        #[cfg(feature = "metrics")]
+        let _timer = crate::metrics::SENTINEL_QUERY_DURATION.start_timer();
+
+        #[cfg(feature = "metrics")]
+        crate::metrics::SENTINEL_QUERIES_TOTAL.inc();
+
         for sentinel_url in sentinels {
             let sanitized = sanitize_redis_url(sentinel_url);
             info!(
@@ -433,6 +439,9 @@ impl RedisHAClient {
                 }
             }
         }
+
+        #[cfg(feature = "metrics")]
+        crate::metrics::SENTINEL_QUERY_FAILURES.inc();
 
         Err(ForgeError::Internal(
             "Failed to discover Redis master via all provided sentinels".to_string(),

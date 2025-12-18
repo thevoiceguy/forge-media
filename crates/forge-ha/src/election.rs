@@ -94,6 +94,12 @@ impl PrimaryElection {
 
         debug!("Renewing primary lock");
 
+        #[cfg(feature = "metrics")]
+        let _timer = crate::metrics::LOCK_RENEWAL_DURATION.start_timer();
+
+        #[cfg(feature = "metrics")]
+        crate::metrics::LOCK_RENEWALS_TOTAL.inc();
+
         // Check if we still own the lock
         let ttl = Duration::from_secs(PRIMARY_LOCK_TTL_SECS);
         let renewed = self
@@ -109,6 +115,10 @@ impl PrimaryElection {
                 "Failed to renew primary lock (value no longer matches {}). Stepping down.",
                 self.instance_id
             );
+
+            #[cfg(feature = "metrics")]
+            crate::metrics::LOCK_RENEWAL_FAILURES.inc();
+
             *self.is_primary.write().await = false;
             *self.role.write().await = HARole::Standby;
             Err(ForgeError::Internal(

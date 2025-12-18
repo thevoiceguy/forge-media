@@ -217,6 +217,25 @@ impl HAConfig {
             return Err("Redis URL cannot be empty".to_string());
         }
 
+        // Validate Redis Sentinel configuration
+        if self.redis.sentinels.is_some() {
+            if self.redis.master_name.is_none() || self.redis.master_name.as_ref().unwrap().is_empty() {
+                return Err("Redis master_name is required when sentinels are configured".to_string());
+            }
+
+            let sentinels = self.redis.sentinels.as_ref().unwrap();
+            if sentinels.is_empty() {
+                return Err("Redis sentinels list cannot be empty when configured".to_string());
+            }
+
+            // Validate each sentinel URL is non-empty
+            for (i, sentinel) in sentinels.iter().enumerate() {
+                if sentinel.is_empty() {
+                    return Err(format!("Redis sentinel URL at index {} cannot be empty", i));
+                }
+            }
+        }
+
         // Validate deployment-specific config
         match self.deployment_mode {
             DeploymentMode::Cloud => {

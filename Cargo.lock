@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "forge-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aya",
  "aya-build",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "forge-kernel-ebpf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aya-ebpf",
 ]

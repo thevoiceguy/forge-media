@@ -2,13 +2,14 @@
 
 use crate::{Error, Result};
 use aya::{
-    maps::{HashMap as BpfHashMap, RingBuf as BpfRingBuf},
-    programs::{Xdp, XdpFlags},
+    maps::{HashMap as BpfHashMap},
+    programs::{xdp::XdpLinkId, Xdp, XdpFlags},
+    Pod,
     Ebpf,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// XDP operating mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,12 +53,17 @@ pub struct ForwardValue {
     pub last_seen: u64,
 }
 
+unsafe impl Pod for ForwardKey {}
+unsafe impl Pod for ForwardValue {}
+
 /// XDP program manager
 pub struct XdpManager {
     interface: String,
     mode: XdpMode,
     bpf: Arc<RwLock<Option<Ebpf>>>,
     loaded: bool,
+    link_id: Option<XdpLinkId>,
+    load_error: Option<String>,
 }
 
 impl XdpManager {
@@ -72,6 +78,16 @@ impl XdpManager {
     /// available (not compiled yet), it will create a stub manager that can be used
     /// for API compatibility but won't actually load XDP.
     pub async fn new(interface: &str, mode: XdpMode) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            if !std::path::Path::new(&format!("/sys/class/net/{}", interface)).exists() {
+                return Err(Error::InvalidConfig(format!(
+                    "Interface {} not found",
+                    interface
+                )));
+            }
+        }
+
         info!(
             "Initializing XDP on interface {} with mode {:?}",
             interface, mode
@@ -82,6 +98,8 @@ impl XdpManager {
             mode,
             bpf: Arc::new(RwLock::new(None)),
             loaded: false,
+            link_id: None,
+            load_error: None,
         };
 
         // Try to load the embedded eBPF bytecode if it was compiled during build
@@ -104,6 +122,7 @@ impl XdpManager {
                             Err(e) => {
                                 warn!("Failed to load XDP program from file: {}", e);
                                 warn!("XDP manager will run in stub mode");
+                                manager.load_error = Some(e.to_string());
                             }
                         }
                     } else {
@@ -145,7 +164,7 @@ impl XdpManager {
             .load()
             .map_err(|e| Error::XdpLoadFailed(format!("Failed to load program: {}", e)))?;
 
-        program
+        let link_id = program
             .attach(&self.interface, self.mode.to_flags())
             .map_err(|e| Error::XdpAttachFailed(format!("Failed to attach: {}", e)))?;
 
@@ -156,6 +175,7 @@ impl XdpManager {
 
         *self.bpf.write().await = Some(bpf);
         self.loaded = true;
+        self.link_id = Some(link_id);
 
         Ok(())
     }
@@ -183,7 +203,7 @@ impl XdpManager {
             .load()
             .map_err(|e| Error::XdpLoadFailed(format!("Failed to load program: {}", e)))?;
 
-        program
+        let link_id = program
             .attach(&self.interface, self.mode.to_flags())
             .map_err(|e| Error::XdpAttachFailed(format!("Failed to attach: {}", e)))?;
 
@@ -194,6 +214,7 @@ impl XdpManager {
 
         *self.bpf.write().await = Some(bpf);
         self.loaded = true;
+        self.link_id = Some(link_id);
 
         Ok(())
     }
@@ -201,6 +222,11 @@ impl XdpManager {
     /// Check if XDP program is loaded
     pub fn is_loaded(&self) -> bool {
         self.loaded
+    }
+
+    /// Retrieve the last load/attach error encountered during initialization
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
     }
 
     /// Get the interface name
@@ -214,18 +240,26 @@ impl XdpManager {
     }
 
     /// Get access to the forward map for inserting/deleting rules
-    pub async fn forward_map(
-        &self,
-    ) -> Result<Option<BpfHashMap<&mut aya::maps::MapData, ForwardKey, ForwardValue>>> {
-        let bpf_lock = self.bpf.read().await;
-
-        if let Some(bpf) = bpf_lock.as_ref() {
-            // This is a placeholder - actual implementation would require proper map access
-            // For now, return None as we don't have the BPF loaded yet
-            Ok(None)
-        } else {
-            Ok(None)
+    /// Validate that the forward map is available.
+    pub async fn forward_map(&self) -> Result<()> {
+        if !self.loaded {
+            return Err(Error::XdpNotAvailable(
+                self.load_error
+                    .clone()
+                    .unwrap_or_else(|| "XDP not loaded".to_string()),
+            ));
         }
+
+        let mut guard = self.bpf.write().await;
+
+        let bpf = guard
+            .as_mut()
+            .ok_or_else(|| Error::XdpNotAvailable("XDP is not loaded".to_string()))?;
+
+        bpf.map_mut("FORWARD_MAP")
+            .ok_or_else(|| Error::MapOperationFailed("FORWARD_MAP not available".to_string()))?;
+
+        Ok(())
     }
 
     /// Insert a forwarding rule
@@ -235,12 +269,29 @@ impl XdpManager {
     /// * `value` - Forward destination
     pub async fn insert_forward_rule(&self, key: ForwardKey, value: ForwardValue) -> Result<()> {
         if !self.loaded {
-            warn!("XDP not loaded - skipping forward rule insertion");
-            return Ok(());
+            return Err(Error::XdpNotAvailable(
+                self.load_error
+                    .clone()
+                    .unwrap_or_else(|| "XDP not loaded".to_string()),
+            ));
         }
 
-        // TODO: Implement actual map insertion when BPF is loaded
-        info!("Insert forward rule: {:?} -> {:?}", key, value);
+        let mut guard = self.bpf.write().await;
+        let bpf = guard
+            .as_mut()
+            .ok_or_else(|| Error::XdpNotAvailable("XDP is not loaded".to_string()))?;
+
+        let map = bpf
+            .map_mut("FORWARD_MAP")
+            .ok_or_else(|| Error::MapOperationFailed("FORWARD_MAP not available".to_string()))?;
+
+        let mut map: BpfHashMap<&mut aya::maps::MapData, ForwardKey, ForwardValue> =
+            BpfHashMap::try_from(map).map_err(|e| {
+                Error::MapOperationFailed(format!("Failed to open FORWARD_MAP: {}", e))
+            })?;
+
+        map.insert(&key, &value, 0)
+            .map_err(|e| Error::MapOperationFailed(format!("Failed to insert rule: {}", e)))?;
 
         Ok(())
     }
@@ -248,12 +299,29 @@ impl XdpManager {
     /// Remove a forwarding rule
     pub async fn remove_forward_rule(&self, key: &ForwardKey) -> Result<()> {
         if !self.loaded {
-            warn!("XDP not loaded - skipping forward rule removal");
-            return Ok(());
+            return Err(Error::XdpNotAvailable(
+                self.load_error
+                    .clone()
+                    .unwrap_or_else(|| "XDP not loaded".to_string()),
+            ));
         }
 
-        // TODO: Implement actual map deletion when BPF is loaded
-        info!("Remove forward rule: {:?}", key);
+        let mut guard = self.bpf.write().await;
+        let bpf = guard
+            .as_mut()
+            .ok_or_else(|| Error::XdpNotAvailable("XDP is not loaded".to_string()))?;
+
+        let map = bpf
+            .map_mut("FORWARD_MAP")
+            .ok_or_else(|| Error::MapOperationFailed("FORWARD_MAP not available".to_string()))?;
+
+        let mut map: BpfHashMap<&mut aya::maps::MapData, ForwardKey, ForwardValue> =
+            BpfHashMap::try_from(map).map_err(|e| {
+                Error::MapOperationFailed(format!("Failed to open FORWARD_MAP: {}", e))
+            })?;
+
+        map.remove(key)
+            .map_err(|e| Error::MapOperationFailed(format!("Failed to remove rule: {}", e)))?;
 
         Ok(())
     }
@@ -267,6 +335,18 @@ impl XdpManager {
         info!("Detaching XDP from interface {}", self.interface);
 
         let mut bpf_lock = self.bpf.write().await;
+        if let Some(bpf) = bpf_lock.as_mut() {
+            if let Some(link_id) = self.link_id.take() {
+                if let Some(program) = bpf.program_mut("rtp_forward") {
+                    let program: &mut Xdp = program.try_into().map_err(|e| {
+                        Error::XdpDetachFailed(format!("Not an XDP program: {}", e))
+                    })?;
+                    program
+                        .detach(link_id)
+                        .map_err(|e| Error::XdpDetachFailed(format!("Failed to detach: {}", e)))?;
+                }
+            }
+        }
         *bpf_lock = None;
         self.loaded = false;
 
@@ -278,10 +358,23 @@ impl Drop for XdpManager {
     fn drop(&mut self) {
         if self.loaded {
             info!("Detaching XDP from interface {} (via Drop)", self.interface);
-            // Note: Can't call async methods in Drop, cleanup happens when Bpf is dropped
+            if let Ok(mut bpf_lock) = self.bpf.try_write() {
+                if let Some(bpf) = bpf_lock.as_mut() {
+                    if let Some(link_id) = self.link_id.take() {
+                        if let Some(program) = bpf.program_mut("rtp_forward") {
+                            let xdp_program: std::result::Result<&mut Xdp, _> = program.try_into();
+                            if let Ok(program) = xdp_program {
+                                let _ = program.detach(link_id);
+                            }
+                        }
+                    }
+                }
+                *bpf_lock = None;
+            }
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -321,7 +414,8 @@ mod tests {
             last_seen: 0,
         };
 
+        // In stub mode we should get an explicit XdpNotAvailable error
         let result = manager.insert_forward_rule(key, value).await;
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(Error::XdpNotAvailable(_))));
     }
 }

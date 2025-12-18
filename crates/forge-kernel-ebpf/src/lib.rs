@@ -125,7 +125,9 @@ fn try_forward(ctx: &XdpContext) -> Result<u32, ()> {
     let data_end = ctx.data_end();
 
     // Parse Ethernet header
-    let eth = ptr_at::<EthHdr>(&ctx, 0)?;
+    let eth = ptr_at::<EthHdr>(&ctx, 0).map_err(|_| {
+        send_event(EventType::ParseError, 0, 0, 0);
+    })?;
 
     // Check if it's IPv4
     if unsafe { (*eth).eth_type } != u16::to_be(ETH_P_IP) {
@@ -134,17 +136,60 @@ fn try_forward(ctx: &XdpContext) -> Result<u32, ()> {
 
     // Parse IP header
     let ip_offset = mem::size_of::<EthHdr>();
-    let ip = ptr_at::<Ipv4Hdr>(&ctx, ip_offset)?;
+    let ip = ptr_at::<Ipv4Hdr>(&ctx, ip_offset).map_err(|_| {
+        send_event(EventType::ParseError, 0, 0, 0);
+    })?;
+
+    // Validate IPv4 version
+    let version = (unsafe { (*ip).version_ihl } >> 4) & 0x0f;
+    if version != 4 {
+        send_event(EventType::ParseError, 0, 0, 0);
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Validate IHL (Internet Header Length) >= 5 (20 bytes minimum)
+    let ihl = (unsafe { (*ip).version_ihl } & 0x0f) as usize;
+    if ihl < 5 {
+        send_event(EventType::ParseError, 0, 0, 0);
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    let ip_hdr_len = ihl * 4;
+
+    // Validate total length doesn't exceed packet bounds
+    let tot_len = u16::from_be(unsafe { (*ip).tot_len }) as usize;
+    let packet_len = (data_end - data_start) as usize;
+    if ip_offset + tot_len > packet_len {
+        send_event(EventType::ParseError, 0, 0, 0);
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Check for IP fragments (drop them - we can't parse UDP header on non-first fragments)
+    let frag_off = u16::from_be(unsafe { (*ip).frag_off });
+    let is_fragment = (frag_off & 0x1FFF) != 0; // Fragment offset != 0
+    let more_fragments = (frag_off & 0x2000) != 0; // More Fragments flag
+
+    if is_fragment || more_fragments {
+        // Drop fragments - can't safely parse/rewrite UDP on non-first fragments
+        return Ok(xdp_action::XDP_DROP);
+    }
 
     // Check if it's UDP
     if unsafe { (*ip).protocol } != IPPROTO_UDP {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // Parse UDP header
-    let ip_hdr_len = ((unsafe { (*ip).version_ihl } & 0x0f) * 4) as usize;
+    // Validate UDP header fits within IP payload
     let udp_offset = ip_offset + ip_hdr_len;
-    let udp = ptr_at::<UdpHdr>(&ctx, udp_offset)?;
+    if udp_offset + mem::size_of::<UdpHdr>() > ip_offset + tot_len {
+        send_event(EventType::ParseError, 0, 0, 0);
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Parse UDP header
+    let udp = ptr_at::<UdpHdr>(&ctx, udp_offset).map_err(|_| {
+        send_event(EventType::ParseError, 0, 0, 0);
+    })?;
 
     // Get port in host byte order for comparison
     let dst_port = u16::from_be(unsafe { (*udp).dest });
@@ -180,7 +225,24 @@ fn try_forward(ctx: &XdpContext) -> Result<u32, ()> {
         let udp_mut = ptr_at_mut::<UdpHdr>(&ctx, udp_offset)?;
 
         unsafe {
-            // Rewrite IP addresses
+            // Decrement TTL (RFC 1812 Section 5.3.1)
+            let old_ttl = (*ip_mut).ttl;
+            if old_ttl <= 1 {
+                // TTL expired - drop packet to prevent routing loops
+                return Ok(xdp_action::XDP_DROP);
+            }
+            let new_ttl = old_ttl - 1;
+
+            // Save old values for incremental checksum calculation
+            let old_saddr = (*ip_mut).saddr;
+            let old_daddr = (*ip_mut).daddr;
+            let old_src_port = (*udp_mut).source;
+            let old_dst_port = (*udp_mut).dest;
+            let old_ip_check = (*ip_mut).check;
+            let old_udp_check = (*udp_mut).check;
+
+            // Rewrite IP header
+            (*ip_mut).ttl = new_ttl;
             (*ip_mut).saddr = fwd.src_ip;
             (*ip_mut).daddr = fwd.dest_ip;
 
@@ -188,16 +250,50 @@ fn try_forward(ctx: &XdpContext) -> Result<u32, ()> {
             (*udp_mut).source = fwd.src_port;
             (*udp_mut).dest = fwd.dest_port;
 
-            // TODO: Recalculate checksums
-            // For now, rely on hardware offload or disable checksum validation
-            // In production, we should calculate incremental checksum updates
-            (*ip_mut).check = 0; // Let hardware recalculate
-            (*udp_mut).check = 0; // Let hardware recalculate
+            // Incremental IP checksum update (RFC 1624)
+            (*ip_mut).check = update_ip_checksum(
+                old_ip_check,
+                old_ttl,
+                new_ttl,
+                old_saddr,
+                fwd.src_ip,
+                old_daddr,
+                fwd.dest_ip,
+            );
+
+            // Incremental UDP checksum update (if non-zero)
+            // UDP checksum 0 means "no checksum" in IPv4
+            if old_udp_check != 0 {
+                (*udp_mut).check = update_udp_checksum(
+                    old_udp_check,
+                    old_saddr,
+                    fwd.src_ip,
+                    old_daddr,
+                    fwd.dest_ip,
+                    old_src_port,
+                    fwd.src_port,
+                    old_dst_port,
+                    fwd.dest_port,
+                );
+            }
         }
 
         // Update statistics
         // TODO: Implement atomic increments for packet/byte counters
 
+        // L2 Forwarding Strategy:
+        // XDP_TX transmits the packet back out the same interface it arrived on.
+        // This works for:
+        //   - Hairpin NAT (reflect packet back to same network)
+        //   - Local bridge configurations
+        //
+        // For different L2 forwarding models, consider:
+        //   - XDP_REDIRECT: Forward to a different interface (requires bpf_redirect)
+        //   - MAC rewrite: Change Ethernet src/dst MACs before XDP_TX
+        //   - XDP_PASS: Let kernel routing handle L2/L3 forwarding
+        //
+        // Current implementation: XDP_TX (same interface loopback)
+        // TODO: Make L2 forwarding strategy configurable via map or build-time feature
         return Ok(xdp_action::XDP_TX);
     }
 
@@ -221,12 +317,114 @@ fn send_event(event_type: EventType, src_ip: u32, src_port: u16, dst_port: u16) 
             src_ip,
             src_port,
             dst_port,
-            timestamp: 0, // TODO: Get actual timestamp from bpf_ktime_get_ns()
+            timestamp: get_timestamp(),
         };
-        unsafe {
-            entry.write(event);
-        }
+        entry.write(event);
         entry.submit(0);
+    }
+}
+
+/// Helper: Get current timestamp in nanoseconds
+#[inline(always)]
+fn get_timestamp() -> u64 {
+    unsafe { aya_ebpf::helpers::bpf_ktime_get_ns() }
+}
+
+/// Helper: Incremental IP checksum update (RFC 1624)
+///
+/// Updates checksum when IP header fields change, avoiding full recalculation.
+/// Formula: checksum' = ~(~checksum + ~old_data + new_data)
+#[inline(always)]
+fn update_ip_checksum(
+    old_check: u16,
+    old_ttl: u8,
+    new_ttl: u8,
+    old_saddr: u32,
+    new_saddr: u32,
+    old_daddr: u32,
+    new_daddr: u32,
+) -> u16 {
+    let mut sum = !old_check as u32;
+
+    // Remove old TTL (TTL is in byte 8, need to account for byte position)
+    sum = sum.wrapping_sub((old_ttl as u32) << 8);
+    sum = sum.wrapping_add((new_ttl as u32) << 8);
+
+    // Remove old source address (2 x 16-bit words)
+    sum = sum.wrapping_sub((old_saddr >> 16) & 0xFFFF);
+    sum = sum.wrapping_sub(old_saddr & 0xFFFF);
+
+    // Remove old destination address (2 x 16-bit words)
+    sum = sum.wrapping_sub((old_daddr >> 16) & 0xFFFF);
+    sum = sum.wrapping_sub(old_daddr & 0xFFFF);
+
+    // Add new source address
+    sum = sum.wrapping_add((new_saddr >> 16) & 0xFFFF);
+    sum = sum.wrapping_add(new_saddr & 0xFFFF);
+
+    // Add new destination address
+    sum = sum.wrapping_add((new_daddr >> 16) & 0xFFFF);
+    sum = sum.wrapping_add(new_daddr & 0xFFFF);
+
+    // Fold 32-bit sum to 16 bits
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    !sum as u16
+}
+
+/// Helper: Incremental UDP checksum update
+///
+/// Updates UDP checksum when pseudo-header or port fields change.
+/// UDP checksum covers: pseudo-header (IPs, protocol, length) + UDP header + data
+#[inline(always)]
+fn update_udp_checksum(
+    old_check: u16,
+    old_saddr: u32,
+    new_saddr: u32,
+    old_daddr: u32,
+    new_daddr: u32,
+    old_src_port: u16,
+    new_src_port: u16,
+    old_dst_port: u16,
+    new_dst_port: u16,
+) -> u16 {
+    let mut sum = !old_check as u32;
+
+    // Remove old pseudo-header addresses
+    sum = sum.wrapping_sub((old_saddr >> 16) & 0xFFFF);
+    sum = sum.wrapping_sub(old_saddr & 0xFFFF);
+    sum = sum.wrapping_sub((old_daddr >> 16) & 0xFFFF);
+    sum = sum.wrapping_sub(old_daddr & 0xFFFF);
+
+    // Add new pseudo-header addresses
+    sum = sum.wrapping_add((new_saddr >> 16) & 0xFFFF);
+    sum = sum.wrapping_add(new_saddr & 0xFFFF);
+    sum = sum.wrapping_add((new_daddr >> 16) & 0xFFFF);
+    sum = sum.wrapping_add(new_daddr & 0xFFFF);
+
+    // Remove old ports (already in network byte order)
+    sum = sum.wrapping_sub(u16::from_be(old_src_port) as u32);
+    sum = sum.wrapping_sub(u16::from_be(old_dst_port) as u32);
+
+    // Add new ports
+    sum = sum.wrapping_add(u16::from_be(new_src_port) as u32);
+    sum = sum.wrapping_add(u16::from_be(new_dst_port) as u32);
+
+    // Fold 32-bit sum to 16 bits
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+
+    let result = !sum as u16;
+
+    // UDP checksum 0 is special: means "no checksum"
+    // If our calculation resulted in 0, use 0xFFFF instead (RFC 768)
+    if result == 0 {
+        0xFFFF
+    } else {
+        result
     }
 }
 

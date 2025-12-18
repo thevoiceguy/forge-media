@@ -6,7 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("Aya error: {0}")]
-    Aya(#[from] aya::BpfError),
+    Aya(#[from] aya::EbpfError),
 
     #[error("Aya programs error: {0}")]
     AyaPrograms(#[from] aya::programs::ProgramError),
@@ -22,6 +22,9 @@ pub enum Error {
 
     #[error("XDP attach failed: {0}")]
     XdpAttachFailed(String),
+
+    #[error("XDP detach failed: {0}")]
+    XdpDetachFailed(String),
 
     #[error("Map operation failed: {0}")]
     MapOperationFailed(String),

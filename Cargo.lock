@@ -1346,9 +1346,9 @@ dependencies = [
 name = "forge-media-processor"
 version = "0.1.0"
 dependencies = [
- "audiopus",
  "bytes",
  "dashmap",
+ "forge-codecs",
  "forge-core",
  "forge-mixer",
  "forge-recorder",
@@ -1356,7 +1356,6 @@ dependencies = [
  "forge-rtp",
  "hound",
  "lazy_static",
- "ogg",
  "parking_lot",
  "rubato",
  "serde",

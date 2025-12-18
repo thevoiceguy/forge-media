@@ -9,10 +9,11 @@ repository.workspace = true
 
 [features]
 default = []
-# Opus codec support for audio recording
-# Requires: cmake and libopus-dev (or equivalent) to be installed on the system
-# Enable with: cargo build --features opus
-opus = ["audiopus", "ogg"]
+# Codec support (re-exported from forge-codecs)
+opus = ["forge-codecs/opus"]
+g722 = ["forge-codecs/g722"]
+g729 = ["forge-codecs/g729"]
+all-codecs = ["opus", "g722", "g729"]
 
 [dependencies]
 forge-core = { path = "../forge-core" }
@@ -20,6 +21,7 @@ forge-rtp = { path = "../forge-rtp" }
 forge-resampler = { path = "../forge-resampler" }
 forge-recorder = { path = "../forge-recorder" }
 forge-mixer = { path = "../forge-mixer" }
+forge-codecs = { path = "../forge-codecs" }
 
 # Async runtime
 tokio = { workspace = true, features = ["fs", "io-util"] }
@@ -27,9 +29,7 @@ tokio = { workspace = true, features = ["fs", "io-util"] }
 # Audio processing
 symphonia = { workspace = true, features = ["all"] }
 rubato = { workspace = true }
-audiopus = { version = "0.3.0-rc.0", optional = true }  # Opus encoding/decoding
 hound = "3.5"  # WAV file I/O
-ogg = { version = "0.8", optional = true }  # Ogg container for Opus
 
 # Utilities
 bytes = { workspace = true }

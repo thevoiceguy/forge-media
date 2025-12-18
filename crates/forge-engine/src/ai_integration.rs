@@ -7,11 +7,35 @@ use dashmap::DashMap;
 use forge_ai_stream::{AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector};
 use forge_core::{CallId, ForgeError, Result, SecureString};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{env, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 /// Configuration for AI integration with a media session
+///
+/// # API Key Resolution
+/// The API key can be provided in two ways:
+/// 1. Directly via `api_key` field (recommended for runtime configuration)
+/// 2. Via `FORGE_AI_API_KEY` environment variable (used during session recovery)
+///
+/// During session recovery, if the persisted config has an empty API key,
+/// the manager will automatically attempt to load from `FORGE_AI_API_KEY`.
+/// This allows sessions to be recovered after restart without persisting secrets to disk.
+///
+/// # Example
+/// ```no_run
+/// use forge_engine::ai_integration::AISessionConfig;
+/// use forge_core::SecureString;
+/// use forge_ai_stream::AIConnectorType;
+///
+/// // Method 1: Direct configuration
+/// let mut config = AISessionConfig::default();
+/// config.api_key = SecureString::new("sk-your-api-key");
+///
+/// // Method 2: Environment variable (for recovery)
+/// std::env::set_var("FORGE_AI_API_KEY", "sk-your-api-key");
+/// // On recovery, the manager will automatically load from env
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AISessionConfig {
     /// AI service type (OpenAI, etc.)
@@ -482,6 +506,20 @@ impl Default for AISessionManager {
 }
 
 impl AISessionManager {
+    /// Ensure an API key is present for the session config, optionally loading from env.
+    fn ensure_api_key(config: &mut AISessionConfig) -> bool {
+        if !config.api_key.is_empty() {
+            return true;
+        }
+
+        if let Ok(value) = env::var("FORGE_AI_API_KEY") {
+            config.api_key = SecureString::new(value);
+            return true;
+        }
+
+        false
+    }
+
     /// Create a new AI session manager without persistence
     pub fn new() -> Self {
         Self {
@@ -843,6 +881,19 @@ impl AISessionManager {
                 persisted.max_reconnect_attempts
             );
 
+            // Ensure we have an API key available before consuming a retry
+            let mut config = persisted.config.clone();
+            if !Self::ensure_api_key(&mut config) {
+                tracing::warn!(
+                    "Skipping AI session restore for call {}: API key missing. \
+                     Provide FORGE_AI_API_KEY or set the key before recovery.",
+                    call_id.0
+                );
+                persisted.connection_state = crate::persistence::ConnectionState::Disconnected;
+                let _ = persistence.save(&persisted).await;
+                continue;
+            }
+
             // Update state to reconnecting
             persisted.connection_state = crate::persistence::ConnectionState::Reconnecting;
             persisted.reconnect_attempts += 1;
@@ -859,7 +910,7 @@ impl AISessionManager {
 
             // Attempt to attach AI with saved config
             match self
-                .attach_ai(call_id.clone(), persisted.config.clone(), event_bus.clone())
+                .attach_ai(call_id.clone(), config.clone(), event_bus.clone())
                 .await
             {
                 Ok(()) => {
@@ -921,6 +972,25 @@ impl AISessionManager {
             )));
         }
 
+        // Get config from storage
+        let mut config = self
+            .configs
+            .get(call_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| {
+                ForgeError::Internal(format!("No config found for call {}", call_id.0))
+            })?;
+
+        // Ensure we have a usable API key before consuming a retry
+        if !Self::ensure_api_key(&mut config) {
+            persisted.connection_state = crate::persistence::ConnectionState::Disconnected;
+            persistence.save(&persisted).await?;
+            return Err(ForgeError::Internal(format!(
+                "API key not available for call {}. Set FORGE_AI_API_KEY before retrying.",
+                call_id.0
+            )));
+        }
+
         // Update state and increment attempts
         persisted.connection_state = crate::persistence::ConnectionState::Reconnecting;
         persisted.reconnect_attempts += 1;
@@ -937,15 +1007,6 @@ impl AISessionManager {
         );
 
         tokio::time::sleep(backoff).await;
-
-        // Get config from storage
-        let config = self
-            .configs
-            .get(call_id)
-            .map(|entry| entry.value().clone())
-            .ok_or_else(|| {
-                ForgeError::Internal(format!("No config found for call {}", call_id.0))
-            })?;
 
         // Attempt reconnection
         match self.attach_ai(call_id.clone(), config, event_bus).await {

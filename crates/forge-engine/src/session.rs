@@ -22,7 +22,7 @@ pub struct DtmfConfig {
     /// Enable deduplication (recommended when multiple methods enabled)
     pub enable_dedup: bool,
     /// Opus payload type for inband detection (dynamic, typically 111)
-    pub opus_payload_type: u8,
+    pub opus_payload_type: Option<u8>,
 }
 
 /// Transcoding configuration
@@ -40,7 +40,7 @@ impl Default for DtmfConfig {
             enable_rfc2833: true,
             enable_inband: true,
             enable_dedup: true,
-            opus_payload_type: 111, // Common dynamic payload type for Opus
+            opus_payload_type: Some(111), // Common dynamic payload type for Opus
         }
     }
 }
@@ -181,6 +181,9 @@ pub struct MediaSession {
     /// Opus decoder for inband DTMF detection
     #[cfg(feature = "opus")]
     opus_decoder: Arc<Mutex<forge_codecs::opus::OpusCodec>>,
+    /// Opus encoder for AI audio responses
+    #[cfg(feature = "opus")]
+    opus_encoder: Arc<Mutex<forge_codecs::opus::OpusCodec>>,
     /// Transcoder for A → B direction (optional, created when needed)
     transcoder_a_to_b: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
     /// Transcoder for B → A direction (optional, created when needed)
@@ -277,6 +280,21 @@ impl MediaSession {
                 };
                 forge_codecs::opus::OpusCodec::with_config(opus_config)
                     .expect("Failed to create Opus decoder for DTMF detection")
+            })),
+            #[cfg(feature = "opus")]
+            opus_encoder: Arc::new(Mutex::new({
+                // 48kHz/24kbps Opus encoder for AI-generated audio responses
+                // Matches decoder sample rate for symmetric operation
+                // VoIP application mode optimized for voice/speech
+                let opus_config = forge_codecs::opus::OpusConfig {
+                    sample_rate: 48000,
+                    channels: 1,
+                    application: forge_codecs::opus::OpusApplication::Voip,
+                    bitrate: 24000,
+                    frame_duration_ms: 20,
+                };
+                forge_codecs::opus::OpusCodec::with_config(opus_config)
+                    .expect("Failed to create Opus encoder for AI audio")
             })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
@@ -414,6 +432,21 @@ impl MediaSession {
                 };
                 forge_codecs::opus::OpusCodec::with_config(opus_config)
                     .expect("Failed to create Opus decoder for DTMF detection")
+            })),
+            #[cfg(feature = "opus")]
+            opus_encoder: Arc::new(Mutex::new({
+                // 48kHz/24kbps Opus encoder for AI-generated audio responses
+                // Matches decoder sample rate for symmetric operation
+                // VoIP application mode optimized for voice/speech
+                let opus_config = forge_codecs::opus::OpusConfig {
+                    sample_rate: 48000,
+                    channels: 1,
+                    application: forge_codecs::opus::OpusApplication::Voip,
+                    bitrate: 24000,
+                    frame_duration_ms: 20,
+                };
+                forge_codecs::opus::OpusCodec::with_config(opus_config)
+                    .expect("Failed to create Opus encoder for AI audio")
             })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
@@ -596,6 +629,21 @@ impl MediaSession {
                 forge_codecs::opus::OpusCodec::with_config(opus_config)
                     .expect("Failed to create Opus decoder for DTMF detection")
             })),
+            #[cfg(feature = "opus")]
+            opus_encoder: Arc::new(Mutex::new({
+                // 48kHz/24kbps Opus encoder for AI-generated audio responses
+                // Matches decoder sample rate for symmetric operation
+                // VoIP application mode optimized for voice/speech
+                let opus_config = forge_codecs::opus::OpusConfig {
+                    sample_rate: 48000,
+                    channels: 1,
+                    application: forge_codecs::opus::OpusApplication::Voip,
+                    bitrate: 24000,
+                    frame_duration_ms: 20,
+                };
+                forge_codecs::opus::OpusCodec::with_config(opus_config)
+                    .expect("Failed to create Opus encoder for AI audio")
+            })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -687,6 +735,12 @@ impl MediaSession {
     #[cfg(feature = "opus")]
     pub fn opus_decoder(&self) -> &Arc<Mutex<forge_codecs::opus::OpusCodec>> {
         &self.opus_decoder
+    }
+
+    /// Get the Opus encoder for AI audio responses
+    #[cfg(feature = "opus")]
+    pub fn opus_encoder(&self) -> &Arc<Mutex<forge_codecs::opus::OpusCodec>> {
+        &self.opus_encoder
     }
 
     /// Get the transcoding configuration
@@ -1353,6 +1407,21 @@ impl MediaSession {
                 forge_codecs::opus::OpusCodec::with_config(opus_config)
                     .expect("Failed to create Opus decoder for DTMF detection")
             })),
+            #[cfg(feature = "opus")]
+            opus_encoder: Arc::new(Mutex::new({
+                // 48kHz/24kbps Opus encoder for AI-generated audio responses
+                // Matches decoder sample rate for symmetric operation
+                // VoIP application mode optimized for voice/speech
+                let opus_config = forge_codecs::opus::OpusConfig {
+                    sample_rate: 48000,
+                    channels: 1,
+                    application: forge_codecs::opus::OpusApplication::Voip,
+                    bitrate: 24000,
+                    frame_duration_ms: 20,
+                };
+                forge_codecs::opus::OpusCodec::with_config(opus_config)
+                    .expect("Failed to create Opus encoder for AI audio")
+            })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -1623,6 +1692,81 @@ mod tests {
             port_pool.allocated_count().await,
             0,
             "ports should be returned to pool"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_opus_dtmf_configuration() {
+        let config = PortPoolConfig::new(20000, 20200).unwrap();
+        let port_pool = Arc::new(PortPool::new(config));
+
+        // Test 1: Default config has Opus DTMF enabled (Some(111))
+        let session_default = MediaSession::new(
+            CallId::generate(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            &port_pool,
+            MediaSessionConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            session_default.dtmf_config().opus_payload_type,
+            Some(111),
+            "Default config should enable Opus DTMF with PT 111"
+        );
+
+        // Test 2: Can disable Opus DTMF by setting to None
+        let mut config_disabled = MediaSessionConfig::default();
+        config_disabled.dtmf_config.opus_payload_type = None;
+
+        let session_disabled = MediaSession::new(
+            CallId::generate(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            &port_pool,
+            config_disabled,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            session_disabled.dtmf_config().opus_payload_type,
+            None,
+            "Opus DTMF should be disabled when set to None"
+        );
+
+        // Test 3: Can use custom Opus payload type
+        let mut config_custom = MediaSessionConfig::default();
+        config_custom.dtmf_config.opus_payload_type = Some(96);
+
+        let session_custom = MediaSession::new(
+            CallId::generate(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            &port_pool,
+            config_custom,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            session_custom.dtmf_config().opus_payload_type,
+            Some(96),
+            "Should support custom Opus payload types"
         );
     }
 }

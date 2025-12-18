@@ -197,9 +197,10 @@ impl ForwardingEngine {
         // Check for inband DTMF in audio codecs
         let payload_type = packet.header.payload_type();
         let opus_pt = session.dtmf_config().opus_payload_type;
+        let is_opus_payload = opus_pt.map(|pt| payload_type == pt).unwrap_or(false);
 
         // G.711 (payload types 0=PCMU, 8=PCMA) or Opus (configurable, typically 111)
-        if ((payload_type == 0 || payload_type == 8) || payload_type == opus_pt)
+        if ((payload_type == 0 || payload_type == 8) || is_opus_payload)
             && session.dtmf_config().enable_inband
         {
             // Decode audio to PCM samples for DTMF detection
@@ -217,7 +218,7 @@ impl ForwardingEngine {
                     .iter()
                     .map(|&byte| forge_codecs::g711::decode_alaw(byte))
                     .collect()
-            } else if payload_type == opus_pt {
+            } else if is_opus_payload {
                 // Opus - decode using the Opus decoder
                 #[cfg(feature = "opus")]
                 {

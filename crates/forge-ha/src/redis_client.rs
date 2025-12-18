@@ -338,6 +338,8 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires running Redis instance
     async fn test_set_and_get() {
+        use serde::Deserialize;
+
         let client = RedisHAClient::new("redis://localhost:6379", "test:ha:")
             .await
             .expect("Failed to connect to Redis");

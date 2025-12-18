@@ -89,13 +89,47 @@ impl HeartbeatService {
     }
 
     /// Get local IP address
+    ///
+    /// Attempts to determine the actual IP address by creating a UDP socket
+    /// that would be used to reach an external address (doesn't actually send).
+    /// This reveals which local interface and IP would be used for external communication.
     fn get_local_ip() -> String {
-        // Try to get local IP, fallback to localhost
-        if let Ok(hostname) = hostname::get() {
-            if let Some(hostname_str) = hostname.to_str() {
-                return hostname_str.to_string();
+        use std::net::{UdpSocket, IpAddr};
+
+        // Try to determine local IP by connecting to an external address
+        // This doesn't actually send data, just determines which interface would be used
+        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+            // Use a well-known external DNS server to determine outbound interface
+            if socket.connect("8.8.8.8:80").is_ok() {
+                if let Ok(local_addr) = socket.local_addr() {
+                    let ip = local_addr.ip();
+                    // Don't return loopback addresses
+                    if !ip.is_loopback() {
+                        return ip.to_string();
+                    }
+                }
             }
         }
+
+        // Fallback: try to get IP from hostname resolution
+        if let Ok(hostname) = hostname::get() {
+            if let Some(hostname_str) = hostname.to_str() {
+                // Try to resolve hostname to IP
+                use std::net::ToSocketAddrs;
+                let addr = format!("{}:0", hostname_str);
+                if let Ok(mut addrs) = addr.to_socket_addrs() {
+                    if let Some(socket_addr) = addrs.next() {
+                        let ip = socket_addr.ip();
+                        if !ip.is_loopback() {
+                            return ip.to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Last resort fallback
+        warn!("Could not determine local IP address, using 127.0.0.1");
         "127.0.0.1".to_string()
     }
 
@@ -110,7 +144,9 @@ impl HeartbeatService {
         );
 
         // Publish with TTL (expires if heartbeat stops)
-        let ttl = Duration::from_secs(self.config.heartbeat_interval_secs * 3); // 3x heartbeat interval
+        // Use 2x interval to allow for one missed heartbeat plus network jitter
+        // This enables faster failure detection (target: 30-40s total)
+        let ttl = Duration::from_secs(self.config.heartbeat_interval_secs * 2);
         self.redis.set_ex(&key, &health, ttl).await?;
 
         Ok(())
@@ -242,7 +278,10 @@ impl HeartbeatMonitor {
     pub async fn wait_for_primary_failure(&self) -> Result<()> {
         let check_interval = self.config.heartbeat_interval();
         let mut consecutive_failures = 0;
-        let required_failures = 3; // 3 consecutive failures to declare primary dead
+        // 2 consecutive failures to declare primary dead
+        // With TTL=2x interval, this gives us ~30s detection time:
+        // T+0: crash, T+20: TTL expires, T+20: check #1, T+30: check #2 → failure
+        let required_failures = 2;
 
         info!("Starting primary failure detection (check interval: {:?})", check_interval);
 
@@ -250,6 +289,18 @@ impl HeartbeatMonitor {
 
         loop {
             ticker.tick().await;
+
+            // If we don't know who the primary is, try to detect before counting failures
+            if self.primary_instance.read().await.is_none() {
+                if let Err(e) = self.detect_primary().await {
+                    warn!("Failed to detect primary instance: {}", e);
+                }
+                // After detection attempt, if still unknown, skip this tick to avoid false alarms
+                if self.primary_instance.read().await.is_none() {
+                    debug!("Primary instance unknown; skipping failure counting this interval");
+                    continue;
+                }
+            }
 
             match self.is_primary_alive().await {
                 Ok(true) => {

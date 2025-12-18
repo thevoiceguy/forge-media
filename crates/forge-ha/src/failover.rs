@@ -8,6 +8,7 @@ use crate::types::{ConferenceState, HARole, InstanceId, SessionState};
 use chrono::Utc;
 use forge_core::{ForgeError, Result};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -232,6 +233,10 @@ impl FailoverOrchestrator {
     }
 
     /// Start the failover orchestrator (spawns background task)
+    ///
+    /// This continuously monitors for primary failures and orchestrates failover when detected.
+    /// After a successful failover (when this standby becomes primary), it stops monitoring
+    /// and switches to publishing heartbeats as the new primary.
     pub fn start<C: RecoveryCallbacks + 'static>(
         self: Arc<Self>,
         callbacks: Arc<C>,
@@ -239,20 +244,41 @@ impl FailoverOrchestrator {
         tokio::spawn(async move {
             info!("Failover orchestrator started, monitoring for failures");
 
-            // Wait for primary failure detection
-            if let Err(e) = self.heartbeat_monitor.wait_for_primary_failure().await {
-                error!("Heartbeat monitor error: {}", e);
-                return;
+            loop {
+                // Make sure we know who the primary is before monitoring its health
+                if let Err(e) = self.heartbeat_monitor.detect_primary().await {
+                    warn!("Could not detect current primary: {}", e);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+
+                // Wait for primary failure detection
+                if let Err(e) = self.heartbeat_monitor.wait_for_primary_failure().await {
+                    error!("Heartbeat monitor error: {}", e);
+                    // Wait before retrying to avoid tight loop on persistent errors
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+
+                info!("Primary failure detected! Initiating failover");
+
+                // Execute failover
+                match self.execute_failover(callbacks.clone()).await {
+                    Ok(_) => {
+                        info!("Failover completed successfully - this instance is now primary");
+                        // After becoming primary, we stop monitoring for failures
+                        // The HeartbeatService will publish this instance's heartbeats
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Failover failed: {} - will retry on next failure detection", e);
+                        // Continue monitoring - another standby may have won the election
+                        // or the failure may be transient
+                    }
+                }
             }
 
-            info!("Primary failure detected! Initiating failover");
-
-            // Execute failover
-            if let Err(e) = self.execute_failover(callbacks).await {
-                error!("Failover failed: {}", e);
-            } else {
-                info!("Failover completed successfully");
-            }
+            info!("Failover orchestrator stopped (now primary)");
         })
     }
 

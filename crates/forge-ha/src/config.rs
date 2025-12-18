@@ -235,6 +235,13 @@ impl HAConfig {
                 if onprem.interface.is_empty() {
                     return Err("Network interface required for on-premises deployment".to_string());
                 }
+                if onprem.auth_password.is_empty() {
+                    return Err("VRRP auth_password cannot be empty (required for Keepalived authentication)".to_string());
+                }
+                // Validate password meets minimum security requirements
+                if onprem.auth_password.len() < 8 {
+                    return Err("VRRP auth_password must be at least 8 characters".to_string());
+                }
             }
         }
 

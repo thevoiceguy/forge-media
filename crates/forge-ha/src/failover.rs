@@ -258,6 +258,7 @@ impl FailoverOrchestrator {
         }
 
         if let Some(ref heartbeat) = self.heartbeat_service {
+            heartbeat.refresh_ip().await;
             heartbeat.publish_now().await?;
         }
 

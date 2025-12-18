@@ -24,7 +24,7 @@ pub struct HeartbeatService {
     conference_count: Arc<RwLock<usize>>,
     start_time: std::time::Instant,
     version: String,
-    local_ip: String,
+    ip_address: Arc<RwLock<String>>,
 }
 
 impl HeartbeatService {
@@ -48,7 +48,7 @@ impl HeartbeatService {
             conference_count: Arc::new(RwLock::new(0)),
             start_time: std::time::Instant::now(),
             version,
-            local_ip: Self::resolve_local_ip(),
+            ip_address: Arc::new(RwLock::new(Self::resolve_local_ip())),
         }
     }
 
@@ -79,7 +79,7 @@ impl HeartbeatService {
             instance_id: self.instance_id.clone(),
             role,
             state,
-            ip_address: self.local_ip.clone(),
+            ip_address: self.ip_address.read().await.clone(),
             advertised_address: None, // Could be configured separately
             port_range: self.port_range,
             last_heartbeat: Utc::now(),
@@ -95,7 +95,7 @@ impl HeartbeatService {
     /// Uses a non-routable destination to let the OS pick the outbound interface
     /// without requiring real egress, then falls back to hostname resolution.
     fn resolve_local_ip() -> String {
-        use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
+        use std::net::{ToSocketAddrs, UdpSocket};
 
         // Use a non-routable address to avoid external dependency
         if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
@@ -151,6 +151,17 @@ impl HeartbeatService {
     /// Publish a heartbeat immediately (useful after promotion)
     pub async fn publish_now(&self) -> Result<()> {
         self.publish_heartbeat().await
+    }
+
+    /// Refresh the cached IP address (e.g., after VIP activation)
+    pub async fn refresh_ip(&self) {
+        let resolved = Self::resolve_local_ip();
+        *self.ip_address.write().await = resolved;
+    }
+
+    /// Explicitly set the IP address (useful for VIPs)
+    pub async fn set_ip_address(&self, ip: String) {
+        *self.ip_address.write().await = ip;
     }
 
     /// Start the heartbeat service (spawns background task)

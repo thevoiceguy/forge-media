@@ -459,6 +459,12 @@ fn sanitize_redis_url(url: &str) -> String {
 }
 
 fn build_master_url_with_credentials(base_url: &str, host: &str, port: &str) -> String {
+    let scheme = base_url
+        .split("://")
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("redis");
+
     let mut credentials = String::new();
     if let Some(start) = base_url.find("://") {
         let remainder = &base_url[start + 3..];
@@ -468,9 +474,9 @@ fn build_master_url_with_credentials(base_url: &str, host: &str, port: &str) -> 
     }
 
     if credentials.is_empty() {
-        format!("redis://{}:{}", host, port)
+        format!("{}://{}:{}", scheme, host, port)
     } else {
-        format!("redis://{}{}:{}", credentials, host, port)
+        format!("{}://{}{}:{}", scheme, credentials, host, port)
     }
 }
 

@@ -25,6 +25,7 @@ pub struct PrimaryElection {
     redis: RedisHAClient,
     role: Arc<RwLock<HARole>>,
     is_primary: Arc<RwLock<bool>>,
+    lock_renewal_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl PrimaryElection {
@@ -39,6 +40,7 @@ impl PrimaryElection {
             redis,
             role,
             is_primary: Arc::new(RwLock::new(false)),
+            lock_renewal_handle: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -65,6 +67,7 @@ impl PrimaryElection {
             );
             *self.is_primary.write().await = true;
             *self.role.write().await = HARole::Primary;
+            // Note: Lock renewal must be started by caller (needs Arc<Self>)
             Ok(true)
         } else {
             // Check who owns the lock
@@ -137,6 +140,9 @@ impl PrimaryElection {
 
         info!("Stepping down from primary role");
 
+        // Stop lock renewal task
+        self.stop_lock_renewal().await;
+
         // Delete the primary lock
         self.redis.del(PRIMARY_ELECTION_KEY).await?;
 
@@ -145,6 +151,14 @@ impl PrimaryElection {
 
         info!("Successfully stepped down from primary");
         Ok(())
+    }
+
+    /// Stop lock renewal task (called during step down)
+    async fn stop_lock_renewal(&self) {
+        if let Some(handle) = self.lock_renewal_handle.write().await.take() {
+            info!("Stopping lock renewal task");
+            handle.abort();
+        }
     }
 
     /// Check if this instance is primary
@@ -168,7 +182,15 @@ impl PrimaryElection {
     }
 
     /// Start primary lock renewal service (for primary instances)
-    pub fn start_lock_renewal(self: Arc<Self>) -> JoinHandle<()> {
+    async fn start_lock_renewal_if_needed(self: &Arc<Self>) {
+        let mut handle = self.lock_renewal_handle.write().await;
+        if handle.is_some() {
+            return;
+        }
+        *handle = Some(self.clone().spawn_lock_renewal());
+    }
+
+    fn spawn_lock_renewal(self: Arc<Self>) -> JoinHandle<()> {
         let renewal_interval = Duration::from_secs(LOCK_RENEWAL_INTERVAL_SECS);
 
         tokio::spawn(async move {
@@ -196,6 +218,8 @@ impl PrimaryElection {
                 }
             }
 
+            // Clear the handle when task exits
+            *self.lock_renewal_handle.write().await = None;
             info!("Primary lock renewal service stopped");
         })
     }
@@ -212,6 +236,7 @@ impl PrimaryElection {
 
         if elected {
             info!("Won primary election, now primary");
+            self.start_lock_renewal_if_needed().await;
             Ok(())
         } else {
             info!("Lost primary election, remaining standby");
@@ -244,6 +269,7 @@ impl ElectionCoordinator {
                     info!("This instance is already registered as primary");
                     *self.election.is_primary.write().await = true;
                     *self.election.role.write().await = HARole::Primary;
+                    self.election.start_lock_renewal_if_needed().await;
                     Ok(HARole::Primary)
                 } else {
                     info!(
@@ -259,6 +285,7 @@ impl ElectionCoordinator {
                 info!("No primary found, attempting election");
                 let elected = self.election.elect_primary().await?;
                 if elected {
+                    self.election.start_lock_renewal_if_needed().await;
                     Ok(HARole::Primary)
                 } else {
                     Ok(HARole::Standby)

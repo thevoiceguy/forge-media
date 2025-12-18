@@ -1,14 +1,24 @@
 //! ICE connectivity checks - RFC 8445 Section 7
 //!
 //! Implements connectivity checks to verify candidate pairs can communicate.
-//! This is a simplified implementation without full MESSAGE-INTEGRITY support.
+//! Includes optional ICE MESSAGE-INTEGRITY and role attributes when credentials are provided.
 
 use crate::candidate::{CandidatePair, PairState};
-use crate::stun::StunClient;
+use crate::stun::{BindingRequestConfig, StunClient};
 use forge_core::Result;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::{debug, warn};
+
+/// ICE authentication context required for MESSAGE-INTEGRITY checks
+pub struct IceAuthContext<'a> {
+    pub local_ufrag: &'a str,
+    pub local_pwd: &'a str,
+    pub remote_ufrag: &'a str,
+    pub remote_pwd: &'a str,
+    pub controlling: bool,
+    pub tie_breaker: u64,
+}
 
 /// Perform a connectivity check on a candidate pair
 ///
@@ -18,7 +28,10 @@ use tracing::{debug, warn};
 /// Note: This is a simplified implementation that doesn't include full ICE
 /// authentication (MESSAGE-INTEGRITY). For production use, full RFC 8445
 /// compliance with HMAC-SHA1 authentication should be implemented.
-pub async fn perform_connectivity_check(pair: &mut CandidatePair) -> Result<bool> {
+pub async fn perform_connectivity_check(
+    pair: &mut CandidatePair,
+    auth: Option<&IceAuthContext<'_>>,
+) -> Result<bool> {
     debug!(
         "Performing connectivity check: {} -> {}",
         pair.local, pair.remote
@@ -32,7 +45,7 @@ pub async fn perform_connectivity_check(pair: &mut CandidatePair) -> Result<bool
     let remote_addr = SocketAddr::new(pair.remote.ip, pair.remote.port);
 
     // Create STUN client with 3 second timeout
-    let stun_client = match StunClient::new(local_addr).await {
+    let stun_client = match StunClient::new_with_reuse(local_addr).await {
         Ok(client) => client,
         Err(e) => {
             warn!("Failed to create STUN client for connectivity check: {}", e);
@@ -41,8 +54,27 @@ pub async fn perform_connectivity_check(pair: &mut CandidatePair) -> Result<bool
         }
     };
 
+    let request_config = auth.map(|ctx| BindingRequestConfig {
+        username: Some(format!("{}:{}", ctx.remote_ufrag, ctx.local_ufrag)),
+        key: Some(ctx.remote_pwd.as_bytes()),
+        priority: Some(pair.local.priority),
+        ice_controlling: if ctx.controlling {
+            Some(ctx.tie_breaker)
+        } else {
+            None
+        },
+        ice_controlled: if ctx.controlling {
+            None
+        } else {
+            Some(ctx.tie_breaker)
+        },
+    });
+
     // Perform STUN binding request
-    match stun_client.binding_request(remote_addr).await {
+    match stun_client
+        .binding_request(remote_addr, request_config)
+        .await
+    {
         Ok(mapped_addr) => {
             debug!(
                 "Connectivity check succeeded: {} -> {} (mapped: {})",
@@ -68,14 +100,17 @@ pub async fn perform_connectivity_check(pair: &mut CandidatePair) -> Result<bool
 ///
 /// Checks pairs in priority order and stops after finding a successful pair.
 /// Returns the index of the first successful pair, or None if all fail.
-pub async fn perform_checks(pairs: &mut [CandidatePair]) -> Result<Option<usize>> {
+pub async fn perform_checks(
+    pairs: &mut [CandidatePair],
+    auth: Option<&IceAuthContext<'_>>,
+) -> Result<Option<usize>> {
     let total_pairs = pairs.len();
     debug!("Performing connectivity checks on {} pairs", total_pairs);
 
     for (i, pair) in pairs.iter_mut().enumerate() {
         debug!("Checking pair {} of {}", i + 1, total_pairs);
 
-        match perform_connectivity_check(pair).await {
+        match perform_connectivity_check(pair, auth).await {
             Ok(true) => {
                 debug!("Found working candidate pair at index {}", i);
                 return Ok(Some(i));
@@ -102,6 +137,7 @@ pub async fn perform_checks(pairs: &mut [CandidatePair]) -> Result<Option<usize>
 /// any pair succeeds. This is more efficient than sequential checks.
 pub async fn perform_checks_parallel(
     pairs: &mut [CandidatePair],
+    auth: Option<&IceAuthContext<'_>>,
     max_concurrent: usize,
     timeout_duration: Duration,
 ) -> Result<Option<usize>> {
@@ -132,11 +168,32 @@ pub async fn perform_checks_parallel(
             let local_addr = SocketAddr::new(pair.local.ip, pair.local.port);
             let remote_addr = SocketAddr::new(pair.remote.ip, pair.remote.port);
             let pair_index = chunk_start + i;
+            let pair_local_priority = pair.local.priority;
+            let auth = auth;
 
             tasks.push(async move {
                 match timeout(timeout_duration, async {
-                    let stun_client = StunClient::new(local_addr).await?;
-                    stun_client.binding_request(remote_addr).await
+                    let stun_client = StunClient::new_with_reuse(local_addr).await?;
+                    stun_client
+                        .binding_request(
+                            remote_addr,
+                            auth.map(|ctx| BindingRequestConfig {
+                                username: Some(format!("{}:{}", ctx.remote_ufrag, ctx.local_ufrag)),
+                                key: Some(ctx.remote_pwd.as_bytes()),
+                                priority: Some(pair_local_priority),
+                                ice_controlling: if ctx.controlling {
+                                    Some(ctx.tie_breaker)
+                                } else {
+                                    None
+                                },
+                                ice_controlled: if ctx.controlling {
+                                    None
+                                } else {
+                                    Some(ctx.tie_breaker)
+                                },
+                            }),
+                        )
+                        .await
                 })
                 .await
                 {
@@ -180,6 +237,7 @@ mod tests {
             Protocol::Udp,
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             50000,
+            65535,
         );
 
         let remote = IceCandidate {
@@ -206,7 +264,7 @@ mod tests {
 
         // Note: This test will fail the connectivity check since we don't have
         // an actual STUN responder, but it verifies the structure works
-        let _ = perform_connectivity_check(&mut pair).await;
+        let _ = perform_connectivity_check(&mut pair, None).await;
 
         // State should have changed from Frozen
         assert_ne!(pair.state, PairState::Frozen);

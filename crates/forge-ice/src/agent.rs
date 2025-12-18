@@ -1,10 +1,11 @@
 //! ICE Agent - coordinates ICE session management
 
 use crate::candidate::{CandidatePair, IceCandidate, PairState};
-use crate::checks::perform_checks;
+use crate::checks::{perform_checks, IceAuthContext};
 use crate::gather::{gather_host_candidates, gather_server_reflexive_candidates};
 use forge_core::Result;
-use rand::Rng;
+use rand::rngs::OsRng;
+use rand::{Rng, RngCore};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tracing::{debug, info};
@@ -27,6 +28,10 @@ pub struct IceAgent {
     candidate_pairs: Vec<CandidatePair>,
     /// STUN server addresses
     stun_servers: Vec<String>,
+    /// ICE role (true = controlling)
+    controlling: bool,
+    /// ICE tie-breaker value
+    tie_breaker: u64,
     /// Component ID (1 = RTP, 2 = RTCP)
     component: u16,
     /// Local port for gathering (0 = auto-assign)
@@ -44,6 +49,7 @@ impl IceAgent {
     /// * `stun_servers` - List of STUN server addresses (e.g., "stun.l.google.com:19302")
     pub fn new(component: u16, local_port: u16, stun_servers: Vec<String>) -> Self {
         let (ufrag, pwd) = Self::generate_credentials();
+        let tie_breaker = OsRng.gen();
 
         info!(
             "Created ICE Agent for component {} with ufrag={}",
@@ -59,6 +65,8 @@ impl IceAgent {
             remote_candidates: Vec::new(),
             candidate_pairs: Vec::new(),
             stun_servers,
+            controlling: true, // Default to controlling role (configurable via set_controlling)
+            tie_breaker,
             component,
             local_port,
             socket: None,
@@ -67,22 +75,17 @@ impl IceAgent {
 
     /// Generate random ICE credentials (ufrag and password)
     ///
-    /// Generates 8-character ufrag and 24-character password using alphanumeric characters
+    /// Generates random ICE ufrag and password using OS entropy, hex-encoded for transport
     fn generate_credentials() -> (String, String) {
-        let mut rng = rand::thread_rng();
-        let chars: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-            .chars()
-            .collect();
+        let mut ufrag_bytes = [0u8; 16];
+        let mut pwd_bytes = [0u8; 32];
 
-        // Generate 8-character username fragment
-        let ufrag: String = (0..8)
-            .map(|_| chars[rng.gen_range(0..chars.len())])
-            .collect();
+        OsRng.fill_bytes(&mut ufrag_bytes);
+        OsRng.fill_bytes(&mut pwd_bytes);
 
-        // Generate 24-character password
-        let pwd: String = (0..24)
-            .map(|_| chars[rng.gen_range(0..chars.len())])
-            .collect();
+        // Hex-encode to printable strings with full-byte entropy
+        let ufrag = hex::encode(ufrag_bytes);
+        let pwd = hex::encode(pwd_bytes);
 
         (ufrag, pwd)
     }
@@ -93,10 +96,36 @@ impl IceAgent {
     }
 
     /// Set remote ICE credentials
-    pub fn set_remote_credentials(&mut self, ufrag: String, pwd: String) {
+    ///
+    /// # Arguments
+    /// * `ufrag` - Remote username fragment (minimum 4 characters per RFC 8445)
+    /// * `pwd` - Remote password (minimum 22 characters per RFC 8445)
+    ///
+    /// # Errors
+    /// Returns error if credentials are empty or too short
+    pub fn set_remote_credentials(&mut self, ufrag: String, pwd: String) -> Result<()> {
+        if ufrag.is_empty() || pwd.is_empty() {
+            return Err(forge_core::ForgeError::Ice(
+                "ICE credentials cannot be empty".to_string(),
+            ));
+        }
+        if ufrag.len() < 4 {
+            return Err(forge_core::ForgeError::Ice(format!(
+                "ICE ufrag too short: {} chars (minimum 4 per RFC 8445)",
+                ufrag.len()
+            )));
+        }
+        if pwd.len() < 22 {
+            return Err(forge_core::ForgeError::Ice(format!(
+                "ICE password too short: {} chars (minimum 22 per RFC 8445)",
+                pwd.len()
+            )));
+        }
+
         debug!("Setting remote ICE credentials: ufrag={}", ufrag);
         self.remote_ufrag = Some(ufrag);
         self.remote_pwd = Some(pwd);
+        Ok(())
     }
 
     /// Gather local candidates (host and server-reflexive)
@@ -241,13 +270,31 @@ impl IceAgent {
             return Ok(false);
         }
 
+        let (remote_ufrag, remote_pwd) = match (&self.remote_ufrag, &self.remote_pwd) {
+            (Some(ufrag), Some(pwd)) => (ufrag.as_str(), pwd.as_str()),
+            _ => {
+                return Err(forge_core::ForgeError::Ice(
+                    "Remote ICE credentials not set".to_string(),
+                ))
+            }
+        };
+
+        let auth = IceAuthContext {
+            local_ufrag: &self.local_ufrag,
+            local_pwd: &self.local_pwd,
+            remote_ufrag,
+            remote_pwd,
+            controlling: self.controlling,
+            tie_breaker: self.tie_breaker,
+        };
+
         info!(
             "Performing connectivity checks on {} pairs",
             self.candidate_pairs.len()
         );
 
         // Perform checks (they're already sorted by priority)
-        match perform_checks(&mut self.candidate_pairs).await? {
+        match perform_checks(&mut self.candidate_pairs, Some(&auth)).await? {
             Some(index) => {
                 info!(
                     "Connectivity checks complete: selected pair {} with priority {}",
@@ -340,6 +387,11 @@ impl IceAgent {
         self.component
     }
 
+    /// Set ICE role (controlling vs controlled)
+    pub fn set_controlling(&mut self, controlling: bool) {
+        self.controlling = controlling;
+    }
+
     /// Get the bound UDP socket (if available)
     ///
     /// Returns the socket created during candidate gathering.
@@ -357,9 +409,9 @@ mod tests {
     fn test_generate_credentials() {
         let (ufrag, pwd) = IceAgent::generate_credentials();
 
-        // Check lengths
-        assert_eq!(ufrag.len(), 8);
-        assert_eq!(pwd.len(), 24);
+        // Check lengths (hex-encoded)
+        assert_eq!(ufrag.len(), 32);
+        assert_eq!(pwd.len(), 64);
 
         // Check that they're alphanumeric
         assert!(ufrag.chars().all(|c| c.is_alphanumeric()));
@@ -385,12 +437,35 @@ mod tests {
 
     #[test]
     fn test_set_remote_credentials() {
+        // Test 1: Valid credentials (meets RFC 8445 minimums)
         let mut agent = IceAgent::new(1, 50000, vec![]);
-
-        agent.set_remote_credentials("remote123".to_string(), "remotepwd456".to_string());
-
+        let result = agent.set_remote_credentials(
+            "remote123".to_string(),
+            "remotepwd4567890123456".to_string(), // 22 chars minimum
+        );
+        assert!(result.is_ok());
         assert_eq!(agent.remote_ufrag, Some("remote123".to_string()));
-        assert_eq!(agent.remote_pwd, Some("remotepwd456".to_string()));
+        assert_eq!(agent.remote_pwd, Some("remotepwd4567890123456".to_string()));
+
+        // Test 2: Empty ufrag
+        let mut agent = IceAgent::new(1, 50000, vec![]);
+        let result = agent.set_remote_credentials("".to_string(), "validpassword12345678901".to_string());
+        assert!(result.is_err());
+
+        // Test 3: Empty password
+        let mut agent = IceAgent::new(1, 50000, vec![]);
+        let result = agent.set_remote_credentials("valid".to_string(), "".to_string());
+        assert!(result.is_err());
+
+        // Test 4: Ufrag too short (< 4 chars)
+        let mut agent = IceAgent::new(1, 50000, vec![]);
+        let result = agent.set_remote_credentials("abc".to_string(), "validpassword12345678901".to_string());
+        assert!(result.is_err());
+
+        // Test 5: Password too short (< 22 chars)
+        let mut agent = IceAgent::new(1, 50000, vec![]);
+        let result = agent.set_remote_credentials("valid".to_string(), "short".to_string());
+        assert!(result.is_err());
     }
 
     #[tokio::test]

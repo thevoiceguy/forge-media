@@ -96,8 +96,9 @@ impl IceCandidate {
         protocol: Protocol,
         ip: IpAddr,
         port: u16,
+        local_pref: u16,
     ) -> Self {
-        let priority = Self::compute_priority(CandidateType::Host, 65535, component);
+        let priority = Self::compute_priority(CandidateType::Host, local_pref, component);
 
         Self {
             foundation,
@@ -121,8 +122,10 @@ impl IceCandidate {
         port: u16,
         base_ip: IpAddr,
         base_port: u16,
+        local_pref: u16,
     ) -> Self {
-        let priority = Self::compute_priority(CandidateType::ServerReflexive, 65535, component);
+        let priority =
+            Self::compute_priority(CandidateType::ServerReflexive, local_pref, component);
 
         Self {
             foundation,
@@ -154,6 +157,15 @@ impl IceCandidate {
         let component_val = (256 - component.min(256)) as u32;
 
         (type_pref << 24) | (local_pref << 8) | component_val
+    }
+
+    /// Extract local preference from candidate priority
+    ///
+    /// Returns the 16-bit local preference value encoded in the priority field.
+    /// Useful for inheriting local preference from host candidates to their
+    /// derived server-reflexive candidates.
+    pub fn get_local_preference(&self) -> u16 {
+        ((self.priority >> 8) & 0xFFFF) as u16
     }
 
     /// Convert to SDP candidate attribute string
@@ -338,6 +350,7 @@ mod tests {
             Protocol::Udp,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             50000,
+            65535,
         );
 
         let sdp = candidate.to_sdp_attribute();
@@ -358,6 +371,7 @@ mod tests {
             Protocol::Udp,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             50000,
+            65535,
         );
 
         let remote = IceCandidate::new_server_reflexive(
@@ -368,6 +382,7 @@ mod tests {
             50000,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             50000,
+            65535,
         );
 
         let pair = CandidatePair::new(local, remote);

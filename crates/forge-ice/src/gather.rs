@@ -34,10 +34,12 @@ pub async fn gather_host_candidates(component: u16, port: u16) -> Result<Vec<Ice
         }
 
         let ip = iface.addr.ip();
+        let local_pref = calculate_local_preference(&iface.name, &ip);
         let foundation = foundation_counter.to_string();
         foundation_counter += 1;
 
-        let candidate = IceCandidate::new_host(foundation, component, Protocol::Udp, ip, port);
+        let candidate =
+            IceCandidate::new_host(foundation, component, Protocol::Udp, ip, port, local_pref);
 
         debug!(
             "Gathered host candidate: {} on interface {}",
@@ -118,7 +120,7 @@ pub async fn gather_server_reflexive_candidates(
         let local_addr = SocketAddr::new(host.ip, host.port);
 
         // Create STUN client
-        let stun_client = match StunClient::new(local_addr).await {
+        let stun_client = match StunClient::new_with_reuse(local_addr).await {
             Ok(client) => client,
             Err(e) => {
                 warn!("Failed to create STUN client for {}: {}", local_addr, e);
@@ -143,13 +145,16 @@ pub async fn gather_server_reflexive_candidates(
             );
 
             // Perform STUN binding request
-            match stun_client.binding_request(stun_server_addr).await {
+            match stun_client.binding_request(stun_server_addr, None).await {
                 Ok(mapped_addr) => {
                     // Check if the mapped address is different from local address
                     // (if same, we're not behind NAT for this interface)
                     if mapped_addr.ip() != host.ip || mapped_addr.port() != host.port {
                         let foundation = foundation_counter.to_string();
                         foundation_counter += 1;
+
+                        // Inherit local preference from host candidate
+                        let host_local_pref = host.get_local_preference();
 
                         // Create server-reflexive candidate
                         let candidate = IceCandidate {
@@ -158,7 +163,7 @@ pub async fn gather_server_reflexive_candidates(
                             protocol: Protocol::Udp,
                             priority: IceCandidate::compute_priority(
                                 CandidateType::ServerReflexive,
-                                32768, // Default local preference
+                                host_local_pref,
                                 component,
                             ),
                             ip: mapped_addr.ip(),

@@ -217,6 +217,7 @@ impl G729Codec {
     }
 
     /// Encode a frame of PCM samples to G.729
+    #[allow(dead_code)]
     fn encode_frame(&mut self, pcm: &[i16]) -> Result<Vec<u8>> {
         if pcm.len() != FRAME_SIZE {
             return Err(MediaError::InvalidFormat(format!(
@@ -226,34 +227,13 @@ impl G729Codec {
             )));
         }
 
-        // Step 1: Pre-processing (high-pass filter)
-        let preprocessed = self.preprocess(pcm);
-
-        // Step 2: Linear Prediction Analysis
-        let lpc_coeffs = self.lpc_analysis(&preprocessed);
-
-        // Step 3: Convert to Line Spectral Frequencies (LSF)
-        let lsf = self.lpc_to_lsf(&lpc_coeffs);
-
-        // Step 4: Quantize LSF
-        let qlsf = self.quantize_lsf(&lsf);
-
-        // Step 5: Compute residual signal
-        let residual = self.compute_residual(&preprocessed, &lpc_coeffs);
-
-        // Step 6: Pitch analysis (adaptive codebook search)
-        let (pitch_delay, pitch_gain) = self.pitch_analysis(&residual);
-
-        // Step 7: Algebraic codebook search
-        let (cb_indices, cb_gains) = self.codebook_search(&residual, pitch_delay, pitch_gain);
-
-        // Step 8: Pack parameters into bitstream
-        let encoded = self.pack_bitstream(qlsf, pitch_delay, pitch_gain, cb_indices, cb_gains);
-
-        Ok(encoded)
+        Err(MediaError::NotImplemented(
+            "G.729 encoding is not implemented yet",
+        ))
     }
 
     /// Decode a frame of G.729 to PCM samples
+    #[allow(dead_code)]
     fn decode_frame(&mut self, encoded: &[u8]) -> Result<Vec<i16>> {
         if encoded.len() != self.variant.frame_size() {
             return Err(MediaError::InvalidFormat(format!(
@@ -263,61 +243,51 @@ impl G729Codec {
             )));
         }
 
-        // Step 1: Unpack bitstream
-        let params = self.unpack_bitstream(encoded)?;
-
-        // Step 2: Decode LSF to LPC coefficients
-        let lpc_coeffs = self.lsf_to_lpc(&params.lsf);
-
-        // Step 3: Reconstruct excitation signal
-        let excitation = self.reconstruct_excitation(
-            params.pitch_delay,
-            params.pitch_gain,
-            &params.codebook_indices,
-            &params.codebook_gains,
-        );
-
-        // Step 4: Synthesis filtering
-        let synthesized = self.synthesis_filter(&excitation, &lpc_coeffs);
-
-        // Step 5: Post-processing
-        let output = self.postprocess(&synthesized);
-
-        Ok(output)
+        Err(MediaError::NotImplemented(
+            "G.729 decoding is not implemented yet",
+        ))
     }
 
     // Placeholder implementations for codec stages
+    // These are marked as dead_code until full G.729 implementation is completed
 
+    #[allow(dead_code)]
     fn preprocess(&mut self, _pcm: &[i16]) -> Vec<i16> {
         // TODO: Implement high-pass filter (80 Hz cutoff)
         vec![0; FRAME_SIZE]
     }
 
+    #[allow(dead_code)]
     fn lpc_analysis(&mut self, _signal: &[i16]) -> Vec<f32> {
         // TODO: Implement 10th order LPC analysis using autocorrelation method
         vec![0.0; 10]
     }
 
+    #[allow(dead_code)]
     fn lpc_to_lsf(&mut self, _lpc: &[f32]) -> Vec<i16> {
         // TODO: Convert LPC coefficients to Line Spectral Frequencies
         vec![0; 10]
     }
 
+    #[allow(dead_code)]
     fn quantize_lsf(&mut self, _lsf: &[i16]) -> Vec<u8> {
         // TODO: Quantize LSF using split vector quantization
         vec![0; 4]
     }
 
+    #[allow(dead_code)]
     fn compute_residual(&self, _signal: &[i16], _lpc: &[f32]) -> Vec<i16> {
         // TODO: Compute residual by inverse filtering
         vec![0; FRAME_SIZE]
     }
 
+    #[allow(dead_code)]
     fn pitch_analysis(&mut self, _residual: &[i16]) -> (i16, i16) {
         // TODO: Adaptive codebook search (pitch prediction)
         (40, 0) // delay, gain
     }
 
+    #[allow(dead_code)]
     fn codebook_search(
         &mut self,
         _residual: &[i16],
@@ -328,6 +298,7 @@ impl G729Codec {
         (vec![0; 4], vec![0; 2]) // indices, gains
     }
 
+    #[allow(dead_code)]
     fn pack_bitstream(
         &self,
         _lsf: Vec<u8>,
@@ -340,6 +311,7 @@ impl G729Codec {
         vec![0; ENCODED_FRAME_SIZE]
     }
 
+    #[allow(dead_code)]
     fn unpack_bitstream(&self, _encoded: &[u8]) -> Result<DecodedParams> {
         // TODO: Unpack 80-bit frame into parameters
         Ok(DecodedParams {
@@ -351,11 +323,13 @@ impl G729Codec {
         })
     }
 
+    #[allow(dead_code)]
     fn lsf_to_lpc(&mut self, _lsf: &[i16]) -> Vec<f32> {
         // TODO: Convert LSF back to LPC coefficients
         vec![0.0; 10]
     }
 
+    #[allow(dead_code)]
     fn reconstruct_excitation(
         &mut self,
         _delay: i16,
@@ -367,11 +341,13 @@ impl G729Codec {
         vec![0; FRAME_SIZE]
     }
 
+    #[allow(dead_code)]
     fn synthesis_filter(&mut self, _excitation: &[i16], _lpc: &[f32]) -> Vec<i16> {
         // TODO: Synthesis filtering
         vec![0; FRAME_SIZE]
     }
 
+    #[allow(dead_code)]
     fn postprocess(&mut self, _signal: &[i16]) -> Vec<i16> {
         // TODO: Post-processing
         vec![0; FRAME_SIZE]
@@ -379,6 +355,7 @@ impl G729Codec {
 }
 
 /// Decoded frame parameters
+#[allow(dead_code)]
 struct DecodedParams {
     lsf: Vec<i16>,
     pitch_delay: i16,
@@ -406,7 +383,7 @@ impl AudioCodec for G729Codec {
         AudioFormat {
             sample_rate: SAMPLE_RATE,
             channels: 1,
-            codec: crate::AudioCodec::PCM, // TODO: Add G729 variant
+            codec: crate::AudioCodec::G729,
         }
     }
 
@@ -419,11 +396,10 @@ impl AudioCodec for G729Codec {
             )));
         }
 
-        let mut encoded = Vec::new();
-        for frame in pcm.chunks(FRAME_SIZE) {
-            encoded.extend_from_slice(&self.encode_frame(frame)?);
-        }
-        Ok(encoded)
+        // Explicitly gate until a real implementation is provided
+        Err(MediaError::NotImplemented(
+            "G.729 encoding is not implemented yet",
+        ))
     }
 
     fn decode(&mut self, encoded: &[u8]) -> Result<Vec<i16>> {
@@ -435,11 +411,9 @@ impl AudioCodec for G729Codec {
             )));
         }
 
-        let mut decoded = Vec::new();
-        for frame in encoded.chunks(frame_size) {
-            decoded.extend_from_slice(&self.decode_frame(frame)?);
-        }
-        Ok(decoded)
+        Err(MediaError::NotImplemented(
+            "G.729 decoding is not implemented yet",
+        ))
     }
 
     fn frame_size(&self) -> Option<usize> {

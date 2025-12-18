@@ -5,6 +5,24 @@
 //! - Multi-party audio mixing
 //! - Codec transcoding
 //! - Conference bridge management
+//!
+//! ## Codec Support Status
+//!
+//! | Codec | Status | Features |
+//! |-------|--------|----------|
+//! | **G.711 μ-law (PCMU)** | ✅ Complete | Production-ready, 64 kbit/s |
+//! | **G.711 A-law (PCMA)** | ✅ Complete | Production-ready, 64 kbit/s |
+//! | **Opus** | ✅ Complete | Requires `opus` feature, 6-510 kbit/s |
+//! | **G.729** | 🚧 Skeleton | Not yet implemented, 8 kbit/s |
+//!
+//! ### Enabling Optional Codecs
+//!
+//! ```toml
+//! [dependencies]
+//! forge-media-processor = { version = "0.1", features = ["opus"] }
+//! ```
+//!
+//! **Note:** Opus requires `libopus-dev` (or equivalent) and `cmake` to be installed.
 
 pub mod codecs;
 
@@ -33,6 +51,9 @@ pub enum MediaError {
 
     #[error("Buffer overflow")]
     BufferOverflow,
+
+    #[error("Not implemented: {0}")]
+    NotImplemented(&'static str),
 
     #[error("Internal error: {0}")]
     Internal(String),

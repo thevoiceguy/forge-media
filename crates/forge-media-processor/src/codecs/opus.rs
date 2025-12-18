@@ -57,7 +57,7 @@ pub struct OpusConfig {
     /// Target bit rate in bits per second
     pub bitrate: u32,
     /// Frame duration in milliseconds (2.5, 5, 10, 20, 40, or 60)
-    pub frame_duration_ms: u32,
+    pub frame_duration_ms: f32,
 }
 
 impl Default for OpusConfig {
@@ -67,7 +67,7 @@ impl Default for OpusConfig {
             channels: 1,
             application: OpusApplication::Voip,
             bitrate: 64000,
-            frame_duration_ms: 20,
+            frame_duration_ms: 20.0,
         }
     }
 }
@@ -80,7 +80,7 @@ impl OpusConfig {
             channels: 1,
             application: OpusApplication::Voip,
             bitrate: 24000, // Good quality for speech
-            frame_duration_ms: 20,
+            frame_duration_ms: 20.0,
         }
     }
 
@@ -91,17 +91,29 @@ impl OpusConfig {
             channels: 2,
             application: OpusApplication::Audio,
             bitrate: 128000, // Good quality for music
-            frame_duration_ms: 20,
+            frame_duration_ms: 20.0,
         }
     }
 
     /// Get frame size in samples
     pub fn frame_size(&self) -> usize {
-        (self.sample_rate as usize * self.frame_duration_ms as usize) / 1000
+        ((self.sample_rate as f32 * self.frame_duration_ms) / 1000.0).round() as usize
     }
 
     /// Validate configuration
     pub fn validate(&self) -> Result<()> {
+        // Validate frame duration first to ensure frame size math is correct
+        const ALLOWED_DURATIONS_MS: [f32; 6] = [2.5, 5.0, 10.0, 20.0, 40.0, 60.0];
+        let duration_ok = ALLOWED_DURATIONS_MS
+            .iter()
+            .any(|allowed| (self.frame_duration_ms - allowed).abs() < f32::EPSILON);
+        if !duration_ok {
+            return Err(MediaError::InvalidFormat(format!(
+                "Opus frame duration must be 2.5, 5, 10, 20, 40, or 60 ms, got {}",
+                self.frame_duration_ms
+            )));
+        }
+
         // Validate sample rate
         if ![8000, 12000, 16000, 24000, 48000].contains(&self.sample_rate) {
             return Err(MediaError::InvalidFormat(format!(
@@ -118,19 +130,20 @@ impl OpusConfig {
             )));
         }
 
-        // Validate frame duration
-        if ![2, 5, 10, 20, 40, 60].contains(&self.frame_duration_ms) {
-            return Err(MediaError::InvalidFormat(format!(
-                "Opus frame duration must be 2.5, 5, 10, 20, 40, or 60 ms, got {}",
-                self.frame_duration_ms
-            )));
-        }
-
         // Validate bitrate
         if self.bitrate < 6000 || self.bitrate > 510000 {
             return Err(MediaError::InvalidFormat(format!(
                 "Opus bitrate must be between 6 and 510 kbit/s, got {}",
                 self.bitrate
+            )));
+        }
+
+        // Ensure frame size resolves to an integer number of samples
+        let samples_f = (self.sample_rate as f32 * self.frame_duration_ms) / 1000.0;
+        if (samples_f - samples_f.round()).abs() > 0.001 {
+            return Err(MediaError::InvalidFormat(format!(
+                "Opus frame duration {}ms at {} Hz does not produce an integer sample count",
+                self.frame_duration_ms, self.sample_rate
             )));
         }
 
@@ -249,23 +262,19 @@ impl AudioCodec for OpusCodec {
     fn encode(&mut self, pcm: &[i16]) -> Result<Vec<u8>> {
         let frame_size = self.config.frame_size();
 
-        if pcm.len() % frame_size != 0 {
+        if pcm.len() != frame_size {
             return Err(MediaError::InvalidFormat(format!(
-                "Opus input must be multiple of {} samples",
-                frame_size
+                "Opus input must contain exactly one frame of {} samples (got {})",
+                frame_size,
+                pcm.len()
             )));
         }
 
-        let mut encoded = Vec::new();
-        for frame in pcm.chunks(frame_size) {
-            encoded.extend_from_slice(&self.encode_frame(frame)?);
-        }
-        Ok(encoded)
+        self.encode_frame(pcm)
     }
 
     fn decode(&mut self, encoded: &[u8]) -> Result<Vec<i16>> {
-        // Opus frames are variable length, so we decode one complete frame
-        // For simplicity, treat the entire input as one frame
+        // Opus frames are variable length; this API expects exactly one frame.
         self.decode_frame(encoded)
     }
 
@@ -362,10 +371,21 @@ mod tests {
     fn test_opus_frame_size() {
         let config = OpusConfig {
             sample_rate: 48000,
-            frame_duration_ms: 20,
+            frame_duration_ms: 20.0,
             ..Default::default()
         };
         assert_eq!(config.frame_size(), 960); // 48000 * 20 / 1000
+    }
+
+    #[test]
+    fn test_opus_frame_size_two_point_five_ms() {
+        let config = OpusConfig {
+            sample_rate: 48000,
+            frame_duration_ms: 2.5,
+            ..Default::default()
+        };
+        assert_eq!(config.frame_size(), 120); // 48000 * 2.5 / 1000
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -412,5 +432,15 @@ mod tests {
         // Decode
         let decoded = codec.decode(&encoded).unwrap();
         assert_eq!(decoded.len(), pcm.len());
+    }
+
+    #[test]
+    #[cfg(feature = "opus")]
+    fn test_opus_encode_rejects_multi_frame() {
+        let mut codec = OpusCodec::new().unwrap();
+        let frame_size = codec.config().frame_size();
+        let pcm: Vec<i16> = (0..(frame_size * 2)).map(|i| (i as i16) * 10).collect();
+
+        assert!(codec.encode(&pcm).is_err());
     }
 }

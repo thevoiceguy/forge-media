@@ -58,6 +58,7 @@ pub fn create_codec(format: &AudioFormat) -> Result<Box<dyn AudioCodec>> {
             };
             Ok(Box::new(opus::OpusCodec::with_config(config)?))
         }
+        CodecType::G729 => Ok(Box::new(g729::G729Codec::new())),
         _ => Err(MediaError::InvalidFormat(format!(
             "Unsupported codec: {:?}",
             format.codec

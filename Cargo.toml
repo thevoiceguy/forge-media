@@ -7,7 +7,6 @@ members = [
     "crates/forge-engine",
     "crates/forge-kernel",
     "crates/forge-kernel-ebpf",
-    "crates/forge-recording",
     "crates/forge-dtmf",
     "crates/forge-transcription",
     "crates/forge-injection",
@@ -124,7 +123,7 @@ forge-core = { path = "crates/forge-core" }
 forge-rtp = { path = "crates/forge-rtp" }
 forge-engine = { path = "crates/forge-engine", features = [] }
 forge-api = { path = "crates/forge-api", optional = false }
-forge-recording = { path = "crates/forge-recording", optional = true }
+forge-recorder = { path = "crates/forge-recorder", optional = true }
 forge-dtmf = { path = "crates/forge-dtmf", optional = true }
 forge-transcription = { path = "crates/forge-transcription", optional = true }
 forge-injection = { path = "crates/forge-injection", optional = true }
@@ -169,7 +168,7 @@ opus = ["forge-codecs/opus", "forge-transcoder/opus"]
 g722 = ["forge-codecs/g722"]
 g729 = ["forge-codecs/g729"]
 all-codecs = ["opus", "g722", "g729"]
-recording = ["dep:forge-recording"]
+recording = ["dep:forge-recorder"]
 dtmf = ["dep:forge-dtmf"]
 transcription = ["dep:forge-transcription"]
 injection = ["dep:forge-injection"]

@@ -1329,7 +1329,7 @@ dependencies = [
  "forge-engine",
  "forge-ha",
  "forge-injection",
- "forge-recording",
+ "forge-recorder",
  "forge-resampler",
  "forge-rtp",
  "forge-siprec",
@@ -1391,16 +1391,6 @@ dependencies = [
  "hound",
  "ogg",
  "parking_lot",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "forge-recording"
-version = "0.1.0"
-dependencies = [
- "forge-core",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

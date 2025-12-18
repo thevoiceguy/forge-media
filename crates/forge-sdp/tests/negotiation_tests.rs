@@ -8,8 +8,7 @@
 //! - Error cases and edge conditions
 
 use forge_sdp::{
-    helpers, profiles::SdpProfile, CodecInfo, MediaType, SessionDescription,
-    SessionDescriptionExt,
+    helpers, profiles::SdpProfile, CodecInfo, MediaType, SessionDescription, SessionDescriptionExt,
 };
 
 /// Helper to create a simple audio SDP offer
@@ -36,7 +35,11 @@ fn create_audio_offer(addr: &str, port: u16, codecs: &[(u8, &str, u32)]) -> Sess
 #[test]
 fn test_basic_pcmu_pcma_negotiation() {
     // Offer: PCMU + PCMA
-    let offer = create_audio_offer("192.168.1.100", 5000, &[(0, "PCMU", 8000), (8, "PCMA", 8000)]);
+    let offer = create_audio_offer(
+        "192.168.1.100",
+        5000,
+        &[(0, "PCMU", 8000), (8, "PCMA", 8000)],
+    );
 
     // Answer: PCMU only (from capabilities)
     let profile = SdpProfile::audio_only();
@@ -56,7 +59,11 @@ fn test_basic_pcmu_pcma_negotiation() {
 #[test]
 fn test_codec_prioritization_offerer_preference() {
     // Offer: PCMU (first), PCMA (second)
-    let offer = create_audio_offer("192.168.1.100", 5000, &[(0, "PCMU", 8000), (8, "PCMA", 8000)]);
+    let offer = create_audio_offer(
+        "192.168.1.100",
+        5000,
+        &[(0, "PCMU", 8000), (8, "PCMA", 8000)],
+    );
 
     let profile = SdpProfile::audio_only();
     let local_caps = profile.with_local_addr("10.0.0.1", 6000);

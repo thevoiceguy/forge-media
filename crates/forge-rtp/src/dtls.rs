@@ -122,7 +122,10 @@ impl DtlsCertificate {
         // Calculate SHA-256 fingerprint
         let fingerprint = Self::calculate_fingerprint(&cert_der)?;
 
-        debug!("Generated DTLS certificate with fingerprint: {}", fingerprint);
+        debug!(
+            "Generated DTLS certificate with fingerprint: {}",
+            fingerprint
+        );
 
         Ok(Self {
             cert_der,
@@ -389,9 +392,9 @@ impl DtlsConnection {
     pub fn handshake(&mut self, incoming: Option<&[u8]>) -> Result<(bool, Vec<u8>)> {
         use openssl::error::ErrorStack;
         use openssl_sys::{
-            BIO_ctrl, BIO_new, BIO_read, BIO_s_mem, BIO_write,
-            SSL_do_handshake, SSL_get_error, SSL_get_rbio, SSL_get_wbio,
-            SSL_set_bio, SSL_ERROR_NONE, SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE,
+            BIO_ctrl, BIO_new, BIO_read, BIO_s_mem, BIO_write, SSL_do_handshake, SSL_get_error,
+            SSL_get_rbio, SSL_get_wbio, SSL_set_bio, SSL_ERROR_NONE, SSL_ERROR_WANT_READ,
+            SSL_ERROR_WANT_WRITE,
         };
 
         // BIO_CTRL_PENDING constant (OpenSSL standard value)
@@ -435,13 +438,11 @@ impl DtlsConnection {
                 debug!("Processing {} bytes of incoming DTLS data", data.len());
                 let rbio = SSL_get_rbio(ssl_ptr);
                 if !rbio.is_null() {
-                    let written = BIO_write(
-                        rbio,
-                        data.as_ptr() as *const _,
-                        data.len() as i32,
-                    );
+                    let written = BIO_write(rbio, data.as_ptr() as *const _, data.len() as i32);
                     if written < 0 {
-                        return Err(ForgeError::Internal("Failed to write to read BIO".to_string()));
+                        return Err(ForgeError::Internal(
+                            "Failed to write to read BIO".to_string(),
+                        ));
                     }
                 }
             }
@@ -457,11 +458,7 @@ impl DtlsConnection {
                 let pending = BIO_ctrl(wbio, BIO_CTRL_PENDING, 0, std::ptr::null_mut()) as usize;
                 if pending > 0 {
                     outgoing.resize(pending, 0);
-                    let read = BIO_read(
-                        wbio,
-                        outgoing.as_mut_ptr() as *mut _,
-                        pending as i32,
-                    );
+                    let read = BIO_read(wbio, outgoing.as_mut_ptr() as *mut _, pending as i32);
                     if read > 0 {
                         outgoing.truncate(read as usize);
                         debug!("Sending {} bytes of DTLS handshake data", outgoing.len());
@@ -634,14 +631,8 @@ mod tests {
         assert_eq!(DtlsRole::Server.to_sdp_setup(), "passive");
 
         assert_eq!(DtlsRole::from_sdp_setup("active"), Some(DtlsRole::Client));
-        assert_eq!(
-            DtlsRole::from_sdp_setup("passive"),
-            Some(DtlsRole::Server)
-        );
-        assert_eq!(
-            DtlsRole::from_sdp_setup("actpass"),
-            Some(DtlsRole::Server)
-        );
+        assert_eq!(DtlsRole::from_sdp_setup("passive"), Some(DtlsRole::Server));
+        assert_eq!(DtlsRole::from_sdp_setup("actpass"), Some(DtlsRole::Server));
         assert_eq!(DtlsRole::from_sdp_setup("invalid"), None);
     }
 

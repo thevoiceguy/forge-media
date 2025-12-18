@@ -39,10 +39,11 @@ async fn main() -> Result<()> {
         port_range_min: config.engine.port_range.start,
         port_range_max: config.engine.port_range.end,
         allowed_origins: config.api.cors_origins.clone(),
+        disable_auth: config.api.disable_auth,
         auth_tokens: config.api.auth_tokens.clone(),
         rate_limit_requests_per_window: config.api.rate_limit_requests_per_window,
         rate_limit_window_secs: config.api.rate_limit_window_secs,
-        trusted_proxies: Vec::new(),  // TODO: Add to ApiConfig
+        trusted_proxies: Vec::new(), // TODO: Add to ApiConfig
         enable_https: config.api.enable_https,
         https_bind: config
             .api

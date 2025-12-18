@@ -116,12 +116,13 @@ impl IceAgent {
                 &format!("0.0.0.0:{}", self.local_port)
             };
 
-            let socket = UdpSocket::bind(bind_addr)
-                .await
-                .map_err(|e| forge_core::ForgeError::Ice(format!("Failed to bind UDP socket: {}", e)))?;
+            let socket = UdpSocket::bind(bind_addr).await.map_err(|e| {
+                forge_core::ForgeError::Ice(format!("Failed to bind UDP socket: {}", e))
+            })?;
 
-            let local_addr = socket.local_addr()
-                .map_err(|e| forge_core::ForgeError::Ice(format!("Failed to get local address: {}", e)))?;
+            let local_addr = socket.local_addr().map_err(|e| {
+                forge_core::ForgeError::Ice(format!("Failed to get local address: {}", e))
+            })?;
 
             // Update local_port with the actual bound port
             self.local_port = local_addr.port();
@@ -136,8 +137,7 @@ impl IceAgent {
         );
 
         // Gather host candidates
-        let host_candidates =
-            gather_host_candidates(self.component, self.local_port).await?;
+        let host_candidates = gather_host_candidates(self.component, self.local_port).await?;
 
         info!("Gathered {} host candidates", host_candidates.len());
 

@@ -6,29 +6,31 @@
 #![allow(dead_code, unused_variables, unused_imports)]
 
 pub mod config;
-pub mod types;
-pub mod redis_client;
-pub mod state_sync;
-pub mod heartbeat;
 pub mod election;
 pub mod failover;
-pub mod vip_manager;
+pub mod heartbeat;
 pub mod metrics;
+pub mod redis_client;
+pub mod state_sync;
+pub mod types;
+pub mod vip_manager;
 
 // Re-export commonly used types
-pub use config::{HAConfig, RedisConfig, CloudConfig, OnPremConfig, RoleConfig};
-pub use types::{
-    HARole, HAStatus, HealthState, InstanceId, InstanceHealth, PortRange, PortPair,
-    SessionState, ConferenceState, DeploymentMode, CloudProvider,
-    ParticipantState, ParticipantStats, CodecConfig,
-    ConferenceParticipantState, AudioFormat, ConferenceRoomConfig, ConferenceSecurityConfig,
-};
-pub use redis_client::RedisHAClient;
-pub use state_sync::{SessionStateSync, ConferenceStateSync, PortPoolStateSync, BatchUpdateCoordinator};
-pub use heartbeat::{HeartbeatService, HeartbeatMonitor};
-pub use election::{PrimaryElection, ElectionCoordinator};
+pub use config::{CloudConfig, HAConfig, OnPremConfig, RedisConfig, RoleConfig};
+pub use election::{ElectionCoordinator, PrimaryElection};
 pub use failover::{FailoverOrchestrator, FailoverState, RecoveryCallbacks, RecoveryStats};
-pub use vip_manager::{VIPManager, CloudVIPManager, VRRPManager, VIPManagerFactory};
+pub use heartbeat::{HeartbeatMonitor, HeartbeatService};
+pub use redis_client::RedisHAClient;
+pub use state_sync::{
+    BatchUpdateCoordinator, ConferenceStateSync, PortPoolStateSync, SessionStateSync,
+};
+pub use types::{
+    AudioFormat, CloudProvider, CodecConfig, ConferenceParticipantState, ConferenceRoomConfig,
+    ConferenceSecurityConfig, ConferenceState, DeploymentMode, HARole, HAStatus, HealthState,
+    InstanceHealth, InstanceId, ParticipantState, ParticipantStats, PortPair, PortRange,
+    SessionState,
+};
+pub use vip_manager::{CloudVIPManager, VIPManager, VIPManagerFactory, VRRPManager};
 
 #[cfg(test)]
 mod tests;

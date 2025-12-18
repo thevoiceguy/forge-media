@@ -30,12 +30,8 @@ impl RedisHAClient {
             let master_name = config.master_name.as_ref().ok_or_else(|| {
                 ForgeError::Internal("master_name is required when sentinels are configured".into())
             })?;
-            let master_url = Self::discover_master_via_sentinel(
-                sentinels,
-                master_name,
-                &config.url,
-            )
-            .await?;
+            let master_url =
+                Self::discover_master_via_sentinel(sentinels, master_name, &config.url).await?;
             return Self::new(&master_url, &config.key_prefix).await;
         }
 
@@ -360,9 +356,8 @@ impl RedisHAClient {
 
     async fn connect(redis_url: &str, key_prefix: &str) -> Result<Self> {
         // Create Redis client
-        let client = redis::Client::open(redis_url).map_err(|e| {
-            ForgeError::Internal(format!("Failed to create Redis client: {}", e))
-        })?;
+        let client = redis::Client::open(redis_url)
+            .map_err(|e| ForgeError::Internal(format!("Failed to create Redis client: {}", e)))?;
 
         // Create connection manager for automatic reconnection
         let conn_manager = ConnectionManager::new(client.clone())
@@ -514,15 +509,9 @@ mod tests {
             value: 42,
         };
 
-        client
-            .set("test_key", &data)
-            .await
-            .expect("Set failed");
+        client.set("test_key", &data).await.expect("Set failed");
 
-        let retrieved: Option<TestData> = client
-            .get("test_key")
-            .await
-            .expect("Get failed");
+        let retrieved: Option<TestData> = client.get("test_key").await.expect("Get failed");
 
         assert_eq!(retrieved, Some(data));
 

@@ -1,11 +1,11 @@
 //! Configuration types for Forge
 
+use crate::types::AudioFormat;
 use crate::types::IpVersionConfig;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
-use crate::types::AudioFormat;
 
 /// Main Forge configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +107,11 @@ impl PortRange {
     }
 
     pub fn count(&self) -> usize {
-        (self.end - self.start + 1) as usize
+        if self.start > self.end {
+            0
+        } else {
+            (self.end - self.start + 1) as usize
+        }
     }
 }
 
@@ -297,9 +301,13 @@ pub struct ApiConfig {
     #[serde(default = "default_cors_origins")]
     pub cors_origins: Vec<String>,
 
-    /// Static bearer tokens for API authentication
-    /// If empty, authentication is disabled (not recommended for production)
+    /// Explicitly disable authentication (not recommended; prefer setting tokens)
     #[serde(default)]
+    pub disable_auth: bool,
+
+    /// Static bearer tokens for API authentication
+    /// To intentionally run without auth, set `disable_auth = true`
+    #[serde(default = "default_auth_tokens")]
     pub auth_tokens: Vec<String>,
 
     /// Maximum requests allowed per window for rate limiting
@@ -342,7 +350,8 @@ impl Default for ApiConfig {
             ws_bind: None,
             enable_cors: false,
             cors_origins: default_cors_origins(),
-            auth_tokens: Vec::new(),
+            disable_auth: false,
+            auth_tokens: default_auth_tokens(),
             rate_limit_requests_per_window: default_rate_limit_requests(),
             rate_limit_window_secs: default_rate_limit_window_secs(),
             recording_base_dir: default_recording_base_dir(),
@@ -364,6 +373,18 @@ fn default_true() -> bool {
 
 fn default_cors_origins() -> Vec<String> {
     vec![]
+}
+
+fn default_auth_tokens() -> Vec<String> {
+    if let Ok(token) = std::env::var("FORGE_API_TOKEN") {
+        return vec![token];
+    }
+
+    let token = uuid::Uuid::new_v4().to_string();
+    eprintln!("⚠️  WARNING: No FORGE_API_TOKEN set. Auto-generated token: {}", token);
+    eprintln!("   Set FORGE_API_TOKEN environment variable or add to config file.");
+    eprintln!("   To disable auth explicitly, set 'disable_auth = true' in [api] config.");
+    vec![token]
 }
 
 fn default_rate_limit_requests() -> usize {

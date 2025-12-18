@@ -15,9 +15,7 @@ pub struct AudioFeedbackPlayer {
 impl AudioFeedbackPlayer {
     /// Create a new audio feedback player
     pub fn new(sample_rate: u32) -> Self {
-        Self {
-            sample_rate,
-        }
+        Self { sample_rate }
     }
 
     /// Load and decode an audio file to PCM samples
@@ -93,10 +91,7 @@ impl AudioFeedbackPlayer {
         let samples: Vec<i16> = match spec.bits_per_sample {
             16 => {
                 // Native i16 samples
-                reader
-                    .samples::<i16>()
-                    .filter_map(|s| s.ok())
-                    .collect()
+                reader.samples::<i16>().filter_map(|s| s.ok()).collect()
             }
             8 => {
                 // Convert 8-bit PCM (read as i8) to i16
@@ -197,7 +192,6 @@ impl AudioFeedbackPlayer {
         output
     }
 
-
     /// Generate silence samples
     ///
     /// # Arguments
@@ -234,42 +228,54 @@ impl ConferenceSounds {
         player: &AudioFeedbackPlayer,
     ) -> Self {
         Self {
-            join_sound: config.join_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            exit_sound: config.exit_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            alone_sound: config.alone_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            invalid_pin_sound: config.invalid_pin_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            locked_sound: config.locked_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            unlocked_sound: config.unlocked_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            kicked_sound: config.kicked_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            max_members_sound: config.max_members_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            moh_sound: config.moh_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            pin_prompt_sound: config.pin_prompt_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            recording_started_sound: config.recording_started_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
-            recording_stopped_sound: config.recording_stopped_sound.as_ref().and_then(|path| {
-                player.load_audio_file(path).map(Arc::new)
-            }),
+            join_sound: config
+                .join_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            exit_sound: config
+                .exit_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            alone_sound: config
+                .alone_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            invalid_pin_sound: config
+                .invalid_pin_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            locked_sound: config
+                .locked_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            unlocked_sound: config
+                .unlocked_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            kicked_sound: config
+                .kicked_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            max_members_sound: config
+                .max_members_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            moh_sound: config
+                .moh_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            pin_prompt_sound: config
+                .pin_prompt_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            recording_started_sound: config
+                .recording_started_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
+            recording_stopped_sound: config
+                .recording_stopped_sound
+                .as_ref()
+                .and_then(|path| player.load_audio_file(path).map(Arc::new)),
         }
     }
 

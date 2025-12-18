@@ -12,8 +12,8 @@ pub use ai_integration::{AISession, AISessionConfig, AISessionManager, AISession
 pub use forwarding::ForwardingEngine;
 pub use manager::{SessionManager, SessionManagerConfig};
 pub use persistence::{
-    ConnectionState, PersistenceBackend, PersistenceBackendType, PersistenceConfig,
-    PersistedAISession,
+    ConnectionState, PersistedAISession, PersistenceBackend, PersistenceBackendType,
+    PersistenceConfig,
 };
 pub use session::{
     MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig, ParticipantStats,

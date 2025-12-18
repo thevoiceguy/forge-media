@@ -32,7 +32,10 @@ async fn get_event_bus_metrics(
         global_subscribers,
         rooms: rooms
             .into_iter()
-            .map(|(room_id, subscribers)| RoomSubscribers { room_id, subscribers })
+            .map(|(room_id, subscribers)| RoomSubscribers {
+                room_id,
+                subscribers,
+            })
             .collect(),
     })
 }

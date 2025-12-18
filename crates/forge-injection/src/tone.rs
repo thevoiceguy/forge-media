@@ -42,10 +42,7 @@ enum ToneType {
     SingleTone { frequency: f32 },
 
     /// Dual-tone multi-frequency (DTMF)
-    DualTone {
-        freq1: f32,
-        freq2: f32,
-    },
+    DualTone { freq1: f32, freq2: f32 },
 
     /// Comfort noise (white noise)
     ComfortNoise,
@@ -138,8 +135,7 @@ impl ToneGenerator {
     ///
     /// * `duration_ms` - Duration in milliseconds
     pub fn with_duration(mut self, duration_ms: u32) -> Self {
-        self.duration =
-            Some((self.sample_rate as u64 * duration_ms as u64) / 1000);
+        self.duration = Some((self.sample_rate as u64 * duration_ms as u64) / 1000);
         self
     }
 

@@ -283,11 +283,7 @@ impl Participant {
     /// * `id` - Unique participant identifier
     /// * `aor` - SIP Address of Record (URI)
     /// * `role` - Participant role in the call
-    pub fn new(
-        id: impl Into<String>,
-        aor: impl Into<String>,
-        role: ParticipantRole,
-    ) -> Self {
+    pub fn new(id: impl Into<String>, aor: impl Into<String>, role: ParticipantRole) -> Self {
         Self {
             id: id.into(),
             name: None,
@@ -419,14 +415,11 @@ mod tests {
     #[test]
     fn test_xml_serialization() {
         let mut session = RecordingSession::new("test-session");
-        session.add_participant(
-            Participant::caller("sip:alice@example.com")
-                .with_name("Alice")
-        );
+        session.add_participant(Participant::caller("sip:alice@example.com").with_name("Alice"));
         session.add_media_stream(
             MediaStream::audio("stream-1", "192.168.1.100", 5004)
                 .with_format("PCMU")
-                .with_ssrc(12345)
+                .with_ssrc(12345),
         );
 
         let xml = session.to_xml().unwrap();
@@ -452,17 +445,29 @@ mod tests {
     #[test]
     fn test_ai_metadata() {
         let mut session = RecordingSession::new("ai-session-123");
-        session.add_ai_metadata("OpenAI", "gpt-4o-realtime-preview", Some("alloy".to_string()));
+        session.add_ai_metadata(
+            "OpenAI",
+            "gpt-4o-realtime-preview",
+            Some("alloy".to_string()),
+        );
 
         // Verify extension data was added
         assert!(session.extension_data.is_some());
         let extensions = session.extension_data.as_ref().unwrap();
 
         assert_eq!(extensions.len(), 4);
-        assert!(extensions.iter().any(|e| e.name == "ai-provider" && e.value == "OpenAI"));
-        assert!(extensions.iter().any(|e| e.name == "ai-model" && e.value == "gpt-4o-realtime-preview"));
-        assert!(extensions.iter().any(|e| e.name == "ai-voice" && e.value == "alloy"));
-        assert!(extensions.iter().any(|e| e.name == "ai-enabled" && e.value == "true"));
+        assert!(extensions
+            .iter()
+            .any(|e| e.name == "ai-provider" && e.value == "OpenAI"));
+        assert!(extensions
+            .iter()
+            .any(|e| e.name == "ai-model" && e.value == "gpt-4o-realtime-preview"));
+        assert!(extensions
+            .iter()
+            .any(|e| e.name == "ai-voice" && e.value == "alloy"));
+        assert!(extensions
+            .iter()
+            .any(|e| e.name == "ai-enabled" && e.value == "true"));
     }
 
     #[test]
@@ -474,9 +479,15 @@ mod tests {
 
         // Should have 3 extensions (no voice)
         assert_eq!(extensions.len(), 3);
-        assert!(extensions.iter().any(|e| e.name == "ai-provider" && e.value == "Google"));
-        assert!(extensions.iter().any(|e| e.name == "ai-model" && e.value == "gemini-pro"));
-        assert!(extensions.iter().any(|e| e.name == "ai-enabled" && e.value == "true"));
+        assert!(extensions
+            .iter()
+            .any(|e| e.name == "ai-provider" && e.value == "Google"));
+        assert!(extensions
+            .iter()
+            .any(|e| e.name == "ai-model" && e.value == "gemini-pro"));
+        assert!(extensions
+            .iter()
+            .any(|e| e.name == "ai-enabled" && e.value == "true"));
 
         // Voice should not be present
         assert!(!extensions.iter().any(|e| e.name == "ai-voice"));
@@ -492,7 +503,9 @@ mod tests {
         assert_eq!(session.participants.len(), 3);
 
         // Find AI participant
-        let ai_participant = session.participants.iter()
+        let ai_participant = session
+            .participants
+            .iter()
             .find(|p| p.name.as_ref().map(|n| n.as_str()) == Some("AI Assistant"))
             .expect("AI participant should be present");
 
@@ -512,7 +525,11 @@ mod tests {
         session.add_ai_participant("AI Assistant", "OpenAI");
 
         // Add AI metadata
-        session.add_ai_metadata("OpenAI", "gpt-4o-realtime-preview", Some("nova".to_string()));
+        session.add_ai_metadata(
+            "OpenAI",
+            "gpt-4o-realtime-preview",
+            Some("nova".to_string()),
+        );
 
         // Add media streams
         session.add_media_stream(MediaStream::audio("user-stream", "192.168.1.100", 5004));
@@ -539,7 +556,11 @@ mod tests {
 
         let extensions = session.extension_data.as_ref().unwrap();
         assert_eq!(extensions.len(), 2);
-        assert!(extensions.iter().any(|e| e.name == "custom-field" && e.value == "custom-value"));
-        assert!(extensions.iter().any(|e| e.name == "another-field" && e.value == "another-value"));
+        assert!(extensions
+            .iter()
+            .any(|e| e.name == "custom-field" && e.value == "custom-value"));
+        assert!(extensions
+            .iter()
+            .any(|e| e.name == "another-field" && e.value == "another-value"));
     }
 }

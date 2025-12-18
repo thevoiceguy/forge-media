@@ -63,7 +63,9 @@
 //! }
 //! ```
 
-use crate::connector::{AIConnector, AIConnectorConfig, AIConnectorType, AISession, AISessionState};
+use crate::connector::{
+    AIConnector, AIConnectorConfig, AIConnectorType, AISession, AISessionState,
+};
 use crate::events::{AIEvent, SessionConfig};
 use crate::{AIStreamError, AIStreamStats, Result};
 use async_trait::async_trait;
@@ -165,9 +167,10 @@ impl ElevenLabsConnector {
 
     /// Get WebSocket URL for ElevenLabs API
     fn get_ws_url(&self) -> String {
-        self.config.endpoint.clone().unwrap_or_else(|| {
-            "wss://api.elevenlabs.io/v1/convai/conversation".to_string()
-        })
+        self.config
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| "wss://api.elevenlabs.io/v1/convai/conversation".to_string())
     }
 
     /// Get agent ID from config or use default

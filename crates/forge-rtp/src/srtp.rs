@@ -3,13 +3,13 @@
 //! This module provides SRTP (Secure Real-time Transport Protocol) implementation
 //! with support for AES-CM and AES-GCM cipher suites.
 
-use forge_core::{ForgeError, Result};
-use aes::{Aes128, Aes256};
 use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::{Aes128, Aes256};
+use aes_gcm::{AeadInPlace, Aes128Gcm, Aes256Gcm, Nonce};
+use forge_core::{ForgeError, Result};
 use hmac::{Hmac, Mac};
-use sha1::Sha1;
-use aes_gcm::{Aes128Gcm, Aes256Gcm, AeadInPlace, Nonce};
 use metrics::counter;
+use sha1::Sha1;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -68,7 +68,10 @@ impl TryFrom<u16> for SrtpProfile {
             0x0002 => Ok(SrtpProfile::Aes128CmHmacSha1_32),
             0x0007 => Ok(SrtpProfile::AeadAes128Gcm),
             0x0008 => Ok(SrtpProfile::AeadAes256Gcm),
-            _ => Err(ForgeError::Srtp(format!("Unknown SRTP profile: {:#04x}", value))),
+            _ => Err(ForgeError::Srtp(format!(
+                "Unknown SRTP profile: {:#04x}",
+                value
+            ))),
         }
     }
 }
@@ -197,8 +200,9 @@ impl SrtpKeyMaterial {
         match self.master_key.len() {
             16 => {
                 // AES-128
-                let cipher = Aes128::new_from_slice(&self.master_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-128 cipher: {}", e)))?;
+                let cipher = Aes128::new_from_slice(&self.master_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-128 cipher: {}", e))
+                })?;
 
                 for i in 0..num_blocks {
                     // Encrypt counter block
@@ -221,8 +225,9 @@ impl SrtpKeyMaterial {
             }
             32 => {
                 // AES-256
-                let cipher = Aes256::new_from_slice(&self.master_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-256 cipher: {}", e)))?;
+                let cipher = Aes256::new_from_slice(&self.master_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-256 cipher: {}", e))
+                })?;
 
                 for i in 0..num_blocks {
                     // Encrypt counter block
@@ -430,7 +435,8 @@ impl SrtpContext {
         let mut header_len = 12 + (csrc_count as usize * 4);
 
         if extension == 1 && packet.len() > header_len + 4 {
-            let ext_len = u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]) as usize;
+            let ext_len =
+                u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]) as usize;
             header_len += 4 + (ext_len * 4);
         }
 
@@ -602,16 +608,18 @@ impl SrtpContext {
         // Encrypt and get tag separately (per RFC 7714)
         let tag = match profile {
             SrtpProfile::AeadAes128Gcm => {
-                let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e)))?;
+                let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e))
+                })?;
 
                 cipher
                     .encrypt_in_place_detached(nonce, &packet[..header_len], &mut payload)
                     .map_err(|e| ForgeError::Srtp(format!("AES-GCM encryption failed: {}", e)))?
             }
             SrtpProfile::AeadAes256Gcm => {
-                let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e)))?;
+                let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e))
+                })?;
 
                 cipher
                     .encrypt_in_place_detached(nonce, &packet[..header_len], &mut payload)
@@ -622,9 +630,9 @@ impl SrtpContext {
 
         // Build result: header + encrypted_payload + auth_tag
         let mut result = Vec::with_capacity(packet.len() + 16);
-        result.extend_from_slice(&packet[..header_len]);  // Header
-        result.extend_from_slice(&payload);                // Encrypted payload
-        result.extend_from_slice(&tag);                    // Auth tag
+        result.extend_from_slice(&packet[..header_len]); // Header
+        result.extend_from_slice(&payload); // Encrypted payload
+        result.extend_from_slice(&tag); // Auth tag
         Ok(result)
     }
 
@@ -652,14 +660,17 @@ impl SrtpContext {
         let mut header_len = 12 + (csrc_count as usize * 4);
 
         if extension == 1 && packet.len() > header_len + 4 {
-            let ext_len = u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]) as usize;
+            let ext_len =
+                u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]) as usize;
             header_len += 4 + (ext_len * 4);
         }
 
         let auth_tag_len = key_material.profile.auth_tag_len();
 
         if packet.len() < header_len + auth_tag_len {
-            return Err(ForgeError::Srtp("SRTP packet too short for auth tag".to_string()));
+            return Err(ForgeError::Srtp(
+                "SRTP packet too short for auth tag".to_string(),
+            ));
         }
 
         // Determine ROC
@@ -677,8 +688,8 @@ impl SrtpContext {
 
         // Decrypt based on profile
         let rtp_packet = match key_material.profile {
-            SrtpProfile::Aes128CmHmacSha1_80 | SrtpProfile::Aes128CmHmacSha1_32 => {
-                self.unprotect_aes_cm(
+            SrtpProfile::Aes128CmHmacSha1_80 | SrtpProfile::Aes128CmHmacSha1_32 => self
+                .unprotect_aes_cm(
                     packet,
                     header_len,
                     &derived_keys,
@@ -686,19 +697,16 @@ impl SrtpContext {
                     roc,
                     packet_index,
                     key_material.profile,
-                )?
-            }
-            SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => {
-                self.unprotect_aes_gcm(
-                    packet,
-                    header_len,
-                    &derived_keys,
-                    ssrc,
-                    roc,
-                    sequence,
-                    key_material.profile,
-                )?
-            }
+                )?,
+            SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => self.unprotect_aes_gcm(
+                packet,
+                header_len,
+                &derived_keys,
+                ssrc,
+                roc,
+                sequence,
+                key_material.profile,
+            )?,
         };
 
         // Update replay window
@@ -832,7 +840,9 @@ impl SrtpContext {
         // Extract auth tag (last 16 bytes)
         let tag_len = 16;
         if packet.len() < header_len + tag_len {
-            return Err(ForgeError::Srtp("SRTP packet too short for AES-GCM".to_string()));
+            return Err(ForgeError::Srtp(
+                "SRTP packet too short for AES-GCM".to_string(),
+            ));
         }
 
         let tag_start = packet.len() - tag_len;
@@ -844,26 +854,43 @@ impl SrtpContext {
         // Decrypt and verify with detached tag
         use aes_gcm::Tag;
 
-        let tag_array: &[u8; 16] = tag.try_into()
+        let tag_array: &[u8; 16] = tag
+            .try_into()
             .map_err(|_| ForgeError::Srtp("Invalid tag length".to_string()))?;
         let tag_obj = Tag::from_slice(tag_array);
 
         match profile {
             SrtpProfile::AeadAes128Gcm => {
-                let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e)))?;
+                let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e))
+                })?;
 
                 cipher
-                    .decrypt_in_place_detached(nonce, &packet[..header_len], &mut ciphertext, tag_obj)
-                    .map_err(|e| ForgeError::Srtp(format!("AES-GCM decryption/verification failed: {}", e)))?;
+                    .decrypt_in_place_detached(
+                        nonce,
+                        &packet[..header_len],
+                        &mut ciphertext,
+                        tag_obj,
+                    )
+                    .map_err(|e| {
+                        ForgeError::Srtp(format!("AES-GCM decryption/verification failed: {}", e))
+                    })?;
             }
             SrtpProfile::AeadAes256Gcm => {
-                let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e)))?;
+                let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e))
+                })?;
 
                 cipher
-                    .decrypt_in_place_detached(nonce, &packet[..header_len], &mut ciphertext, tag_obj)
-                    .map_err(|e| ForgeError::Srtp(format!("AES-GCM decryption/verification failed: {}", e)))?;
+                    .decrypt_in_place_detached(
+                        nonce,
+                        &packet[..header_len],
+                        &mut ciphertext,
+                        tag_obj,
+                    )
+                    .map_err(|e| {
+                        ForgeError::Srtp(format!("AES-GCM decryption/verification failed: {}", e))
+                    })?;
             }
             _ => unreachable!(),
         }
@@ -901,12 +928,21 @@ impl SrtpContext {
 
         // Encrypt based on profile
         let srtcp_packet = match key_material.profile {
-            SrtpProfile::Aes128CmHmacSha1_80 | SrtpProfile::Aes128CmHmacSha1_32 => {
-                self.protect_rtcp_aes_cm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)?
-            }
-            SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => {
-                self.protect_rtcp_aes_gcm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)?
-            }
+            SrtpProfile::Aes128CmHmacSha1_80 | SrtpProfile::Aes128CmHmacSha1_32 => self
+                .protect_rtcp_aes_cm(
+                    packet,
+                    &derived_keys,
+                    ssrc,
+                    srtcp_index,
+                    key_material.profile,
+                )?,
+            SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => self.protect_rtcp_aes_gcm(
+                packet,
+                &derived_keys,
+                ssrc,
+                srtcp_index,
+                key_material.profile,
+            )?,
         };
 
         // Increment metrics counter
@@ -1040,16 +1076,18 @@ impl SrtpContext {
         // Encrypt and get tag separately (per RFC 7714, tag follows E|index)
         let tag = match profile {
             SrtpProfile::AeadAes128Gcm => {
-                let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e)))?;
+                let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e))
+                })?;
 
                 cipher
                     .encrypt_in_place_detached(nonce, &aad, &mut payload)
                     .map_err(|e| ForgeError::Srtp(format!("AES-GCM encryption failed: {}", e)))?
             }
             SrtpProfile::AeadAes256Gcm => {
-                let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e)))?;
+                let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e))
+                })?;
 
                 cipher
                     .encrypt_in_place_detached(nonce, &aad, &mut payload)
@@ -1060,10 +1098,10 @@ impl SrtpContext {
 
         // Build result per RFC 7714: header + encrypted_payload + E|index + auth_tag
         let mut result = Vec::with_capacity(packet.len() + 4 + 16);
-        result.extend_from_slice(&packet[..8]);      // Header
-        result.extend_from_slice(&payload);           // Encrypted payload (without tag)
-        result.extend_from_slice(&e_index_bytes);    // E|index
-        result.extend_from_slice(&tag);               // Auth tag
+        result.extend_from_slice(&packet[..8]); // Header
+        result.extend_from_slice(&payload); // Encrypted payload (without tag)
+        result.extend_from_slice(&e_index_bytes); // E|index
+        result.extend_from_slice(&tag); // Auth tag
 
         Ok(result)
     }
@@ -1098,7 +1136,9 @@ impl SrtpContext {
         let srtcp_index = e_index & 0x7FFFFFFF;
 
         if e_bit == 0 {
-            return Err(ForgeError::Srtp("SRTCP packet not encrypted (E=0)".to_string()));
+            return Err(ForgeError::Srtp(
+                "SRTCP packet not encrypted (E=0)".to_string(),
+            ));
         }
 
         // Extract SSRC
@@ -1109,12 +1149,22 @@ impl SrtpContext {
 
         // Decrypt based on profile
         let rtcp_packet = match key_material.profile {
-            SrtpProfile::Aes128CmHmacSha1_80 | SrtpProfile::Aes128CmHmacSha1_32 => {
-                self.unprotect_rtcp_aes_cm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)?
-            }
-            SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => {
-                self.unprotect_rtcp_aes_gcm(packet, &derived_keys, ssrc, srtcp_index, key_material.profile)?
-            }
+            SrtpProfile::Aes128CmHmacSha1_80 | SrtpProfile::Aes128CmHmacSha1_32 => self
+                .unprotect_rtcp_aes_cm(
+                    packet,
+                    &derived_keys,
+                    ssrc,
+                    srtcp_index,
+                    key_material.profile,
+                )?,
+            SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => self
+                .unprotect_rtcp_aes_gcm(
+                    packet,
+                    &derived_keys,
+                    ssrc,
+                    srtcp_index,
+                    key_material.profile,
+                )?,
         };
 
         // Increment metrics counter
@@ -1217,7 +1267,9 @@ impl SrtpContext {
         // Extract auth tag (last 16 bytes)
         let tag_len = 16;
         if packet.len() < 8 + 4 + tag_len {
-            return Err(ForgeError::Srtp("SRTCP packet too short for AES-GCM".to_string()));
+            return Err(ForgeError::Srtp(
+                "SRTCP packet too short for AES-GCM".to_string(),
+            ));
         }
 
         let tag_start = packet.len() - tag_len;
@@ -1229,8 +1281,8 @@ impl SrtpContext {
 
         // Build AAD: header + E|index (per RFC 7714)
         let mut aad = Vec::with_capacity(12);
-        aad.extend_from_slice(&packet[..8]);      // Header
-        aad.extend_from_slice(e_index_bytes);     // E|index
+        aad.extend_from_slice(&packet[..8]); // Header
+        aad.extend_from_slice(e_index_bytes); // E|index
 
         // Extract encrypted payload (between header and E|index)
         let mut ciphertext = packet[8..e_index_start].to_vec();
@@ -1255,26 +1307,39 @@ impl SrtpContext {
         use aes_gcm::Tag;
 
         // Tag is 16 bytes for both AES-128-GCM and AES-256-GCM
-        let tag_array: &[u8; 16] = tag.try_into()
+        let tag_array: &[u8; 16] = tag
+            .try_into()
             .map_err(|_| ForgeError::Srtp("Invalid tag length".to_string()))?;
         let tag_obj = Tag::from_slice(tag_array);
 
         match profile {
             SrtpProfile::AeadAes128Gcm => {
-                let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e)))?;
+                let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e))
+                })?;
 
                 cipher
                     .decrypt_in_place_detached(nonce, &aad, &mut ciphertext, tag_obj)
-                    .map_err(|e| ForgeError::Srtp(format!("SRTCP AES-GCM decryption/verification failed: {}", e)))?;
+                    .map_err(|e| {
+                        ForgeError::Srtp(format!(
+                            "SRTCP AES-GCM decryption/verification failed: {}",
+                            e
+                        ))
+                    })?;
             }
             SrtpProfile::AeadAes256Gcm => {
-                let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key)
-                    .map_err(|e| ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e)))?;
+                let cipher = Aes256Gcm::new_from_slice(&keys.encryption_key).map_err(|e| {
+                    ForgeError::Srtp(format!("Failed to create AES-GCM cipher: {}", e))
+                })?;
 
                 cipher
                     .decrypt_in_place_detached(nonce, &aad, &mut ciphertext, tag_obj)
-                    .map_err(|e| ForgeError::Srtp(format!("SRTCP AES-GCM decryption/verification failed: {}", e)))?;
+                    .map_err(|e| {
+                        ForgeError::Srtp(format!(
+                            "SRTCP AES-GCM decryption/verification failed: {}",
+                            e
+                        ))
+                    })?;
             }
             _ => unreachable!(),
         }
@@ -1455,11 +1520,18 @@ mod tests {
 
         // Expected cipher key from RFC 3711
         let expected_cipher_key = hex::decode("C61E7A93744F39EE10734AFE3FF7A087").unwrap();
-        assert_eq!(keys.encryption_key, expected_cipher_key, "Cipher key derivation failed");
+        assert_eq!(
+            keys.encryption_key, expected_cipher_key,
+            "Cipher key derivation failed"
+        );
 
         // Expected auth key from RFC 3711
         let expected_auth_key = hex::decode("CEBE321F6FF7716B6FD4AB49AF256A156D38BAA4").unwrap();
-        assert_eq!(keys.authentication_key.unwrap(), expected_auth_key, "Auth key derivation failed");
+        assert_eq!(
+            keys.authentication_key.unwrap(),
+            expected_auth_key,
+            "Auth key derivation failed"
+        );
 
         // Expected salt key from RFC 3711
         let expected_salt_key = hex::decode("30CBBC08863D8C85D49DB34A9AE1").unwrap();
@@ -1477,7 +1549,8 @@ mod tests {
         let master_salt = vec![0xF0u8; 14];
         let profile = SrtpProfile::Aes128CmHmacSha1_80;
 
-        let local_key = SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
+        let local_key =
+            SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
         let remote_key = SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
 
         let mut encrypt_ctx = SrtpContext::new();
@@ -1508,7 +1581,8 @@ mod tests {
         let master_salt = vec![0x55u8; 12];
         let profile = SrtpProfile::AeadAes128Gcm;
 
-        let local_key = SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
+        let local_key =
+            SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
         let remote_key = SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
 
         let mut encrypt_ctx = SrtpContext::new();
@@ -1536,7 +1610,8 @@ mod tests {
         let master_salt = vec![0xC3u8; 14];
         let profile = SrtpProfile::Aes128CmHmacSha1_80;
 
-        let local_key = SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
+        let local_key =
+            SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
         let remote_key = SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
 
         let mut encrypt_ctx = SrtpContext::new();
@@ -1565,7 +1640,8 @@ mod tests {
         let master_salt = vec![0x24u8; 14];
         let profile = SrtpProfile::Aes128CmHmacSha1_80;
 
-        let local_key = SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
+        let local_key =
+            SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
         let remote_key = SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
 
         let mut encrypt_ctx = SrtpContext::new();
@@ -1596,7 +1672,8 @@ mod tests {
         let master_salt = vec![0x88u8; 14];
         let profile = SrtpProfile::Aes128CmHmacSha1_80;
 
-        let local_key = SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
+        let local_key =
+            SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
         let remote_key = SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
 
         let mut encrypt_ctx = SrtpContext::new();
@@ -1664,13 +1741,21 @@ mod tests {
             .expect("Failed to create key material for AES-256-GCM");
 
         // Verify key derivation works (this internally calls aes_cm_prf with 32-byte key)
-        let derived = key_material.derive_session_keys(0x12345678, 0)
+        let derived = key_material
+            .derive_session_keys(0x12345678, 0)
             .expect("Failed to derive session keys for AES-256-GCM");
 
         // Verify derived key lengths
-        assert_eq!(derived.encryption_key.len(), 32, "AES-256 encryption key should be 32 bytes");
+        assert_eq!(
+            derived.encryption_key.len(),
+            32,
+            "AES-256 encryption key should be 32 bytes"
+        );
         assert_eq!(derived.salt.len(), 12, "GCM salt should be 12 bytes");
-        assert!(derived.authentication_key.is_none(), "AEAD mode should not have separate auth key");
+        assert!(
+            derived.authentication_key.is_none(),
+            "AEAD mode should not have separate auth key"
+        );
     }
 
     /// Test AES-256-GCM encrypt/decrypt roundtrip
@@ -1678,8 +1763,12 @@ mod tests {
     fn test_aes256_gcm_roundtrip() {
         let master_key = vec![0x42; 32];
         let master_salt = vec![0x43; 12];
-        let key_material = SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), SrtpProfile::AeadAes256Gcm)
-            .expect("Failed to create AES-256-GCM key material");
+        let key_material = SrtpKeyMaterial::new(
+            master_key.clone(),
+            master_salt.clone(),
+            SrtpProfile::AeadAes256Gcm,
+        )
+        .expect("Failed to create AES-256-GCM key material");
 
         // Create encrypt and decrypt contexts
         let mut encrypt_ctx = SrtpContext::new();
@@ -1693,12 +1782,17 @@ mod tests {
         let original_len = packet.len();
 
         // Encrypt
-        let encrypted = encrypt_ctx.protect_rtp(&packet)
+        let encrypted = encrypt_ctx
+            .protect_rtp(&packet)
             .expect("Failed to encrypt with AES-256-GCM");
-        assert!(encrypted.len() > original_len, "Encrypted packet should be longer (includes auth tag)");
+        assert!(
+            encrypted.len() > original_len,
+            "Encrypted packet should be longer (includes auth tag)"
+        );
 
         // Decrypt
-        let decrypted = decrypt_ctx.unprotect_rtp(&encrypted)
+        let decrypted = decrypt_ctx
+            .unprotect_rtp(&encrypted)
             .expect("Failed to decrypt with AES-256-GCM");
         assert_eq!(packet, decrypted, "Decrypted packet should match original");
     }
@@ -1732,7 +1826,7 @@ mod tests {
 
         // RTCP SR header: V=2, P=0, RC=0, PT=200 (SR)
         packet.push(0x80); // V=2, P=0, RC=0
-        packet.push(200);  // PT=200 (Sender Report)
+        packet.push(200); // PT=200 (Sender Report)
 
         // Length (in 32-bit words - 1)
         packet.extend_from_slice(&1u16.to_be_bytes());

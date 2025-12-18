@@ -64,7 +64,9 @@ impl HAManager {
         info!("Initializing HA Manager (placeholder implementation)");
         info!("Deployment mode: {:?}", config.deployment_mode);
 
-        let instance_id = config.instance_id.clone()
+        let instance_id = config
+            .instance_id
+            .clone()
             .unwrap_or_else(|| format!("forge-{}", uuid::Uuid::new_v4()));
 
         info!("Instance ID: {}", instance_id);
@@ -140,11 +142,11 @@ impl HAManager {
             instance_id: self.instance_id.clone(),
             role: self.role.read().await.clone(),
             health_state: self.health_state.read().await.clone(),
-            session_count: 0,  // TODO: Query from Redis
-            conference_count: 0,  // TODO: Query from Redis
+            session_count: 0,    // TODO: Query from Redis
+            conference_count: 0, // TODO: Query from Redis
             failover_count: *self.failover_count.read().await,
             last_failover: self.last_failover.read().await.clone(),
-            redis_connected: false,  // TODO: Query Redis health
+            redis_connected: false, // TODO: Query Redis health
             uptime_secs: self.start_time.elapsed().as_secs(),
         }
     }

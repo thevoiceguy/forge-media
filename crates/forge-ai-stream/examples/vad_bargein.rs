@@ -6,9 +6,7 @@
 //! Usage:
 //!   cargo run --example vad_bargein
 
-use forge_ai_stream::{
-    BargeInConfig, BargeInDetector, VadConfig, VadDetector, VadState,
-};
+use forge_ai_stream::{BargeInConfig, BargeInDetector, VadConfig, VadDetector, VadState};
 use std::time::Duration;
 
 fn main() {

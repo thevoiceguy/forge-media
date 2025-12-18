@@ -11,8 +11,8 @@ use axum::{
     http::{Request, StatusCode},
     Router,
 };
-use forge_api::routes::sessions::AppState;
 use forge_api::routes;
+use forge_api::routes::sessions::AppState;
 use forge_conference_processor::ConferenceBridge;
 use forge_engine::{SessionManager, SessionManagerConfig};
 use forge_media_processor::AudioFormat;
@@ -96,7 +96,8 @@ async fn test_attach_ai_to_conference() {
     // but we can verify the request structure is correct
     // In a real test environment with mock AI, this would return 201
     assert!(
-        response.status() == StatusCode::CREATED || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
+        response.status() == StatusCode::CREATED
+            || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
         "Expected CREATED or INTERNAL_SERVER_ERROR, got {:?}",
         response.status()
     );
@@ -228,7 +229,8 @@ async fn test_attach_ai_individual_mode() {
     // but we can verify the request structure is correct and Individual mode is accepted
     // In a real test environment with mock AI, this would return 201
     assert!(
-        response.status() == StatusCode::CREATED || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
+        response.status() == StatusCode::CREATED
+            || response.status() == StatusCode::INTERNAL_SERVER_ERROR,
         "Expected CREATED or INTERNAL_SERVER_ERROR (connection failure), got {:?}",
         response.status()
     );

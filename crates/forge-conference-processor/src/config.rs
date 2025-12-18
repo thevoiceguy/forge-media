@@ -202,7 +202,10 @@ impl PinRequirements {
 
         if self.digits_only {
             // Only allow 0-9, *, #
-            if !pin.chars().all(|c| c.is_ascii_digit() || c == '*' || c == '#') {
+            if !pin
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '*' || c == '#')
+            {
                 return Err(ConfigError::ValidationError(format!(
                     "{} PIN must contain only digits (0-9), *, or #",
                     pin_type

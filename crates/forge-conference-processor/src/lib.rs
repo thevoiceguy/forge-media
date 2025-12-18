@@ -4,31 +4,31 @@
 
 use thiserror::Error;
 
-mod conference;
 mod ai_manager;
-mod dtmf_commands;
+mod audio_feedback;
+mod conference;
 mod config;
+mod dtmf_commands;
 mod pin_auth;
 mod room_config;
-mod audio_feedback;
 
-pub use conference::{ConferenceBridge, ConferenceRoom, RoomId};
 pub use ai_manager::{
     AudioMode, ConferenceAIConfig, ConferenceAIManager, ConferenceAIState, AI_PARTICIPANT_ID,
+};
+pub use audio_feedback::{AudioFeedbackPlayer, ConferenceSounds};
+pub use conference::{ConferenceBridge, ConferenceRoom, RoomId};
+pub use config::{
+    AudioConfig, ConferenceConfig, ConfigError, DtmfConfig, HostCommandsConfig,
+    ParticipantCommandsConfig, PinRequirements, RecordingConfig, SecurityConfig,
 };
 pub use dtmf_commands::{
     ConferenceDtmfConfig, DtmfCommand, DtmfCommandHandler, HostCommands, ParticipantCommands,
     ParticipantRole,
 };
-pub use config::{
-    AudioConfig, ConferenceConfig, ConfigError, DtmfConfig, HostCommandsConfig,
-    ParticipantCommandsConfig, PinRequirements, RecordingConfig, SecurityConfig,
-};
-pub use pin_auth::{PinAuthResult, PinAuthenticator};
-pub use room_config::{DtmfCommandBindings, EffectiveRoomConfig, RoomConfig};
-pub use audio_feedback::{AudioFeedbackPlayer, ConferenceSounds};
 pub use forge_core::AudioFormat;
 pub use forge_mixer::{ParticipantMetadata, ParticipantState};
+pub use pin_auth::{PinAuthResult, PinAuthenticator};
+pub use room_config::{DtmfCommandBindings, EffectiveRoomConfig, RoomConfig};
 
 /// Conference error types
 #[derive(Error, Debug)]

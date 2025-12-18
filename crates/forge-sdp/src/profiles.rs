@@ -243,9 +243,15 @@ impl SdpProfile {
         });
 
         // Add WebRTC-specific attributes
-        media.attributes.push(Attribute::Property(SmolStr::new("rtcp-mux")));
-        media.attributes.push(Attribute::Property(SmolStr::new("rtcp-rsize")));
-        media.attributes.push(Attribute::Property(SmolStr::new("sendrecv")));
+        media
+            .attributes
+            .push(Attribute::Property(SmolStr::new("rtcp-mux")));
+        media
+            .attributes
+            .push(Attribute::Property(SmolStr::new("rtcp-rsize")));
+        media
+            .attributes
+            .push(Attribute::Property(SmolStr::new("sendrecv")));
 
         SessionDescriptionBuilder::new()
             .origin("forge", &session_id, local_addr)

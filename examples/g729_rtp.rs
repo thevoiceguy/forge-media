@@ -239,7 +239,10 @@ fn basic_rtp_example() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (sent, lost, loss_rate) = sender.stats();
-    println!("\nStatistics: {} sent, {} lost ({:.1}% loss rate)", sent, lost, loss_rate);
+    println!(
+        "\nStatistics: {} sent, {} lost ({:.1}% loss rate)",
+        sent, lost, loss_rate
+    );
 
     Ok(())
 }
@@ -292,7 +295,10 @@ fn packet_loss_example() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (sent, lost, loss_rate) = receiver.stats();
-    println!("\nStatistics: {} received, {} lost ({:.1}% loss rate)", sent, lost, loss_rate);
+    println!(
+        "\nStatistics: {} received, {} lost ({:.1}% loss rate)",
+        sent, lost, loss_rate
+    );
 
     Ok(())
 }
@@ -309,13 +315,13 @@ fn vad_example() -> Result<(), Box<dyn std::error::Error>> {
 
     // Simulate conversation: speech, silence, speech
     let frames = [
-        ("Speech", vec![1000i16; 80]),   // Active speech
-        ("Speech", vec![800i16; 80]),    // Active speech
-        ("Silence", vec![10i16; 80]),    // Background noise
-        ("Silence", vec![5i16; 80]),     // Background noise
-        ("Silence", vec![8i16; 80]),     // Background noise
-        ("Speech", vec![1200i16; 80]),   // Active speech
-        ("Speech", vec![900i16; 80]),    // Active speech
+        ("Speech", vec![1000i16; 80]), // Active speech
+        ("Speech", vec![800i16; 80]),  // Active speech
+        ("Silence", vec![10i16; 80]),  // Background noise
+        ("Silence", vec![5i16; 80]),   // Background noise
+        ("Silence", vec![8i16; 80]),   // Background noise
+        ("Speech", vec![1200i16; 80]), // Active speech
+        ("Speech", vec![900i16; 80]),  // Active speech
     ];
 
     for (i, (label, pcm)) in frames.iter().enumerate() {

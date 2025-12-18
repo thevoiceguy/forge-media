@@ -289,8 +289,7 @@ mod tests {
 
     #[test]
     fn test_inter_digit_timeout() {
-        let mut buffer = DtmfBuffer::new()
-            .with_inter_digit_timeout(Duration::from_millis(50));
+        let mut buffer = DtmfBuffer::new().with_inter_digit_timeout(Duration::from_millis(50));
 
         buffer.push(DtmfDigit::One);
         assert!(!buffer.is_inter_digit_timeout());
@@ -315,8 +314,7 @@ mod tests {
 
     #[test]
     fn test_custom_terminators() {
-        let mut buffer = DtmfBuffer::new()
-            .with_terminators(vec![DtmfDigit::Star, DtmfDigit::Hash]);
+        let mut buffer = DtmfBuffer::new().with_terminators(vec![DtmfDigit::Star, DtmfDigit::Hash]);
 
         buffer.push(DtmfDigit::One);
         buffer.push(DtmfDigit::Two);
@@ -341,8 +339,7 @@ mod tests {
 
     #[test]
     fn test_total_timeout() {
-        let mut buffer = DtmfBuffer::new()
-            .with_total_timeout(Duration::from_millis(50));
+        let mut buffer = DtmfBuffer::new().with_total_timeout(Duration::from_millis(50));
 
         buffer.push(DtmfDigit::One);
         assert!(!buffer.is_total_timeout());

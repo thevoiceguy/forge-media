@@ -28,12 +28,12 @@ async fn test_sdp_offer_generation() {
     let offer = peer.create_offer().await.unwrap();
 
     // Verify SDP offer structure
-    assert!(offer.contains("v=0"));           // Version
-    assert!(offer.contains("m=audio"));       // Media type
-    assert!(offer.contains("a=ice-ufrag:"));  // ICE credentials
-    assert!(offer.contains("a=ice-pwd:"));    // ICE password
+    assert!(offer.contains("v=0")); // Version
+    assert!(offer.contains("m=audio")); // Media type
+    assert!(offer.contains("a=ice-ufrag:")); // ICE credentials
+    assert!(offer.contains("a=ice-pwd:")); // ICE password
     assert!(offer.contains("a=fingerprint:")); // DTLS fingerprint
-    assert!(offer.contains("a=setup:"));      // DTLS setup
+    assert!(offer.contains("a=setup:")); // DTLS setup
 
     // State should transition to Gathering
     assert_eq!(peer.get_state(), ConnectionState::Gathering);

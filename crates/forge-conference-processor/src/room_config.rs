@@ -108,17 +108,24 @@ impl RoomConfig {
     /// Merge room config with global config to produce effective configuration
     pub fn merge_with_global(&self, global: &ConferenceConfig) -> EffectiveRoomConfig {
         let security = SecurityConfig {
-            require_guest_pin: self.require_guest_pin
+            require_guest_pin: self
+                .require_guest_pin
                 .unwrap_or(global.security.require_guest_pin),
-            guest_pin: self.guest_pin.clone()
+            guest_pin: self
+                .guest_pin
+                .clone()
                 .or_else(|| global.security.guest_pin.clone()),
-            host_pin: self.host_pin.clone()
+            host_pin: self
+                .host_pin
+                .clone()
                 .or_else(|| global.security.host_pin.clone()),
             pin_requirements: global.security.pin_requirements.clone(),
-            max_pin_attempts: self.max_pin_attempts
+            max_pin_attempts: self
+                .max_pin_attempts
                 .unwrap_or(global.security.max_pin_attempts),
             lockout_duration_secs: global.security.lockout_duration_secs,
-            default_locked: self.default_locked
+            default_locked: self
+                .default_locked
                 .unwrap_or(global.security.default_locked),
         };
 
@@ -128,46 +135,69 @@ impl RoomConfig {
 
         EffectiveRoomConfig {
             security,
-            dtmf_enabled: self.enable_dtmf
-                .unwrap_or(global.dtmf.enabled),
+            dtmf_enabled: self.enable_dtmf.unwrap_or(global.dtmf.enabled),
             dtmf_config,
 
             // Capacity settings
-            max_channels: self.max_channels
-                .unwrap_or(global.capacity.max_channels),
-            wait_for_moderator: self.wait_for_moderator
+            max_channels: self.max_channels.unwrap_or(global.capacity.max_channels),
+            wait_for_moderator: self
+                .wait_for_moderator
                 .unwrap_or(global.capacity.wait_for_moderator),
 
             // Meeting requirements
-            min_users: self.min_users
-                .unwrap_or(global.meeting.min_users),
-            min_recording_participants: self.min_recording_participants
+            min_users: self.min_users.unwrap_or(global.meeting.min_users),
+            min_recording_participants: self
+                .min_recording_participants
                 .unwrap_or(global.meeting.min_recording_participants),
 
             // Audio feedback sounds (Option<Option<String>> allows overriding with None)
-            join_sound: self.join_sound.clone()
+            join_sound: self
+                .join_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.join_sound.clone()),
-            exit_sound: self.exit_sound.clone()
+            exit_sound: self
+                .exit_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.exit_sound.clone()),
-            alone_sound: self.alone_sound.clone()
+            alone_sound: self
+                .alone_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.alone_sound.clone()),
-            invalid_pin_sound: self.invalid_pin_sound.clone()
+            invalid_pin_sound: self
+                .invalid_pin_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.invalid_pin_sound.clone()),
-            locked_sound: self.locked_sound.clone()
+            locked_sound: self
+                .locked_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.locked_sound.clone()),
-            unlocked_sound: self.unlocked_sound.clone()
+            unlocked_sound: self
+                .unlocked_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.unlocked_sound.clone()),
-            kicked_sound: self.kicked_sound.clone()
+            kicked_sound: self
+                .kicked_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.kicked_sound.clone()),
-            max_members_sound: self.max_members_sound.clone()
+            max_members_sound: self
+                .max_members_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.max_members_sound.clone()),
-            moh_sound: self.moh_sound.clone()
+            moh_sound: self
+                .moh_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.moh_sound.clone()),
-            pin_prompt_sound: self.pin_prompt_sound.clone()
+            pin_prompt_sound: self
+                .pin_prompt_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.pin_prompt_sound.clone()),
-            recording_started_sound: self.recording_started_sound.clone()
+            recording_started_sound: self
+                .recording_started_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.recording_started_sound.clone()),
-            recording_stopped_sound: self.recording_stopped_sound.clone()
+            recording_stopped_sound: self
+                .recording_stopped_sound
+                .clone()
                 .unwrap_or_else(|| global.sounds.recording_stopped_sound.clone()),
         }
     }
@@ -176,15 +206,25 @@ impl RoomConfig {
     fn build_dtmf_config(&self, global_dtmf: &DtmfConfig) -> ConferenceDtmfConfig {
         let participant_cmds = if let Some(bindings) = &self.dtmf_commands {
             crate::dtmf_commands::ParticipantCommands {
-                mute_toggle: bindings.mute_toggle.clone()
+                mute_toggle: bindings
+                    .mute_toggle
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.participant_commands.mute_toggle.clone()),
-                volume_up: bindings.volume_up.clone()
+                volume_up: bindings
+                    .volume_up
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.participant_commands.volume_up.clone()),
-                volume_down: bindings.volume_down.clone()
+                volume_down: bindings
+                    .volume_down
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.participant_commands.volume_down.clone()),
-                info: bindings.info.clone()
+                info: bindings
+                    .info
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.participant_commands.info.clone()),
-                leave: bindings.leave.clone()
+                leave: bindings
+                    .leave
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.participant_commands.leave.clone()),
             }
         } else {
@@ -199,17 +239,29 @@ impl RoomConfig {
 
         let host_cmds = if let Some(bindings) = &self.dtmf_commands {
             crate::dtmf_commands::HostCommands {
-                kick_prefix: bindings.kick_prefix.clone()
+                kick_prefix: bindings
+                    .kick_prefix
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.host_commands.kick_prefix.clone()),
-                mute_all: bindings.mute_all.clone()
+                mute_all: bindings
+                    .mute_all
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.host_commands.mute_all.clone()),
-                unmute_all: bindings.unmute_all.clone()
+                unmute_all: bindings
+                    .unmute_all
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.host_commands.unmute_all.clone()),
-                lock: bindings.lock.clone()
+                lock: bindings
+                    .lock
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.host_commands.lock.clone()),
-                unlock: bindings.unlock.clone()
+                unlock: bindings
+                    .unlock
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.host_commands.unlock.clone()),
-                end_conference: bindings.end_conference.clone()
+                end_conference: bindings
+                    .end_conference
+                    .clone()
                     .unwrap_or_else(|| global_dtmf.host_commands.end_conference.clone()),
             }
         } else {
@@ -227,7 +279,9 @@ impl RoomConfig {
             enabled: self.enable_dtmf.unwrap_or(global_dtmf.enabled),
             participant_commands: participant_cmds,
             host_commands: host_cmds,
-            host_pin: self.host_pin.clone()
+            host_pin: self
+                .host_pin
+                .clone()
                 .or_else(|| global_dtmf.enabled.then(|| String::new())), // Will be set from security config
             forward_to_ai: global_dtmf.forward_to_ai,
             sequence_timeout_ms: global_dtmf.sequence_timeout_ms,
@@ -300,7 +354,10 @@ mod tests {
         // Should use all global settings
         assert_eq!(effective.security.guest_pin, global.security.guest_pin);
         assert_eq!(effective.security.host_pin, global.security.host_pin);
-        assert_eq!(effective.security.require_guest_pin, global.security.require_guest_pin);
+        assert_eq!(
+            effective.security.require_guest_pin,
+            global.security.require_guest_pin
+        );
     }
 
     #[test]
@@ -309,10 +366,7 @@ mod tests {
         global.security.guest_pin = Some("global123".to_string());
         global.security.host_pin = Some("global999".to_string());
 
-        let room = RoomConfig::with_pins(
-            Some("room456".to_string()),
-            Some("room888".to_string()),
-        );
+        let room = RoomConfig::with_pins(Some("room456".to_string()), Some("room888".to_string()));
 
         let effective = room.merge_with_global(&global);
 
@@ -365,7 +419,10 @@ mod tests {
 
         let effective = room.merge_with_global(&global);
 
-        assert_eq!(effective.dtmf_config.participant_commands.mute_toggle, "**6");
+        assert_eq!(
+            effective.dtmf_config.participant_commands.mute_toggle,
+            "**6"
+        );
         // Other commands should still use global defaults
         assert_eq!(
             effective.dtmf_config.participant_commands.volume_up,

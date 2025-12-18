@@ -64,8 +64,8 @@ impl MixMode {
             MixMode::Mix => {
                 // Additive mixing with volume control
                 for (call_sample, &inject_sample) in call_audio.iter_mut().zip(injected_audio) {
-                    let mixed = *call_sample as i32
-                        + (inject_sample as f32 * injection_volume) as i32;
+                    let mixed =
+                        *call_sample as i32 + (inject_sample as f32 * injection_volume) as i32;
                     *call_sample = mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                 }
             }
@@ -201,10 +201,7 @@ mod tests {
         let mut call_audio = vec![1000i16; 10];
         let injected_audio = vec![100i16; 10];
 
-        MixMode::Duck {
-            duck_factor: 0.5,
-        }
-        .apply(&mut call_audio, &injected_audio, 1.0);
+        MixMode::Duck { duck_factor: 0.5 }.apply(&mut call_audio, &injected_audio, 1.0);
 
         // Should duck call audio and add injection
         // 1000 * 0.5 + 100 = 600

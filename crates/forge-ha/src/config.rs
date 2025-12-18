@@ -219,8 +219,12 @@ impl HAConfig {
 
         // Validate Redis Sentinel configuration
         if self.redis.sentinels.is_some() {
-            if self.redis.master_name.is_none() || self.redis.master_name.as_ref().unwrap().is_empty() {
-                return Err("Redis master_name is required when sentinels are configured".to_string());
+            if self.redis.master_name.is_none()
+                || self.redis.master_name.as_ref().unwrap().is_empty()
+            {
+                return Err(
+                    "Redis master_name is required when sentinels are configured".to_string(),
+                );
             }
 
             let sentinels = self.redis.sentinels.as_ref().unwrap();

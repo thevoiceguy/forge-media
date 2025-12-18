@@ -1,6 +1,6 @@
 //! Candidate gathering - enumerates network interfaces and creates ICE candidates
 
-use crate::candidate::{IceCandidate, CandidateType, Protocol};
+use crate::candidate::{CandidateType, IceCandidate, Protocol};
 use crate::stun::StunClient;
 use forge_core::Result;
 use if_addrs::get_if_addrs;
@@ -16,8 +16,9 @@ pub async fn gather_host_candidates(component: u16, port: u16) -> Result<Vec<Ice
     let mut foundation_counter = 1;
 
     // Get all network interfaces
-    let interfaces = get_if_addrs()
-        .map_err(|e| forge_core::ForgeError::Ice(format!("Failed to enumerate interfaces: {}", e)))?;
+    let interfaces = get_if_addrs().map_err(|e| {
+        forge_core::ForgeError::Ice(format!("Failed to enumerate interfaces: {}", e))
+    })?;
 
     debug!("Found {} network interfaces", interfaces.len());
 
@@ -36,13 +37,7 @@ pub async fn gather_host_candidates(component: u16, port: u16) -> Result<Vec<Ice
         let foundation = foundation_counter.to_string();
         foundation_counter += 1;
 
-        let candidate = IceCandidate::new_host(
-            foundation,
-            component,
-            Protocol::Udp,
-            ip,
-            port,
-        );
+        let candidate = IceCandidate::new_host(foundation, component, Protocol::Udp, ip, port);
 
         debug!(
             "Gathered host candidate: {} on interface {}",
@@ -79,12 +74,13 @@ async fn parse_stun_server(uri: &str) -> Result<SocketAddr> {
     }
 
     // Try DNS resolution
-    let mut addrs = lookup_host(host_port)
-        .await
-        .map_err(|e| forge_core::ForgeError::Ice(format!("Failed to resolve STUN server '{}': {}", uri, e)))?;
+    let mut addrs = lookup_host(host_port).await.map_err(|e| {
+        forge_core::ForgeError::Ice(format!("Failed to resolve STUN server '{}': {}", uri, e))
+    })?;
 
-    addrs.next()
-        .ok_or_else(|| forge_core::ForgeError::Ice(format!("No addresses found for STUN server '{}'", uri)))
+    addrs.next().ok_or_else(|| {
+        forge_core::ForgeError::Ice(format!("No addresses found for STUN server '{}'", uri))
+    })
 }
 
 /// Gather server-reflexive candidates by querying STUN servers
@@ -125,10 +121,7 @@ pub async fn gather_server_reflexive_candidates(
         let stun_client = match StunClient::new(local_addr).await {
             Ok(client) => client,
             Err(e) => {
-                warn!(
-                    "Failed to create STUN client for {}: {}",
-                    local_addr, e
-                );
+                warn!("Failed to create STUN client for {}: {}", local_addr, e);
                 continue;
             }
         };
@@ -193,10 +186,7 @@ pub async fn gather_server_reflexive_candidates(
                     }
                 }
                 Err(e) => {
-                    debug!(
-                        "STUN request to {} failed: {}",
-                        stun_server_addr, e
-                    );
+                    debug!("STUN request to {} failed: {}", stun_server_addr, e);
                     // Continue to next STUN server
                 }
             }
@@ -280,10 +270,14 @@ pub fn calculate_local_preference(iface_name: &str, ip: &IpAddr) -> u16 {
     if name_lower.contains("eth") || name_lower.contains("en") {
         // Ethernet interfaces
         pref = pref.saturating_add(1000);
-    } else if name_lower.contains("wlan") || name_lower.contains("wi-fi") || name_lower.contains("wifi") {
+    } else if name_lower.contains("wlan")
+        || name_lower.contains("wi-fi")
+        || name_lower.contains("wifi")
+    {
         // WiFi interfaces
         pref = pref.saturating_add(500);
-    } else if name_lower.contains("vpn") || name_lower.contains("tun") || name_lower.contains("tap") {
+    } else if name_lower.contains("vpn") || name_lower.contains("tun") || name_lower.contains("tap")
+    {
         // VPN interfaces (lower priority)
         pref = pref.saturating_sub(1000);
     }

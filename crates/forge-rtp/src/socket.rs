@@ -1,12 +1,12 @@
 //! UDP socket management for RTP/RTCP
 
 use crate::{PortPair, RtpPacket};
+use bytes::Bytes;
 use forge_core::{ForgeError, Result};
-use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
-use bytes::Bytes;
 
 /// Configuration for RTP socket pair
 #[derive(Debug, Clone)]
@@ -130,14 +130,25 @@ impl RtpSocketPair {
                     socket
                         .set_tos(config.tos as u32)
                         .map_err(|e| ForgeError::Network(format!("Failed to set IP_TOS: {}", e)))?;
-                    tracing::debug!("Set IPv4 TOS to 0x{:02X} (DSCP=0x{:02X})", config.tos, config.tos >> 2);
+                    tracing::debug!(
+                        "Set IPv4 TOS to 0x{:02X} (DSCP=0x{:02X})",
+                        config.tos,
+                        config.tos >> 2
+                    );
                 }
                 SocketAddr::V6(_) => {
                     // IPv6: Set IPV6_TCLASS (traffic class / DSCP)
                     if let Err(e) = set_ipv6_tclass(&socket, config.tos as u32) {
-                        return Err(ForgeError::Network(format!("Failed to set IPV6_TCLASS: {}", e)));
+                        return Err(ForgeError::Network(format!(
+                            "Failed to set IPV6_TCLASS: {}",
+                            e
+                        )));
                     }
-                    tracing::debug!("Set IPv6 Traffic Class to 0x{:02X} (DSCP=0x{:02X})", config.tos, config.tos >> 2);
+                    tracing::debug!(
+                        "Set IPv6 Traffic Class to 0x{:02X} (DSCP=0x{:02X})",
+                        config.tos,
+                        config.tos >> 2
+                    );
                 }
             }
         }
@@ -150,7 +161,9 @@ impl RtpSocketPair {
         // Bind the socket
         socket
             .bind(&StdSocketAddr::from(addr).into())
-            .map_err(|e| ForgeError::Network(format!("Failed to bind socket to {}: {}", addr, e)))?;
+            .map_err(|e| {
+                ForgeError::Network(format!("Failed to bind socket to {}: {}", addr, e))
+            })?;
 
         // Convert to tokio UdpSocket
         let std_socket: std::net::UdpSocket = socket.into();
@@ -272,11 +285,10 @@ impl RtpSocketPair {
     /// Receive RTCP data
     pub async fn recv_rtcp(&self) -> Result<(Bytes, SocketAddr)> {
         let mut buf = vec![0u8; self.config.recv_buffer_size];
-        let (len, addr) = self
-            .rtcp_socket
-            .recv_from(&mut buf)
-            .await
-            .map_err(|e| ForgeError::Network(format!("Failed to receive RTCP packet: {}", e)))?;
+        let (len, addr) =
+            self.rtcp_socket.recv_from(&mut buf).await.map_err(|e| {
+                ForgeError::Network(format!("Failed to receive RTCP packet: {}", e))
+            })?;
 
         buf.truncate(len);
         Ok((Bytes::from(buf), addr))
@@ -401,13 +413,22 @@ mod tests {
 
         // Set socket2's remote to socket1
         let addr1 = socket1.local_rtp_addr().unwrap();
-        socket2.set_remote_endpoint(RemoteEndpoint {
-            rtp_addr: addr1,
-            rtcp_addr: None,
-        }).await;
+        socket2
+            .set_remote_endpoint(RemoteEndpoint {
+                rtp_addr: addr1,
+                rtcp_addr: None,
+            })
+            .await;
 
         // Send packet from socket2 to socket1
-        let test_packet = RtpPacket::build(0, 1234, 5678, 0xABCDEF12, Bytes::from_static(b"test"), false);
+        let test_packet = RtpPacket::build(
+            0,
+            1234,
+            5678,
+            0xABCDEF12,
+            Bytes::from_static(b"test"),
+            false,
+        );
         socket2.send_rtp(&test_packet).await.unwrap();
 
         // Receive on socket1 - should learn socket2's address

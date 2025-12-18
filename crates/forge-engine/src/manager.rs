@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use forge_kernel::XdpManager;
 
 #[cfg(feature = "ha")]
-use forge_ha::{RedisHAClient, SessionStateSync, RecoveryCallbacks, SessionState, ConferenceState};
+use forge_ha::{ConferenceState, RecoveryCallbacks, RedisHAClient, SessionState, SessionStateSync};
 
 /// High Availability backend for session state replication
 #[cfg(feature = "ha")]
@@ -633,9 +633,9 @@ impl SessionManager {
         tracing::info!("Starting session recovery from Redis");
 
         // Load all sessions from Redis
-        let states = SessionStateSync::load_all(&ha.redis)
-            .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to load sessions from Redis: {}", e)))?;
+        let states = SessionStateSync::load_all(&ha.redis).await.map_err(|e| {
+            ForgeError::Internal(format!("Failed to load sessions from Redis: {}", e))
+        })?;
 
         let mut recovered = 0;
         let mut failed = 0;
@@ -645,7 +645,10 @@ impl SessionManager {
 
             // Skip if session already exists (shouldn't happen, but be defensive)
             if self.sessions.contains_key(&call_id) {
-                tracing::warn!("Session {} already exists during recovery, skipping", call_id.0);
+                tracing::warn!(
+                    "Session {} already exists during recovery, skipping",
+                    call_id.0
+                );
                 continue;
             }
 

@@ -13,7 +13,7 @@ use forge_sdp::{
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
 /// WebRTC connection state per RFC 8445
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,8 +99,7 @@ impl PeerConnection {
 
         // Generate DTLS certificate
         let dtls_cert = Arc::new(
-            DtlsCertificate::generate()
-                .map_err(|e| WebRtcError::DtlsError(e.to_string()))?,
+            DtlsCertificate::generate().map_err(|e| WebRtcError::DtlsError(e.to_string()))?,
         );
 
         debug!(
@@ -175,24 +174,14 @@ impl PeerConnection {
         // Use first host candidate's address, or default to 0.0.0.0
         let local_addr = local_candidates
             .iter()
-            .find(|c| {
-                matches!(
-                    c.typ,
-                    forge_ice::candidate::CandidateType::Host
-                )
-            })
+            .find(|c| matches!(c.typ, forge_ice::candidate::CandidateType::Host))
             .map(|c| c.ip.to_string())
             .unwrap_or_else(|| "0.0.0.0".to_string());
 
         // Use first host candidate's port, or default to 9
         let local_port = local_candidates
             .iter()
-            .find(|c| {
-                matches!(
-                    c.typ,
-                    forge_ice::candidate::CandidateType::Host
-                )
-            })
+            .find(|c| matches!(c.typ, forge_ice::candidate::CandidateType::Host))
             .map(|c| c.port)
             .unwrap_or(9);
 
@@ -247,25 +236,24 @@ impl PeerConnection {
         let remote_sdp = SessionDescription::from_str(sdp)?;
 
         // Extract ICE credentials
-        let (remote_ufrag, remote_pwd) = remote_sdp
-            .get_ice_credentials()
-            .ok_or_else(|| WebRtcError::SdpError(
-                forge_sdp::SdpError::MissingField("ICE credentials".to_string())
-            ))?;
+        let (remote_ufrag, remote_pwd) = remote_sdp.get_ice_credentials().ok_or_else(|| {
+            WebRtcError::SdpError(forge_sdp::SdpError::MissingField(
+                "ICE credentials".to_string(),
+            ))
+        })?;
 
         // Extract DTLS fingerprint
-        let (_algorithm, remote_fingerprint) = remote_sdp
-            .get_dtls_fingerprint()
-            .ok_or_else(|| WebRtcError::SdpError(
-                forge_sdp::SdpError::MissingField("DTLS fingerprint".to_string())
-            ))?;
+        let (_algorithm, remote_fingerprint) =
+            remote_sdp.get_dtls_fingerprint().ok_or_else(|| {
+                WebRtcError::SdpError(forge_sdp::SdpError::MissingField(
+                    "DTLS fingerprint".to_string(),
+                ))
+            })?;
 
         // Extract DTLS setup
-        let _remote_setup = remote_sdp
-            .get_dtls_setup()
-            .ok_or_else(|| WebRtcError::SdpError(
-                forge_sdp::SdpError::MissingField("DTLS setup".to_string())
-            ))?;
+        let _remote_setup = remote_sdp.get_dtls_setup().ok_or_else(|| {
+            WebRtcError::SdpError(forge_sdp::SdpError::MissingField("DTLS setup".to_string()))
+        })?;
 
         debug!(
             "Remote ICE credentials: ufrag={}, pwd={}",
@@ -277,7 +265,10 @@ impl PeerConnection {
         let remote_candidates: Vec<IceCandidate> = if let Some(media) = remote_sdp.media.first() {
             use forge_sdp::MediaIceAttributesExt;
             let candidate_strings: Vec<String> = MediaIceAttributesExt::get_ice_candidates(media);
-            debug!("Received {} remote candidate strings", candidate_strings.len());
+            debug!(
+                "Received {} remote candidate strings",
+                candidate_strings.len()
+            );
 
             // Parse candidate strings into IceCandidate structs
             candidate_strings
@@ -297,7 +288,10 @@ impl PeerConnection {
             Vec::new()
         };
 
-        debug!("Successfully parsed {} remote candidates", remote_candidates.len());
+        debug!(
+            "Successfully parsed {} remote candidates",
+            remote_candidates.len()
+        );
 
         // Set remote credentials in ICE agent
         let mut ice_agent = self.ice_agent.lock().await;
@@ -320,7 +314,10 @@ impl PeerConnection {
         self.state = ConnectionState::Checking;
 
         // Start connectivity checks and DTLS handshake
-        info!("Starting ICE connectivity checks for {}", self.connection_id);
+        info!(
+            "Starting ICE connectivity checks for {}",
+            self.connection_id
+        );
 
         // Perform ICE connectivity checks
         let mut ice_agent = self.ice_agent.lock().await;
@@ -342,13 +339,12 @@ impl PeerConnection {
             .ok_or_else(|| WebRtcError::ConnectionFailed("No pair nominated".to_string()))?;
 
         let selected_pair = &ice_agent.get_candidate_pairs()[selected_pair_index];
-        let local_addr = std::net::SocketAddr::new(selected_pair.local.ip, selected_pair.local.port);
-        let remote_addr = std::net::SocketAddr::new(selected_pair.remote.ip, selected_pair.remote.port);
+        let local_addr =
+            std::net::SocketAddr::new(selected_pair.local.ip, selected_pair.local.port);
+        let remote_addr =
+            std::net::SocketAddr::new(selected_pair.remote.ip, selected_pair.remote.port);
 
-        info!(
-            "ICE checks complete: {} <-> {}",
-            local_addr, remote_addr
-        );
+        info!("ICE checks complete: {} <-> {}", local_addr, remote_addr);
 
         // Get the socket from ICE agent for DTLS packet exchange
         let ice_agent = self.ice_agent.lock().await;
@@ -360,15 +356,23 @@ impl PeerConnection {
         // Create DTLS context and connection, then spawn background task to drive handshake
         #[cfg(feature = "dtls")]
         {
-            use forge_rtp::dtls::{DtlsContext, DtlsConnection, DtlsRole};
+            use forge_rtp::dtls::{DtlsConnection, DtlsContext, DtlsRole};
 
-            info!("Starting DTLS handshake with remote fingerprint: {}", remote_fingerprint);
+            info!(
+                "Starting DTLS handshake with remote fingerprint: {}",
+                remote_fingerprint
+            );
 
-            let dtls_ctx = DtlsContext::new(self.dtls_cert.clone(), DtlsRole::Client)
-                .map_err(|e| WebRtcError::DtlsError(format!("Failed to create DTLS context: {}", e)))?;
+            let dtls_ctx =
+                DtlsContext::new(self.dtls_cert.clone(), DtlsRole::Client).map_err(|e| {
+                    WebRtcError::DtlsError(format!("Failed to create DTLS context: {}", e))
+                })?;
 
-            let dtls_conn = DtlsConnection::new(&dtls_ctx, DtlsRole::Client, Some(remote_fingerprint))
-                .map_err(|e| WebRtcError::DtlsError(format!("Failed to create DTLS connection: {}", e)))?;
+            let dtls_conn =
+                DtlsConnection::new(&dtls_ctx, DtlsRole::Client, Some(remote_fingerprint))
+                    .map_err(|e| {
+                        WebRtcError::DtlsError(format!("Failed to create DTLS connection: {}", e))
+                    })?;
 
             let dtls_conn = Arc::new(Mutex::new(dtls_conn));
             self.dtls_connection = Some(dtls_conn.clone());
@@ -384,7 +388,9 @@ impl PeerConnection {
                     task_remote_addr,
                     dtls_conn,
                     task_connection_id,
-                ).await {
+                )
+                .await
+                {
                     error!("DTLS handshake task failed: {}", e);
                 }
             });
@@ -483,7 +489,10 @@ impl PeerConnection {
             .map_err(|e| WebRtcError::DtlsError(format!("Failed to initiate handshake: {}", e)))?;
 
         if !outgoing.is_empty() {
-            debug!("Sending initial DTLS ClientHello ({} bytes)", outgoing.len());
+            debug!(
+                "Sending initial DTLS ClientHello ({} bytes)",
+                outgoing.len()
+            );
             socket
                 .send_to(&outgoing, remote_addr)
                 .await
@@ -514,8 +523,10 @@ impl PeerConnection {
             // Receive packet with timeout
             let len = match tokio::time::timeout(
                 tokio::time::Duration::from_secs(1),
-                socket.recv(&mut buf)
-            ).await {
+                socket.recv(&mut buf),
+            )
+            .await
+            {
                 Ok(Ok(len)) => len,
                 Ok(Err(e)) => {
                     warn!("Socket recv error: {}", e);
@@ -553,17 +564,16 @@ impl PeerConnection {
 
             // Process DTLS packet
             let mut dtls = dtls_conn.lock().await;
-            let (complete, outgoing) = dtls
-                .handshake(Some(&buf[..len]))
-                .map_err(|e| WebRtcError::DtlsError(format!("Handshake processing failed: {}", e)))?;
+            let (complete, outgoing) = dtls.handshake(Some(&buf[..len])).map_err(|e| {
+                WebRtcError::DtlsError(format!("Handshake processing failed: {}", e))
+            })?;
 
             // Send any outgoing data
             if !outgoing.is_empty() {
                 debug!("Sending DTLS response ({} bytes)", outgoing.len());
-                socket
-                    .send_to(&outgoing, remote_addr)
-                    .await
-                    .map_err(|e| WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e)))?;
+                socket.send_to(&outgoing, remote_addr).await.map_err(|e| {
+                    WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e))
+                })?;
             }
 
             if complete {

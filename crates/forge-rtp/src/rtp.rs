@@ -7,7 +7,7 @@ use forge_core::ForgeError;
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy)]
 pub struct RtpHeader {
-    pub version_flags: u8,      // V(2), P(1), X(1), CC(4)
+    pub version_flags: u8,       // V(2), P(1), X(1), CC(4)
     pub marker_payload_type: u8, // M(1), PT(7)
     pub sequence_number: u16,
     pub timestamp: u32,
@@ -93,7 +93,10 @@ impl RtpPacket {
         let header = RtpHeader::parse(&data)?;
 
         if header.version() != 2 {
-            return Err(ForgeError::Rtp(format!("Invalid RTP version: {}", header.version())));
+            return Err(ForgeError::Rtp(format!(
+                "Invalid RTP version: {}",
+                header.version()
+            )));
         }
 
         let mut offset = RtpHeader::SIZE;
@@ -161,7 +164,11 @@ impl RtpPacket {
     ) -> Self {
         let header = RtpHeader {
             version_flags: 0x80, // Version 2, no padding, no extension, no CSRC
-            marker_payload_type: if marker { 0x80 | payload_type } else { payload_type },
+            marker_payload_type: if marker {
+                0x80 | payload_type
+            } else {
+                payload_type
+            },
             sequence_number,
             timestamp,
             ssrc,

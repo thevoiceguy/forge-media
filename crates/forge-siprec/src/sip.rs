@@ -6,10 +6,10 @@
 //! - Dialog management
 //! - BYE messages for session termination
 
+use dashmap::DashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use dashmap::DashMap;
 use uuid::Uuid;
 
 /// SIP method types
@@ -336,7 +336,11 @@ impl SipRequest {
     pub fn set_sdp_body(&mut self, sdp: impl Into<String>) {
         self.body = Some(sdp.into());
         // Update content type if not multipart
-        if !self.headers.iter().any(|(k, v)| k == "Content-Type" && v.contains("multipart")) {
+        if !self
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Content-Type" && v.contains("multipart"))
+        {
             self.headers.retain(|(k, _)| k != "Content-Type");
             self.add_header("Content-Type", "application/sdp");
         }
@@ -366,7 +370,10 @@ impl SipRequest {
 
         self.body = Some(body);
         self.headers.retain(|(k, _)| k != "Content-Type");
-        self.add_header("Content-Type", format!("multipart/mixed;boundary={}", boundary));
+        self.add_header(
+            "Content-Type",
+            format!("multipart/mixed;boundary={}", boundary),
+        );
     }
 
     /// Build the SIP request as a string
@@ -391,11 +398,7 @@ impl SipRequest {
         request.push_str("Max-Forwards: 70\r\n");
 
         // From header
-        request.push_str(&format!(
-            "From: <{}>;tag={}\r\n",
-            self.from,
-            generate_tag()
-        ));
+        request.push_str(&format!("From: <{}>;tag={}\r\n", self.from, generate_tag()));
 
         // To header
         request.push_str(&format!("To: <{}>\r\n", self.to));
@@ -459,7 +462,7 @@ pub struct SdpBuilder {
 /// Media stream description
 #[derive(Debug, Clone)]
 pub struct MediaDescription {
-    media_type: String,  // "audio", "video", etc.
+    media_type: String, // "audio", "video", etc.
     port: u16,
     protocol: String,    // "RTP/AVP", "RTP/SAVP"
     formats: Vec<u8>,    // Payload types
@@ -481,13 +484,7 @@ impl SdpBuilder {
     }
 
     /// Add an audio stream
-    pub fn add_audio_stream(
-        &mut self,
-        port: u16,
-        codec: &str,
-        payload_type: u8,
-        sample_rate: u32,
-    ) {
+    pub fn add_audio_stream(&mut self, port: u16, codec: &str, payload_type: u8, sample_rate: u32) {
         let mut media = MediaDescription {
             media_type: "audio".to_string(),
             port,
@@ -508,7 +505,9 @@ impl SdpBuilder {
     pub fn enable_srtp(&mut self, stream_index: usize, crypto_suite: &str, key: &str) {
         if let Some(media) = self.media_streams.get_mut(stream_index) {
             media.protocol = "RTP/SAVP".to_string();
-            media.attributes.push(format!("crypto:1 {} inline:{}", crypto_suite, key));
+            media
+                .attributes
+                .push(format!("crypto:1 {} inline:{}", crypto_suite, key));
         }
     }
 
@@ -530,9 +529,7 @@ impl SdpBuilder {
         for media in &self.media_streams {
             sdp.push_str(&format!(
                 "m={} {} {}",
-                media.media_type,
-                media.port,
-                media.protocol
+                media.media_type, media.port, media.protocol
             ));
             for fmt in &media.formats {
                 sdp.push_str(&format!(" {}", fmt));

@@ -4,9 +4,7 @@
 //! allowing real-time audio streaming to AI services like OpenAI Realtime API.
 
 use dashmap::DashMap;
-use forge_ai_stream::{
-    AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector,
-};
+use forge_ai_stream::{AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector};
 use forge_core::{CallId, ForgeError, Result, SecureString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -18,7 +16,8 @@ use tokio::task::JoinHandle;
 pub struct AISessionConfig {
     /// AI service type (OpenAI, etc.)
     pub connector_type: AIConnectorType,
-    /// API key for the AI service
+    /// API key for the AI service (not persisted - must be provided on recovery)
+    #[serde(skip)]
     pub api_key: SecureString,
     /// Optional custom endpoint URL
     pub endpoint: Option<String>,
@@ -103,7 +102,11 @@ pub struct AISession {
 
 impl AISession {
     /// Create a new AI session
-    pub async fn new(call_id: CallId, config: AISessionConfig, event_bus: Option<Arc<forge_core::EventBus>>) -> Result<Self> {
+    pub async fn new(
+        call_id: CallId,
+        config: AISessionConfig,
+        event_bus: Option<Arc<forge_core::EventBus>>,
+    ) -> Result<Self> {
         let call_id_clone = call_id.clone();
         // Convert AISessionConfig to AIConnectorConfig
         let connector_config = AIConnectorConfig {
@@ -304,7 +307,11 @@ impl AISession {
                         samples: audio_data,
                         sample_rate,
                     }) {
-                        tracing::error!("Failed to send AI audio response for call {}: {}", call_id.0, e);
+                        tracing::error!(
+                            "Failed to send AI audio response for call {}: {}",
+                            call_id.0,
+                            e
+                        );
                     }
                 }
                 AIEvent::FunctionCall { call } => {
@@ -496,7 +503,12 @@ impl AISessionManager {
     }
 
     /// Create and attach an AI session to a call
-    pub async fn attach_ai(&self, call_id: CallId, config: AISessionConfig, event_bus: Option<Arc<forge_core::EventBus>>) -> Result<()> {
+    pub async fn attach_ai(
+        &self,
+        call_id: CallId,
+        config: AISessionConfig,
+        event_bus: Option<Arc<forge_core::EventBus>>,
+    ) -> Result<()> {
         if self.sessions.contains_key(&call_id) {
             return Err(ForgeError::Internal(format!(
                 "AI session already exists for call {}",
@@ -536,12 +548,13 @@ impl AISessionManager {
 
     /// Detach AI from a call
     pub async fn detach_ai(&self, call_id: &CallId) -> Result<()> {
-        let session_arc = self.sessions.remove(call_id)
+        let session_arc = self
+            .sessions
+            .remove(call_id)
             .map(|(_, v)| v)
-            .ok_or_else(|| ForgeError::Internal(format!(
-                "No AI session found for call {}",
-                call_id.0
-            )))?;
+            .ok_or_else(|| {
+                ForgeError::Internal(format!("No AI session found for call {}", call_id.0))
+            })?;
 
         // Remove config
         self.configs.remove(call_id);
@@ -596,7 +609,11 @@ impl AISessionManager {
         // Delete from persistence
         if let Some(persistence) = &self.persistence {
             if let Err(e) = persistence.delete(call_id).await {
-                tracing::warn!("Failed to delete persisted AI session for call {}: {}", call_id.0, e);
+                tracing::warn!(
+                    "Failed to delete persisted AI session for call {}: {}",
+                    call_id.0,
+                    e
+                );
             }
         }
 
@@ -606,7 +623,9 @@ impl AISessionManager {
 
     /// Get an AI session for a call
     pub fn get_session(&self, call_id: &CallId) -> Option<Arc<Mutex<AISession>>> {
-        self.sessions.get(call_id).map(|entry| entry.value().clone())
+        self.sessions
+            .get(call_id)
+            .map(|entry| entry.value().clone())
     }
 
     /// Check if a call has an AI session
@@ -636,7 +655,12 @@ impl AISessionManager {
     /// * `call_id` - The call/conference ID
     /// * `participant_id` - The participant's identifier (for speaker labeling)
     /// * `samples` - PCM16 audio samples
-    pub async fn send_labeled_audio(&self, call_id: &CallId, participant_id: &str, samples: &[i16]) -> Result<()> {
+    pub async fn send_labeled_audio(
+        &self,
+        call_id: &CallId,
+        participant_id: &str,
+        samples: &[i16],
+    ) -> Result<()> {
         if let Some(session_arc) = self.get_session(call_id) {
             let session = session_arc.lock().await;
 
@@ -650,7 +674,9 @@ impl AISessionManager {
             let mut conn = connector.lock().await;
             conn.send_labeled_audio(participant_id, samples, 16000)
                 .await
-                .map_err(|e| ForgeError::Internal(format!("Failed to send labeled audio to AI: {}", e)))?;
+                .map_err(|e| {
+                    ForgeError::Internal(format!("Failed to send labeled audio to AI: {}", e))
+                })?;
 
             tracing::debug!(
                 "Sent {} samples from participant {} to AI for call {}",
@@ -676,7 +702,9 @@ impl AISessionManager {
     ) -> Result<()> {
         if let Some(session_arc) = self.get_session(call_id) {
             let session = session_arc.lock().await;
-            session.send_function_response(function_call_id, output).await
+            session
+                .send_function_response(function_call_id, output)
+                .await
         } else {
             Err(ForgeError::Internal(format!(
                 "No AI session found for call {}",
@@ -697,9 +725,7 @@ impl AISessionManager {
 
     /// Get the stored configuration for an AI session (if attached)
     pub fn get_config(&self, call_id: &CallId) -> Option<AISessionConfig> {
-        self.configs
-            .get(call_id)
-            .map(|entry| entry.value().clone())
+        self.configs.get(call_id).map(|entry| entry.value().clone())
     }
 
     /// List all active AI session call IDs
@@ -771,7 +797,10 @@ impl AISessionManager {
     ///
     /// This method loads all persisted sessions and attempts to reconnect them.
     /// Should be called on server startup to recover sessions after a restart.
-    pub async fn restore_sessions(&self, event_bus: Option<Arc<forge_core::EventBus>>) -> Result<()> {
+    pub async fn restore_sessions(
+        &self,
+        event_bus: Option<Arc<forge_core::EventBus>>,
+    ) -> Result<()> {
         let persistence = match &self.persistence {
             Some(p) => p,
             None => {
@@ -782,7 +811,10 @@ impl AISessionManager {
 
         // Load all persisted sessions
         let persisted_sessions = persistence.list_all().await?;
-        tracing::info!("Found {} persisted AI sessions to restore", persisted_sessions.len());
+        tracing::info!(
+            "Found {} persisted AI sessions to restore",
+            persisted_sessions.len()
+        );
 
         for (call_id, mut persisted) in persisted_sessions {
             // Skip sessions that are terminated
@@ -818,11 +850,18 @@ impl AISessionManager {
 
             // Calculate backoff delay
             let backoff = persisted.backoff_duration();
-            tracing::debug!("Waiting {:?} before reconnecting call {}", backoff, call_id.0);
+            tracing::debug!(
+                "Waiting {:?} before reconnecting call {}",
+                backoff,
+                call_id.0
+            );
             tokio::time::sleep(backoff).await;
 
             // Attempt to attach AI with saved config
-            match self.attach_ai(call_id.clone(), persisted.config.clone(), event_bus.clone()).await {
+            match self
+                .attach_ai(call_id.clone(), persisted.config.clone(), event_bus.clone())
+                .await
+            {
                 Ok(()) => {
                     tracing::info!("Successfully restored AI session for call {}", call_id.0);
 
@@ -863,10 +902,9 @@ impl AISessionManager {
         };
 
         // Load persisted session
-        let mut persisted = persistence
-            .load(call_id)
-            .await?
-            .ok_or_else(|| ForgeError::Internal(format!("No persisted session for call {}", call_id.0)))?;
+        let mut persisted = persistence.load(call_id).await?.ok_or_else(|| {
+            ForgeError::Internal(format!("No persisted session for call {}", call_id.0))
+        })?;
 
         // Check if we've exceeded max attempts
         if persisted.reconnect_attempts >= persisted.max_reconnect_attempts {
@@ -905,7 +943,9 @@ impl AISessionManager {
             .configs
             .get(call_id)
             .map(|entry| entry.value().clone())
-            .ok_or_else(|| ForgeError::Internal(format!("No config found for call {}", call_id.0)))?;
+            .ok_or_else(|| {
+                ForgeError::Internal(format!("No config found for call {}", call_id.0))
+            })?;
 
         // Attempt reconnection
         match self.attach_ai(call_id.clone(), config, event_bus).await {
@@ -921,7 +961,11 @@ impl AISessionManager {
                 Ok(())
             }
             Err(e) => {
-                tracing::error!("Failed to reconnect AI session for call {}: {}", call_id.0, e);
+                tracing::error!(
+                    "Failed to reconnect AI session for call {}: {}",
+                    call_id.0,
+                    e
+                );
 
                 // Update persistence with disconnected state
                 persisted.connection_state = crate::persistence::ConnectionState::Disconnected;
@@ -965,8 +1009,10 @@ impl AISessionManager {
                         Ok(sessions) => {
                             for (call_id, persisted) in sessions {
                                 // If session is in disconnected state and has a config, try to reconnect
-                                if persisted.connection_state == crate::persistence::ConnectionState::Disconnected
-                                    && persisted.reconnect_attempts < persisted.max_reconnect_attempts
+                                if persisted.connection_state
+                                    == crate::persistence::ConnectionState::Disconnected
+                                    && persisted.reconnect_attempts
+                                        < persisted.max_reconnect_attempts
                                 {
                                     tracing::info!(
                                         "Detected disconnected session for call {}, attempting reconnection",
@@ -977,7 +1023,9 @@ impl AISessionManager {
                                     let manager = Arc::clone(&self);
                                     let call_id_clone = call_id.clone();
                                     tokio::spawn(async move {
-                                        if let Err(e) = manager.try_reconnect(&call_id_clone, None).await {
+                                        if let Err(e) =
+                                            manager.try_reconnect(&call_id_clone, None).await
+                                        {
                                             tracing::error!(
                                                 "Automatic reconnection failed for call {}: {}",
                                                 call_id_clone.0,
@@ -989,7 +1037,10 @@ impl AISessionManager {
                             }
                         }
                         Err(e) => {
-                            tracing::error!("Failed to list persisted sessions for health check: {}", e);
+                            tracing::error!(
+                                "Failed to list persisted sessions for health check: {}",
+                                e
+                            );
                         }
                     }
                 }
@@ -1027,7 +1078,11 @@ impl AISessionManager {
             let call_id_clone = call_id.clone();
             tokio::spawn(async move {
                 if let Err(e) = manager.try_reconnect(&call_id_clone, None).await {
-                    tracing::error!("Automatic reconnection failed for call {}: {}", call_id_clone.0, e);
+                    tracing::error!(
+                        "Automatic reconnection failed for call {}: {}",
+                        call_id_clone.0,
+                        e
+                    );
                 }
             });
         }
@@ -1050,8 +1105,8 @@ impl Clone for AISessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use crate::persistence::PersistenceBackend;
+    use chrono::Utc;
 
     #[test]
     fn test_ai_session_manager_creation() {
@@ -1538,7 +1593,9 @@ mod tests {
         let manager = Arc::new(AISessionManager::new_with_persistence(backend));
 
         // Start health check task
-        let health_task = manager.clone().start_health_check_task(std::time::Duration::from_secs(1));
+        let health_task = manager
+            .clone()
+            .start_health_check_task(std::time::Duration::from_secs(1));
 
         // Let it run for a bit
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

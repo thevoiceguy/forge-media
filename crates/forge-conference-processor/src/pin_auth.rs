@@ -109,7 +109,9 @@ impl PinAuthenticator {
         }
 
         // Check lockout status
-        let mut tracker = self.attempts.entry(participant_id.to_string())
+        let mut tracker = self
+            .attempts
+            .entry(participant_id.to_string())
             .or_insert_with(AttemptTracker::new);
 
         if tracker.is_locked_out() {
@@ -118,7 +120,9 @@ impl PinAuthenticator {
                 "Participant {} is locked out for {} more seconds",
                 participant_id, secs
             );
-            return PinAuthResult::LockedOut { retry_after_secs: secs };
+            return PinAuthResult::LockedOut {
+                retry_after_secs: secs,
+            };
         }
 
         // Check host PIN first (takes priority)
@@ -148,7 +152,9 @@ impl PinAuthenticator {
         let lockout_duration = Duration::from_secs(self.config.lockout_duration_secs);
         tracker.record_failure(self.config.max_pin_attempts, lockout_duration);
 
-        let attempts_remaining = self.config.max_pin_attempts
+        let attempts_remaining = self
+            .config
+            .max_pin_attempts
             .saturating_sub(tracker.failed_attempts);
 
         warn!(
@@ -238,7 +244,12 @@ mod tests {
         let auth = PinAuthenticator::new(test_config());
 
         let result = auth.authenticate("alice", "wrong");
-        assert!(matches!(result, PinAuthResult::IncorrectPin { attempts_remaining: 2 }));
+        assert!(matches!(
+            result,
+            PinAuthResult::IncorrectPin {
+                attempts_remaining: 2
+            }
+        ));
     }
 
     #[test]

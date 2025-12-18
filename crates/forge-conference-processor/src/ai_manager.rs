@@ -299,7 +299,10 @@ impl ConferenceAIManager {
         let frame_size = self.config.frame_size;
 
         tokio::spawn(async move {
-            debug!("Audio routing task started for room {} in {:?} mode", room_id, audio_mode);
+            debug!(
+                "Audio routing task started for room {} in {:?} mode",
+                room_id, audio_mode
+            );
 
             loop {
                 tokio::time::sleep(Duration::from_millis(AUDIO_TASK_SLEEP_MS)).await;
@@ -324,13 +327,17 @@ impl ConferenceAIManager {
                         };
 
                         // Send to AI via session manager
-                        if let Err(e) = ai_session_manager.send_audio(&call_id, &samples_to_send).await {
+                        if let Err(e) = ai_session_manager
+                            .send_audio(&call_id, &samples_to_send)
+                            .await
+                        {
                             debug!("Failed to send audio to AI in room {}: {}", room_id, e);
                         }
                     }
                     AudioMode::Individual => {
                         // Get audio from each participant individually
-                        let participant_audio = room.get_all_participant_audio(frame_size, Some(&participant_id));
+                        let participant_audio =
+                            room.get_all_participant_audio(frame_size, Some(&participant_id));
 
                         if participant_audio.is_empty() {
                             continue; // No participants have audio yet
@@ -340,7 +347,11 @@ impl ConferenceAIManager {
                         for (pid, samples) in participant_audio {
                             // Resample if needed
                             let samples_to_send = if conference_sample_rate != ai_sample_rate {
-                                Self::resample_audio(&samples, conference_sample_rate, ai_sample_rate)
+                                Self::resample_audio(
+                                    &samples,
+                                    conference_sample_rate,
+                                    ai_sample_rate,
+                                )
                             } else {
                                 samples
                             };
@@ -388,7 +399,11 @@ impl ConferenceAIManager {
 
                 // Resample if needed
                 let samples_to_inject = if response.sample_rate != conference_sample_rate {
-                    Self::resample_audio(&response.samples, response.sample_rate, conference_sample_rate)
+                    Self::resample_audio(
+                        &response.samples,
+                        response.sample_rate,
+                        conference_sample_rate,
+                    )
                 } else {
                     response.samples.clone()
                 };
@@ -525,7 +540,10 @@ impl ConferenceAIManager {
 
         // Detach AI session via manager
         if let Err(e) = self.ai_session_manager.detach_ai(&self.call_id).await {
-            debug!("Failed to detach AI session for room {}: {}", self.room_id, e);
+            debug!(
+                "Failed to detach AI session for room {}: {}",
+                self.room_id, e
+            );
         }
 
         // Update state
@@ -539,7 +557,9 @@ impl ConferenceAIManager {
     pub fn is_active(&self) -> bool {
         matches!(
             *self.state.read(),
-            ConferenceAIState::Active | ConferenceAIState::Speaking | ConferenceAIState::Transcribing
+            ConferenceAIState::Active
+                | ConferenceAIState::Speaking
+                | ConferenceAIState::Transcribing
         )
     }
 }

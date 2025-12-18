@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference-processor"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1203,6 +1203,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

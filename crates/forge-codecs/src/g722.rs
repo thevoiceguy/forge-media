@@ -55,8 +55,8 @@ impl G722BitRate {
 /// QMF filter coefficients for analysis and synthesis
 /// These are the standard ITU-T G.722 coefficients
 const QMF_COEFFS: [i32; 24] = [
-    3, -11, -11, 53, 12, -156, 32, 362, -210, -805, 951, 3876,
-    3876, 951, -805, -210, 362, 32, -156, 12, 53, -11, -11, 3,
+    3, -11, -11, 53, 12, -156, 32, 362, -210, -805, 951, 3876, 3876, 951, -805, -210, 362, 32,
+    -156, 12, 53, -11, -11, 3,
 ];
 
 /// ITU-T G.722 quantizer magnitude table (2-bit, upper sub-band)
@@ -64,54 +64,43 @@ const QM2: [i32; 4] = [-7408, -1616, 7408, 1616];
 
 /// ITU-T G.722 quantizer magnitude table (4-bit, lower sub-band - 48k mode)
 const QM4: [i32; 16] = [
-    0, -20456, -12896, -8968, -6288, -4240, -2584, -1200,
-    20456, 12896, 8968, 6288, 4240, 2584, 1200, 0,
+    0, -20456, -12896, -8968, -6288, -4240, -2584, -1200, 20456, 12896, 8968, 6288, 4240, 2584,
+    1200, 0,
 ];
 
 /// ITU-T G.722 quantizer magnitude table (5-bit, lower sub-band - 56k mode)
 const QM5: [i32; 32] = [
-    -280, -280, -23352, -17560, -14120, -11664, -9752, -8184,
-    -6864, -5712, -4696, -3784, -2960, -2208, -1520, -880,
-    23352, 17560, 14120, 11664, 9752, 8184, 6864, 5712,
-    4696, 3784, 2960, 2208, 1520, 880, 280, -280,
+    -280, -280, -23352, -17560, -14120, -11664, -9752, -8184, -6864, -5712, -4696, -3784, -2960,
+    -2208, -1520, -880, 23352, 17560, 14120, 11664, 9752, 8184, 6864, 5712, 4696, 3784, 2960, 2208,
+    1520, 880, 280, -280,
 ];
 
 /// ITU-T G.722 quantizer magnitude table (6-bit, lower sub-band - 64k mode)
 const QM6: [i32; 64] = [
-    -136, -136, -136, -136, -24808, -21904, -19008, -16704,
-    -14984, -13512, -12280, -11192, -10232, -9360, -8576, -7856,
-    -7192, -6576, -6000, -5456, -4944, -4464, -4008, -3576,
-    -3168, -2776, -2400, -2032, -1688, -1360, -1040, -728,
-    24808, 21904, 19008, 16704, 14984, 13512, 12280, 11192,
-    10232, 9360, 8576, 7856, 7192, 6576, 6000, 5456,
-    4944, 4464, 4008, 3576, 3168, 2776, 2400, 2032,
-    1688, 1360, 1040, 728, 432, 136, -432, -136,
+    -136, -136, -136, -136, -24808, -21904, -19008, -16704, -14984, -13512, -12280, -11192, -10232,
+    -9360, -8576, -7856, -7192, -6576, -6000, -5456, -4944, -4464, -4008, -3576, -3168, -2776,
+    -2400, -2032, -1688, -1360, -1040, -728, 24808, 21904, 19008, 16704, 14984, 13512, 12280,
+    11192, 10232, 9360, 8576, 7856, 7192, 6576, 6000, 5456, 4944, 4464, 4008, 3576, 3168, 2776,
+    2400, 2032, 1688, 1360, 1040, 728, 432, 136, -432, -136,
 ];
 
 /// ITU-T G.722 inverse log buffer (scale factor adaptation)
 const ILB: [i32; 32] = [
-    2048, 2093, 2139, 2186, 2233, 2282, 2332, 2383,
-    2435, 2489, 2543, 2599, 2656, 2714, 2774, 2834,
-    2896, 2960, 3025, 3091, 3158, 3228, 3298, 3371,
-    3444, 3520, 3597, 3676, 3756, 3838, 3922, 4008,
+    2048, 2093, 2139, 2186, 2233, 2282, 2332, 2383, 2435, 2489, 2543, 2599, 2656, 2714, 2774, 2834,
+    2896, 2960, 3025, 3091, 3158, 3228, 3298, 3371, 3444, 3520, 3597, 3676, 3756, 3838, 3922, 4008,
 ];
 
 /// ITU-T G.722 quantization index mapping for lower band (maps to wl table)
 const RL42_6: [usize; 64] = [
-    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
-    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
-    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
-    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
+    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0, 0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
+    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0, 0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
 ];
 
 const RL42_5: [usize; 32] = [
-    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
-    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
+    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0, 0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
 ];
 
-const RL42_4: [usize; 16] = [
-    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0,
-];
+const RL42_4: [usize; 16] = [0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0];
 
 /// ITU-T G.722 quantization index mapping for upper band (maps to wh table)
 const RH2: [usize; 4] = [0, 2, 1, 2];
@@ -125,21 +114,21 @@ const WH: [i32; 3] = [0, -214, 798];
 /// ITU-T G.722 decision thresholds for 6-bit quantizer (lower band, 64k mode)
 /// These are compared against the input magnitude to determine quantization index
 const Q6: [i32; 32] = [
-    0, 35, 72, 110, 150, 190, 233, 276, 323, 370, 422, 473, 530, 587, 650, 714,
-    786, 858, 940, 1023, 1121, 1219, 1339, 1458, 1612, 1765, 1980, 2195, 2557, 2919, 0, 0,
+    0, 35, 72, 110, 150, 190, 233, 276, 323, 370, 422, 473, 530, 587, 650, 714, 786, 858, 940,
+    1023, 1121, 1219, 1339, 1458, 1612, 1765, 1980, 2195, 2557, 2919, 0, 0,
 ];
 
 /// ITU-T G.722 Gray code mapping for lower band (negative values)
 /// Maps threshold index to Gray-coded quantizer output
 const ILN: [i32; 32] = [
-    0, 63, 62, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19,
-    18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 0,
+    0, 63, 62, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11,
+    10, 9, 8, 7, 6, 5, 4, 0,
 ];
 
 /// ITU-T G.722 Gray code mapping for lower band (positive values)
 const ILP: [i32; 32] = [
-    0, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47,
-    46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 0,
+    0, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39,
+    38, 37, 36, 35, 34, 33, 32, 0,
 ];
 
 /// ITU-T G.722 Gray code mapping for upper band (negative values)
@@ -200,10 +189,10 @@ impl AdpcmBand {
         // Initial nb = 8320 gives det ≈ 544 via SCALEL formula
         // This matches common G.722 implementations for good initial adaptation
         let nb = 8320;
-        let wd1 = (nb >> 6) & 31;  // = 2
-        let wd2 = 8 - (nb >> 11);   // = 4
-        let wd3 = ILB[wd1 as usize] >> wd2;  // ILB[2] >> 4 = 2139 >> 4 = 133
-        let det = (wd3 << 2).clamp(0, 32767);  // = 532
+        let wd1 = (nb >> 6) & 31; // = 2
+        let wd2 = 8 - (nb >> 11); // = 4
+        let wd3 = ILB[wd1 as usize] >> wd2; // ILB[2] >> 4 = 2139 >> 4 = 133
+        let det = (wd3 << 2).clamp(0, 32767); // = 532
 
         Self {
             s: 0,
@@ -211,10 +200,10 @@ impl AdpcmBand {
             b: [0; 6],
             sz: 0,
             sp: 0,
-            det,      // Computed from nb using SCALEL formula
-            nb,       // Initial noise estimate
-            dq: [0; 7],  // Quantized difference delay line (FILTEZ)
-            r: [0; 3],   // Reconstructed signal delay line (FILTD)
+            det,        // Computed from nb using SCALEL formula
+            nb,         // Initial noise estimate
+            dq: [0; 7], // Quantized difference delay line (FILTEZ)
+            r: [0; 3],  // Reconstructed signal delay line (FILTD)
         }
     }
 
@@ -248,7 +237,11 @@ impl AdpcmBand {
         let mut sz = 0i64;
         for i in (0..6).rev() {
             // Update coefficient using delayed quantized difference
-            let wd2 = if (self.dq[i + 1] ^ dq) & 0x8000 != 0 { -wd1 } else { wd1 };
+            let wd2 = if (self.dq[i + 1] ^ dq) & 0x8000 != 0 {
+                -wd1
+            } else {
+                wd1
+            };
             let wd3 = (self.b[i] as i64 * 32640) >> 15;
             self.b[i] = Self::sat_add16(wd2, wd3 as i32);
 
@@ -261,16 +254,24 @@ impl AdpcmBand {
                 self.dq[i + 1] = self.dq[i];
             }
         }
-        self.dq[0] = dq;  // Store new quantized difference
+        self.dq[0] = dq; // Store new quantized difference
         self.sz = Self::saturate16(sz as i32);
 
         // UPPOL2: Update a[1] (2nd order pole)
         // Uses r[] delay line as per ITU-T G.722 specification
         let wd1 = Self::saturate16(self.a[0] << 2);
-        let wd32 = if (r ^ self.r[0]) & 0x8000 != 0 { wd1 } else { -wd1 };
+        let wd32 = if (r ^ self.r[0]) & 0x8000 != 0 {
+            wd1
+        } else {
+            -wd1
+        };
         let wd32 = wd32.clamp(-32767, 32767);
         let wd3 = {
-            let term1 = if (r ^ self.r[1]) & 0x8000 != 0 { -128 } else { 128 };
+            let term1 = if (r ^ self.r[1]) & 0x8000 != 0 {
+                -128
+            } else {
+                128
+            };
             let term2 = wd32 >> 7;
             let term3 = (self.a[1] as i64 * 32512) >> 15;
             term1 + term2 + term3 as i32
@@ -278,7 +279,11 @@ impl AdpcmBand {
         let ap1 = wd3.clamp(-12288, 12288);
 
         // UPPOL1: Update a[0] (1st order pole)
-        let wd1 = if (r ^ self.r[0]) & 0x8000 != 0 { -192 } else { 192 };
+        let wd1 = if (r ^ self.r[0]) & 0x8000 != 0 {
+            -192
+        } else {
+            192
+        };
         let wd2 = (self.a[0] as i64 * 32640) >> 15;
         let mut ap0 = Self::sat_add16(wd1, wd2 as i32);
 
@@ -308,11 +313,7 @@ impl AdpcmBand {
 
         // LOGSCL + SCALEL: Scale factor adaptation using ITU tables
         let wd1 = (self.nb * 127) >> 7;
-        let wl_or_wh = if is_lower {
-            WL[ril]
-        } else {
-            WH[ril]
-        };
+        let wl_or_wh = if is_lower { WL[ril] } else { WH[ril] };
         let mut wd1 = wd1 + wl_or_wh;
         wd1 = wd1.clamp(0, 18432);
         self.nb = wd1;
@@ -350,13 +351,17 @@ impl G722Encoder {
     ///
     /// Returns error if input length is odd (G.722 requires pairs of samples).
     pub fn encode(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
-        Ok(self.encode_with_aux(samples, &[] )?.0)
+        Ok(self.encode_with_aux(samples, &[])?.0)
     }
 
     /// Encode PCM16 samples to G.722 while embedding auxiliary bits (56k/48k modes).
     ///
     /// The returned tuple is (encoded_octets, aux_bits_consumed).
-    pub fn encode_with_aux(&mut self, samples: &[i16], aux_bits: &[u8]) -> Result<(Vec<u8>, usize)> {
+    pub fn encode_with_aux(
+        &mut self,
+        samples: &[i16],
+        aux_bits: &[u8],
+    ) -> Result<(Vec<u8>, usize)> {
         // G.722 encodes 2 samples at a time, input must be even length
         if samples.len() % 2 != 0 {
             return Err(CodecError::Encoding(format!(
@@ -462,8 +467,8 @@ impl G722Encoder {
         // by taking the upper bits (the quantization is coarser)
         let (ilow_adjusted, qm_table): (usize, &[i32]) = match self.mode {
             G722BitRate::Rate64k => (ilow as usize, &QM6[..]),
-            G722BitRate::Rate56k => ((ilow >> 1) as usize, &QM5[..]),  // Use upper 5 bits
-            G722BitRate::Rate48k => ((ilow >> 2) as usize, &QM4[..]),  // Use upper 4 bits
+            G722BitRate::Rate56k => ((ilow >> 1) as usize, &QM5[..]), // Use upper 5 bits
+            G722BitRate::Rate48k => ((ilow >> 2) as usize, &QM4[..]), // Use upper 4 bits
         };
 
         // Reconstruct using quantizer magnitude table
@@ -645,12 +650,16 @@ impl G722Decoder {
         for i in 0..12 {
             let tap0_sum = self.r[i].saturating_add(self.r[23 - i]);
             let tap1_sum = self.r[i].saturating_sub(self.r[23 - i]);
-            sample0 = sample0.saturating_add(((tap0_sum as i64 * QMF_COEFFS[i] as i64) >> 14) as i32);
-            sample1 = sample1.saturating_add(((tap1_sum as i64 * QMF_COEFFS[i] as i64) >> 14) as i32);
+            sample0 =
+                sample0.saturating_add(((tap0_sum as i64 * QMF_COEFFS[i] as i64) >> 14) as i32);
+            sample1 =
+                sample1.saturating_add(((tap1_sum as i64 * QMF_COEFFS[i] as i64) >> 14) as i32);
         }
 
-        (sample0.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-         sample1.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+        (
+            sample0.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            sample1.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        )
     }
 }
 
@@ -741,7 +750,11 @@ mod tests {
 
         // Silence should decode to near-silence
         // ITU-T G.722 ADPCM has inherent quantization noise, allow up to 500 (~1.5% of max)
-        let max_sample = decoded.iter().map(|&x| x.saturating_abs()).max().unwrap_or(0);
+        let max_sample = decoded
+            .iter()
+            .map(|&x| x.saturating_abs())
+            .max()
+            .unwrap_or(0);
         assert!(max_sample < 500, "Decoded silence too loud: {}", max_sample);
     }
 
@@ -770,11 +783,23 @@ mod tests {
         // Skip first 80 samples to allow predictor warmup
         let tail_samples = &decoded[80..];
         let energy: i64 = tail_samples.iter().map(|&x| (x as i64).pow(2)).sum();
-        let max_amplitude = tail_samples.iter().map(|&x| x.saturating_abs()).max().unwrap_or(0);
+        let max_amplitude = tail_samples
+            .iter()
+            .map(|&x| x.saturating_abs())
+            .max()
+            .unwrap_or(0);
 
         // G.722 ADPCM should preserve some signal (not perfect, but not silence)
-        assert!(energy > 10, "Decoded signal is complete silence: {}", energy);
-        assert!(max_amplitude > 10, "Decoded amplitude too small: {}", max_amplitude);
+        assert!(
+            energy > 10,
+            "Decoded signal is complete silence: {}",
+            energy
+        );
+        assert!(
+            max_amplitude > 10,
+            "Decoded amplitude too small: {}",
+            max_amplitude
+        );
 
         // Also verify encoding compresses the data
         assert!(encoded.len() < samples.len() * 2);
@@ -782,7 +807,11 @@ mod tests {
 
     #[test]
     fn test_g722_different_bit_rates() {
-        for bit_rate in [G722BitRate::Rate64k, G722BitRate::Rate56k, G722BitRate::Rate48k] {
+        for bit_rate in [
+            G722BitRate::Rate64k,
+            G722BitRate::Rate56k,
+            G722BitRate::Rate48k,
+        ] {
             let mut codec = G722Codec::new(bit_rate);
             let samples: Vec<i16> = vec![500; 160];
 
@@ -831,7 +860,10 @@ mod tests {
         let odd_samples: Vec<i16> = vec![0; 159]; // Odd number
         let result = codec.encode(&odd_samples);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("even number of samples"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("even number of samples"));
     }
 
     #[test]
@@ -861,8 +893,16 @@ mod tests {
         //   56k: 5+2 audio bits, 1 aux bit
         //   48k: 4+2 audio bits, 2 aux bits
         assert_eq!(encoded_64k.len(), 160, "64k should be 160 bytes");
-        assert_eq!(encoded_56k.len(), 160, "56k should be 160 bytes (8-bit octets with aux)");
-        assert_eq!(encoded_48k.len(), 160, "48k should be 160 bytes (8-bit octets with aux)");
+        assert_eq!(
+            encoded_56k.len(),
+            160,
+            "56k should be 160 bytes (8-bit octets with aux)"
+        );
+        assert_eq!(
+            encoded_48k.len(),
+            160,
+            "48k should be 160 bytes (8-bit octets with aux)"
+        );
 
         // Verify decode works
         let decoded_64k = codec_64k.decode(&encoded_64k).expect("64k decode failed");

@@ -125,9 +125,7 @@ impl SiprecManager {
             let sessions = Arc::clone(&sessions);
             let shutdown_signal = Arc::clone(&shutdown);
             let SiprecManagerConfig {
-                output_dir,
-                format,
-                ..
+                output_dir, format, ..
             } = config.clone();
 
             tokio::spawn(async move {
@@ -194,7 +192,10 @@ async fn start_session(
         recorder,
     };
 
-    info!("SIPREC capture started for call {} -> {:?}", call_id.0, path);
+    info!(
+        "SIPREC capture started for call {} -> {:?}",
+        call_id.0, path
+    );
     sessions.insert(call_id.clone(), session);
     Ok(())
 }

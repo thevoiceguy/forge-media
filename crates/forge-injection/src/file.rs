@@ -87,9 +87,8 @@ impl FileSource {
         debug!("Opening audio file: {}", file_path);
 
         // Open the file
-        let file = std::fs::File::open(path).map_err(|_| {
-            InjectionError::FileNotFound(file_path.clone())
-        })?;
+        let file = std::fs::File::open(path)
+            .map_err(|_| InjectionError::FileNotFound(file_path.clone()))?;
 
         // Create the media source
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -104,12 +103,14 @@ impl FileSource {
 
         // Probe the file format
         let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
             .map_err(|e| {
-                InjectionError::UnsupportedFormat(format!(
-                    "Failed to probe file format: {}",
-                    e
-                ))
+                InjectionError::UnsupportedFormat(format!("Failed to probe file format: {}", e))
             })?;
 
         let format = probed.format;
@@ -119,9 +120,7 @@ impl FileSource {
             .tracks()
             .iter()
             .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
-            .ok_or_else(|| {
-                InjectionError::UnsupportedFormat("No audio track found".to_string())
-            })?;
+            .ok_or_else(|| InjectionError::UnsupportedFormat("No audio track found".to_string()))?;
 
         let track_id = track.id;
         let codec_params = &track.codec_params;
@@ -306,7 +305,10 @@ impl AudioSource for FileSource {
         self.format
             .seek(
                 symphonia::core::formats::SeekMode::Accurate,
-                symphonia::core::formats::SeekTo::TimeStamp { ts: 0, track_id: self.track_id },
+                symphonia::core::formats::SeekTo::TimeStamp {
+                    ts: 0,
+                    track_id: self.track_id,
+                },
             )
             .map_err(|e| InjectionError::Internal(format!("Seek failed: {}", e)))?;
 
@@ -324,7 +326,10 @@ impl AudioSource for FileSource {
         self.format
             .seek(
                 symphonia::core::formats::SeekMode::Accurate,
-                symphonia::core::formats::SeekTo::TimeStamp { ts: timestamp, track_id: self.track_id },
+                symphonia::core::formats::SeekTo::TimeStamp {
+                    ts: timestamp,
+                    track_id: self.track_id,
+                },
             )
             .map_err(|e| InjectionError::Internal(format!("Seek failed: {}", e)))?;
 

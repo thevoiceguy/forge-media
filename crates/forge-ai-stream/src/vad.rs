@@ -193,15 +193,18 @@ impl VadDetector {
 
         // Adaptive threshold adjustment based on noise
         if self.config.energy_threshold == 0.0 {
-            self.energy_threshold = self.noise_level * self.snr_threshold * (2.0 - self.config.sensitivity);
+            self.energy_threshold =
+                self.noise_level * self.snr_threshold * (2.0 - self.config.sensitivity);
         }
     }
 
     /// Update VAD state with hysteresis
     fn update_state(&mut self, is_speech: bool) {
         // Calculate minimum frames needed based on configured durations
-        let min_speech_frames = (self.config.min_speech_duration_ms / self.config.frame_size_ms).max(1);
-        let min_silence_frames = (self.config.min_silence_duration_ms / self.config.frame_size_ms).max(1);
+        let min_speech_frames =
+            (self.config.min_speech_duration_ms / self.config.frame_size_ms).max(1);
+        let min_silence_frames =
+            (self.config.min_silence_duration_ms / self.config.frame_size_ms).max(1);
 
         if is_speech {
             self.speech_frames += 1;
@@ -288,7 +291,9 @@ mod tests {
         assert!(zcr_low < 0.1);
 
         // High ZCR (alternating sign - like noise)
-        let high_zcr: Vec<i16> = (0..320).map(|i| if i % 2 == 0 { 1000 } else { -1000 }).collect();
+        let high_zcr: Vec<i16> = (0..320)
+            .map(|i| if i % 2 == 0 { 1000 } else { -1000 })
+            .collect();
         let zcr_high = detector.calculate_zcr(&high_zcr);
         assert!(zcr_high > 0.9); // Should be close to 1.0
     }
@@ -308,7 +313,9 @@ mod tests {
         let mut detector = VadDetector::new(config);
 
         // Generate speech-like audio (high energy, low ZCR)
-        let speech_frame: Vec<i16> = (0..320).map(|i| ((i as f32 * 0.1).sin() * 2000.0) as i16).collect();
+        let speech_frame: Vec<i16> = (0..320)
+            .map(|i| ((i as f32 * 0.1).sin() * 2000.0) as i16)
+            .collect();
 
         // Process multiple frames to exceed min_speech_duration
         for _ in 0..10 {
@@ -338,7 +345,9 @@ mod tests {
         let mut detector = VadDetector::new(config);
 
         // Start with speech
-        let speech_frame: Vec<i16> = (0..320).map(|i| ((i as f32 * 0.1).sin() * 2000.0) as i16).collect();
+        let speech_frame: Vec<i16> = (0..320)
+            .map(|i| ((i as f32 * 0.1).sin() * 2000.0) as i16)
+            .collect();
         for _ in 0..10 {
             detector.process(&speech_frame).unwrap();
         }
@@ -373,7 +382,9 @@ mod tests {
         let mut detector = VadDetector::new(config);
 
         // Single speech frame should not trigger speech state
-        let speech_frame: Vec<i16> = (0..320).map(|i| ((i as f32 * 0.1).sin() * 2000.0) as i16).collect();
+        let speech_frame: Vec<i16> = (0..320)
+            .map(|i| ((i as f32 * 0.1).sin() * 2000.0) as i16)
+            .collect();
         detector.process(&speech_frame).unwrap();
         assert_eq!(detector.state(), VadState::Unknown);
 
@@ -416,7 +427,9 @@ mod tests {
         let mut detector = VadDetector::new(config);
 
         // Process some audio
-        let speech_frame: Vec<i16> = (0..320).map(|i| ((i as f32 * 0.1).sin() * 2000.0) as i16).collect();
+        let speech_frame: Vec<i16> = (0..320)
+            .map(|i| ((i as f32 * 0.1).sin() * 2000.0) as i16)
+            .collect();
         for _ in 0..10 {
             detector.process(&speech_frame).unwrap();
         }

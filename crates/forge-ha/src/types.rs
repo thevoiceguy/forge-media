@@ -208,7 +208,7 @@ pub struct TranscoderState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
     pub call_id: String,
-    pub state: String,  // "Initializing", "Active", "OnHold", "Terminating"
+    pub state: String, // "Initializing", "Active", "OnHold", "Terminating"
     pub participant_a: ParticipantState,
     pub participant_b: ParticipantState,
     pub ports: PortPair,
@@ -230,7 +230,7 @@ pub struct ConferenceParticipantState {
     pub id: String,
     pub call_id: String,
     pub role: String,  // "Host" or "Guest"
-    pub state: String,  // "Active", "Muted", "OnHold", "Waiting"
+    pub state: String, // "Active", "Muted", "OnHold", "Waiting"
     pub gain: f32,
     pub join_time: DateTime<Utc>,
     pub is_recording: bool,

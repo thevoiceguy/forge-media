@@ -61,7 +61,9 @@
 //! }
 //! ```
 
-use crate::connector::{AIConnector, AIConnectorConfig, AIConnectorType, AISession, AISessionState};
+use crate::connector::{
+    AIConnector, AIConnectorConfig, AIConnectorType, AISession, AISessionState,
+};
 use crate::events::{AIEvent, SessionConfig};
 use crate::{AIStreamError, AIStreamStats, Result};
 use async_trait::async_trait;
@@ -314,7 +316,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_anthropic_model_strings() {
-        assert_eq!(AnthropicModel::Claude3Opus.as_str(), "claude-3-opus-20240229");
+        assert_eq!(
+            AnthropicModel::Claude3Opus.as_str(),
+            "claude-3-opus-20240229"
+        );
         assert_eq!(
             AnthropicModel::Claude3Sonnet.as_str(),
             "claude-3-sonnet-20240229"

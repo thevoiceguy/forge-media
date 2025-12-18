@@ -100,13 +100,16 @@ pub(crate) fn validate_ai_endpoint(
     let host_str = host.to_string();
 
     let allowed = allowed_endpoints.iter().any(|allowed| {
-        Url::parse(allowed).ok().and_then(|allowed_url| {
-            allowed_url.host().map(|allowed_host| {
-                let same_host = allowed_host.to_string().eq_ignore_ascii_case(&host_str);
-                let allowed_port = allowed_url.port_or_known_default();
-                same_host && (allowed_port.is_none() || allowed_port == port)
+        Url::parse(allowed)
+            .ok()
+            .and_then(|allowed_url| {
+                allowed_url.host().map(|allowed_host| {
+                    let same_host = allowed_host.to_string().eq_ignore_ascii_case(&host_str);
+                    let allowed_port = allowed_url.port_or_known_default();
+                    same_host && (allowed_port.is_none() || allowed_port == port)
+                })
             })
-        }).unwrap_or(false)
+            .unwrap_or(false)
     });
 
     if !allowed {
@@ -172,7 +175,9 @@ async fn attach_ai(
         connector_type: forge_ai_stream::AIConnectorType::OpenAI,
         api_key: SecureString::new(request.api_key),
         endpoint: request.endpoint.clone(),
-        model: request.model.unwrap_or_else(|| "gpt-4o-realtime-preview".to_string()),
+        model: request
+            .model
+            .unwrap_or_else(|| "gpt-4o-realtime-preview".to_string()),
         voice: request.voice.or_else(|| Some("alloy".to_string())),
         temperature: request.temperature,
         instructions: request.instructions,

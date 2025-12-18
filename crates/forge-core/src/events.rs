@@ -6,7 +6,8 @@
 use crate::types::{CallId, ParticipantId, RecordingId, RoomId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use tokio::sync::broadcast::{self, error::SendError};
+use tracing::warn;
 
 /// Default event channel capacity
 pub const DEFAULT_EVENT_CAPACITY: usize = 4096;
@@ -321,6 +322,13 @@ impl EventBus {
     ///
     /// * `capacity` - Maximum number of events that can be buffered
     pub fn with_capacity(capacity: usize) -> Self {
+        let capacity = if capacity == 0 {
+            warn!("Requested EventBus capacity of 0; defaulting to capacity 1");
+            1
+        } else {
+            capacity
+        };
+
         let (tx, _) = broadcast::channel(capacity);
         Self { tx }
     }
@@ -333,9 +341,18 @@ impl EventBus {
     ///
     /// # Returns
     ///
-    /// The number of subscribers that received the event
-    pub fn publish(&self, event: ForgeEvent) -> usize {
-        self.tx.send(event).unwrap_or(0)
+    /// The number of subscribers that received the event, or an error if no subscribers exist
+    pub fn publish(&self, event: ForgeEvent) -> Result<usize, SendError<ForgeEvent>> {
+        match self.tx.send(event) {
+            Ok(count) => {
+                tracing::trace!("Published event to {} subscribers", count);
+                Ok(count)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to publish event: no active subscribers");
+                Err(e)
+            }
+        }
     }
 
     /// Subscribe to events
@@ -383,7 +400,7 @@ mod tests {
         };
 
         // Publish event
-        let count = bus.publish(event.clone());
+        let count = bus.publish(event.clone()).unwrap();
         assert_eq!(count, 1);
 
         // Receive event
@@ -404,7 +421,7 @@ mod tests {
         };
 
         // Publish to both subscribers
-        let count = bus.publish(event);
+        let count = bus.publish(event).unwrap();
         assert_eq!(count, 2);
 
         // Both should receive

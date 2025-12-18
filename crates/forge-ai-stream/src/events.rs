@@ -36,14 +36,10 @@ pub enum AIEventType {
 #[derive(Debug, Clone)]
 pub enum AIEvent {
     /// Connection established
-    Connected {
-        session_id: String,
-    },
+    Connected { session_id: String },
 
     /// Connection closed
-    Disconnected {
-        reason: String,
-    },
+    Disconnected { reason: String },
 
     /// Session started
     SessionStarted {
@@ -65,31 +61,19 @@ pub enum AIEvent {
     },
 
     /// Transcript segment
-    Transcript {
-        segment: TranscriptSegment,
-    },
+    Transcript { segment: TranscriptSegment },
 
     /// Function call request from AI
-    FunctionCall {
-        call: FunctionCall,
-    },
+    FunctionCall { call: FunctionCall },
 
     /// Function call response sent to AI
-    FunctionResponse {
-        call_id: String,
-        output: String,
-    },
+    FunctionResponse { call_id: String, output: String },
 
     /// VAD state changed
-    VadStateChange {
-        is_speech: bool,
-        confidence: f32,
-    },
+    VadStateChange { is_speech: bool, confidence: f32 },
 
     /// Barge-in detected (user interrupted AI)
-    BargeIn {
-        response_id: String,
-    },
+    BargeIn { response_id: String },
 
     /// Error occurred
     Error {
@@ -115,7 +99,9 @@ impl AIEvent {
             AIEvent::AudioResponse { .. } => AIEventType::AudioResponse,
             AIEvent::Transcript { .. } => AIEventType::Transcript,
             AIEvent::FunctionCall { .. } => AIEventType::FunctionCall,
-            AIEvent::FunctionResponse { .. } => AIEventType::Custom("function_response".to_string()),
+            AIEvent::FunctionResponse { .. } => {
+                AIEventType::Custom("function_response".to_string())
+            }
             AIEvent::VadStateChange { .. } => AIEventType::VadStateChange,
             AIEvent::BargeIn { .. } => AIEventType::BargeIn,
             AIEvent::Error { .. } => AIEventType::Error,
@@ -238,7 +224,10 @@ pub struct ToolDefinition {
 
 impl ToolDefinition {
     /// Create a new function tool
-    pub fn function(name: impl Into<String>, description: impl Into<String>) -> ToolDefinitionBuilder {
+    pub fn function(
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> ToolDefinitionBuilder {
         ToolDefinitionBuilder {
             name: name.into(),
             description: description.into(),
@@ -258,7 +247,12 @@ pub struct ToolDefinitionBuilder {
 
 impl ToolDefinitionBuilder {
     /// Add a string parameter
-    pub fn string_param(mut self, name: impl Into<String>, description: impl Into<String>, required: bool) -> Self {
+    pub fn string_param(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        required: bool,
+    ) -> Self {
         let name = name.into();
         self.parameters.insert(
             name.clone(),
@@ -275,7 +269,12 @@ impl ToolDefinitionBuilder {
     }
 
     /// Add a number parameter
-    pub fn number_param(mut self, name: impl Into<String>, description: impl Into<String>, required: bool) -> Self {
+    pub fn number_param(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        required: bool,
+    ) -> Self {
         let name = name.into();
         self.parameters.insert(
             name.clone(),
@@ -296,8 +295,14 @@ impl ToolDefinitionBuilder {
         let mut properties = serde_json::Map::new();
         for (name, schema) in self.parameters {
             let mut prop = serde_json::Map::new();
-            prop.insert("type".to_string(), serde_json::Value::String(schema.param_type));
-            prop.insert("description".to_string(), serde_json::Value::String(schema.description));
+            prop.insert(
+                "type".to_string(),
+                serde_json::Value::String(schema.param_type),
+            );
+            prop.insert(
+                "description".to_string(),
+                serde_json::Value::String(schema.description),
+            );
             if let Some(enum_values) = schema.enum_values {
                 prop.insert("enum".to_string(), serde_json::Value::Array(enum_values));
             }
@@ -305,13 +310,22 @@ impl ToolDefinitionBuilder {
         }
 
         let mut parameters = serde_json::Map::new();
-        parameters.insert("type".to_string(), serde_json::Value::String("object".to_string()));
-        parameters.insert("properties".to_string(), serde_json::Value::Object(properties));
+        parameters.insert(
+            "type".to_string(),
+            serde_json::Value::String("object".to_string()),
+        );
+        parameters.insert(
+            "properties".to_string(),
+            serde_json::Value::Object(properties),
+        );
         if !self.required.is_empty() {
             parameters.insert(
                 "required".to_string(),
                 serde_json::Value::Array(
-                    self.required.into_iter().map(serde_json::Value::String).collect(),
+                    self.required
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
                 ),
             );
         }

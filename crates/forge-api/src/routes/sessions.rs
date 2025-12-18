@@ -112,8 +112,7 @@ impl AppState {
         prompts_base_dir: std::path::PathBuf,
         ai_allowed_endpoints: Vec<String>,
         core_event_bus: Arc<forge_core::EventBus>,
-        #[cfg(feature = "ha")]
-        ha_manager: Option<Arc<crate::ha::HAManager>>,
+        #[cfg(feature = "ha")] ha_manager: Option<Arc<crate::ha::HAManager>>,
     ) -> Self {
         // Create default storage manager
         let storage_manager =
@@ -178,15 +177,12 @@ async fn create_session(
         counter!("sdp_negotiation_total", 1);
 
         // Validate that local_address is provided
-        let local_addr = request
-            .local_address
-            .as_ref()
-            .ok_or_else(|| {
-                counter!("sdp_negotiation_failures_total", 1, "reason" => "missing_local_address");
-                ApiError::InvalidRequest(
-                    "local_address is required when sdp_offer is provided".to_string(),
-                )
-            })?;
+        let local_addr = request.local_address.as_ref().ok_or_else(|| {
+            counter!("sdp_negotiation_failures_total", 1, "reason" => "missing_local_address");
+            ApiError::InvalidRequest(
+                "local_address is required when sdp_offer is provided".to_string(),
+            )
+        })?;
 
         // Load SDP profile
         let profile_name = request.sdp_profile.as_deref().unwrap_or("audio-only");
@@ -216,24 +212,28 @@ async fn create_session(
         let local_caps = profile.with_local_addr(local_addr, 10000);
 
         // Negotiate answer
-        let answer =
-            forge_sdp::SessionDescription::negotiate_answer(&offer, &local_caps, local_addr)
-                .map_err(|e| match e {
-                    forge_sdp::SdpError::NoCommonCodec => {
-                        counter!("sdp_negotiation_failures_total", 1, "reason" => "no_common_codec");
-                        ApiError::NotAcceptable(
-                            "No common codec found between offer and local capabilities".to_string(),
-                        )
-                    }
-                    _ => {
-                        counter!("sdp_negotiation_failures_total", 1, "reason" => "negotiation_error");
-                        ApiError::InvalidRequest(format!("SDP negotiation failed: {}", e))
-                    }
-                })?;
+        let answer = forge_sdp::SessionDescription::negotiate_answer(
+            &offer,
+            &local_caps,
+            local_addr,
+        )
+        .map_err(|e| match e {
+            forge_sdp::SdpError::NoCommonCodec => {
+                counter!("sdp_negotiation_failures_total", 1, "reason" => "no_common_codec");
+                ApiError::NotAcceptable(
+                    "No common codec found between offer and local capabilities".to_string(),
+                )
+            }
+            _ => {
+                counter!("sdp_negotiation_failures_total", 1, "reason" => "negotiation_error");
+                ApiError::InvalidRequest(format!("SDP negotiation failed: {}", e))
+            }
+        })?;
 
         // Extract negotiated codecs and build ParticipantCodecConfig
         let mut negotiated_codecs = std::collections::HashMap::new();
-        let codec_config = if let Some(audio_media) = answer.find_media(forge_sdp::MediaType::Audio) {
+        let codec_config = if let Some(audio_media) = answer.find_media(forge_sdp::MediaType::Audio)
+        {
             let codecs = forge_sdp::helpers::extract_codecs(audio_media);
             let codec_names: Vec<String> = codecs
                 .iter()
@@ -271,7 +271,10 @@ async fn create_session(
 
         // Record successful negotiation duration
         let negotiation_duration = negotiation_start.elapsed();
-        histogram!("sdp_negotiation_duration_seconds", negotiation_duration.as_secs_f64());
+        histogram!(
+            "sdp_negotiation_duration_seconds",
+            negotiation_duration.as_secs_f64()
+        );
 
         tracing::info!(
             "SDP negotiation successful: negotiated {:?} in {:?}",
@@ -358,11 +361,14 @@ async fn create_session(
 
     // Extract SDP answer and negotiated codecs from negotiation result
     // Update SDP answer with actual allocated ports
-    let (sdp_answer, negotiated_codecs) = if let Some((answer_text, codecs, _)) = sdp_negotiation_result {
+    let (sdp_answer, negotiated_codecs) = if let Some((answer_text, codecs, _)) =
+        sdp_negotiation_result
+    {
         // Parse the answer to update ports
         use forge_sdp::SessionDescriptionExt;
-        let mut answer = forge_sdp::SessionDescription::from_str(&answer_text)
-            .map_err(|e| ApiError::Internal(format!("Failed to parse generated SDP answer: {}", e)))?;
+        let mut answer = forge_sdp::SessionDescription::from_str(&answer_text).map_err(|e| {
+            ApiError::Internal(format!("Failed to parse generated SDP answer: {}", e))
+        })?;
 
         // Update connection and media port with actual allocated port
         if let Some(audio_media) = answer.find_media_mut(forge_sdp::MediaType::Audio) {
@@ -545,7 +551,7 @@ async fn start_session(
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
         sdp: session.sdp().map(|s| s.to_string()),
-        sdp_answer: None, // Will be populated in Sprint 2.2
+        sdp_answer: None,        // Will be populated in Sprint 2.2
         negotiated_codecs: None, // Will be populated in Sprint 2.2
         from_tag: session.from_tag().map(|t| t.to_string()),
         to_tag: session.to_tag().map(|t| t.to_string()),

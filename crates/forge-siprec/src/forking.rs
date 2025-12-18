@@ -4,13 +4,13 @@
 //! Media forking allows call audio/video to be sent to both the original destination
 //! and the recording server simultaneously.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
-use thiserror::Error;
-use dashmap::DashMap;
 
 use forge_rtp::RtpPacket;
 
@@ -135,13 +135,7 @@ impl MediaForker {
         recording_dest: SocketAddr,
         local_bind: Option<SocketAddr>,
     ) -> Result<()> {
-        let stream = ForkedStream::new(
-            stream_id.clone(),
-            ssrc,
-            recording_dest,
-            local_bind,
-        )
-        .await?;
+        let stream = ForkedStream::new(stream_id.clone(), ssrc, recording_dest, local_bind).await?;
 
         let stream_arc = Arc::new(RwLock::new(stream));
         self.streams.insert(stream_id.clone(), stream_arc);
@@ -166,11 +160,7 @@ impl MediaForker {
     }
 
     /// Forward an RTP packet by stream ID
-    pub async fn forward_by_stream_id(
-        &self,
-        stream_id: &str,
-        packet_data: &[u8],
-    ) -> Result<()> {
+    pub async fn forward_by_stream_id(&self, stream_id: &str, packet_data: &[u8]) -> Result<()> {
         if let Some(stream) = self.streams.get(stream_id) {
             let mut stream = stream.write().await;
             stream.forward_packet(packet_data).await

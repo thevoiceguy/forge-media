@@ -12,23 +12,19 @@ use std::time::Duration;
 #[test]
 fn test_audio_conversion_pipeline() {
     // Test full audio conversion pipeline
-    let converter = AudioConverter::new(
-        AudioFormat::Pcm16Mono(16000),
-        AudioFormat::G711Mulaw,
-    );
+    let converter = AudioConverter::new(AudioFormat::Pcm16Mono(16000), AudioFormat::G711Mulaw);
 
     // Generate test audio
-    let input: Vec<i16> = (0..160).map(|i| ((i as f32 * 0.1).sin() * 1000.0) as i16).collect();
+    let input: Vec<i16> = (0..160)
+        .map(|i| ((i as f32 * 0.1).sin() * 1000.0) as i16)
+        .collect();
 
     // Convert to G.711
     let encoded = converter.convert(&input).unwrap();
     assert_eq!(encoded.len(), input.len());
 
     // Convert back
-    let decoder = AudioConverter::new(
-        AudioFormat::G711Mulaw,
-        AudioFormat::Pcm16Mono(16000),
-    );
+    let decoder = AudioConverter::new(AudioFormat::G711Mulaw, AudioFormat::Pcm16Mono(16000));
     let decoded = decoder.convert(&encoded).unwrap();
 
     // Verify lossy compression is within tolerance
@@ -150,26 +146,20 @@ fn test_multi_format_conversion() {
     let original: Vec<i16> = (0..160).map(|i| (i * 100) as i16).collect();
 
     // PCM16 Mono 16kHz -> PCM16 Mono 8kHz
-    let converter1 = AudioConverter::new(
-        AudioFormat::Pcm16Mono(16000),
-        AudioFormat::Pcm16Mono(8000),
-    );
+    let converter1 =
+        AudioConverter::new(AudioFormat::Pcm16Mono(16000), AudioFormat::Pcm16Mono(8000));
     let resampled = converter1.convert(&original).unwrap();
     assert!(resampled.len() < original.len());
 
     // PCM16 Mono -> PCM16 Stereo
-    let converter2 = AudioConverter::new(
-        AudioFormat::Pcm16Mono(8000),
-        AudioFormat::Pcm16Stereo(8000),
-    );
+    let converter2 =
+        AudioConverter::new(AudioFormat::Pcm16Mono(8000), AudioFormat::Pcm16Stereo(8000));
     let stereo = converter2.convert(&resampled).unwrap();
     assert_eq!(stereo.len(), resampled.len() * 2);
 
     // PCM16 Stereo -> G.711 A-law (via mono conversion)
-    let converter3 = AudioConverter::new(
-        AudioFormat::Pcm16Stereo(8000),
-        AudioFormat::Pcm16Mono(8000),
-    );
+    let converter3 =
+        AudioConverter::new(AudioFormat::Pcm16Stereo(8000), AudioFormat::Pcm16Mono(8000));
     let mono = converter3.convert(&stereo).unwrap();
     assert_eq!(mono.len(), resampled.len());
 }
@@ -271,6 +261,9 @@ fn test_bargein_cooldown() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    assert!(detected_second, "Second barge-in should be detected after cooldown");
+    assert!(
+        detected_second,
+        "Second barge-in should be detected after cooldown"
+    );
     assert_eq!(detector.interrupt_count(), 2);
 }

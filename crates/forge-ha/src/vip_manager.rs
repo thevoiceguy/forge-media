@@ -129,9 +129,7 @@ impl VRRPManager {
         info!(
             "Note: VRRP takeover requires Keepalived to be running and monitoring our health endpoint"
         );
-        info!(
-            "The health endpoint will now return 200, causing Keepalived to increase priority"
-        );
+        info!("The health endpoint will now return 200, causing Keepalived to increase priority");
 
         Ok(())
     }
@@ -327,12 +325,7 @@ mod tests {
     #[test]
     fn test_vip_manager_factory_cloud() {
         let config = create_test_cloud_config();
-        let manager = VIPManagerFactory::create(
-            DeploymentMode::Cloud,
-            Some(config),
-            None,
-        )
-        .unwrap();
+        let manager = VIPManagerFactory::create(DeploymentMode::Cloud, Some(config), None).unwrap();
 
         assert_eq!(manager.deployment_mode(), DeploymentMode::Cloud);
     }
@@ -340,12 +333,8 @@ mod tests {
     #[test]
     fn test_vip_manager_factory_onprem() {
         let config = create_test_onprem_config();
-        let manager = VIPManagerFactory::create(
-            DeploymentMode::OnPrem,
-            None,
-            Some(config),
-        )
-        .unwrap();
+        let manager =
+            VIPManagerFactory::create(DeploymentMode::OnPrem, None, Some(config)).unwrap();
 
         assert_eq!(manager.deployment_mode(), DeploymentMode::OnPrem);
     }

@@ -38,10 +38,7 @@ impl WebRtcManager {
         self.connections.insert(id, conn);
     }
 
-    pub fn get_connection(
-        &self,
-        id: &str,
-    ) -> Option<Arc<tokio::sync::Mutex<PeerConnection>>> {
+    pub fn get_connection(&self, id: &str) -> Option<Arc<tokio::sync::Mutex<PeerConnection>>> {
         self.connections.get(id).map(|entry| entry.value().clone())
     }
 
@@ -50,7 +47,10 @@ impl WebRtcManager {
     }
 
     pub fn list_connections(&self) -> Vec<String> {
-        self.connections.iter().map(|entry| entry.key().clone()).collect()
+        self.connections
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     pub fn connection_count(&self) -> usize {
@@ -173,11 +173,16 @@ async fn create_connection(
 
     // Update ICE candidate metric
     let candidate_count = peer.local_candidate_count().await;
-    gauge!("forge_webrtc_ice_candidates_gathered", candidate_count as f64);
+    gauge!(
+        "forge_webrtc_ice_candidates_gathered",
+        candidate_count as f64
+    );
 
     // Store connection in manager
     let peer_arc = Arc::new(tokio::sync::Mutex::new(peer));
-    state.webrtc_manager.add_connection(connection_id.clone(), peer_arc);
+    state
+        .webrtc_manager
+        .add_connection(connection_id.clone(), peer_arc);
 
     let response = ConnectionResponse {
         connection_id: connection_id.clone(),
@@ -279,7 +284,10 @@ async fn set_answer(
         .map_err(|e| ApiError::Internal(format!("Failed to set remote answer: {}", e)))?;
 
     let duration = start.elapsed();
-    histogram!("forge_webrtc_connection_establishment_duration_seconds", duration.as_secs_f64());
+    histogram!(
+        "forge_webrtc_connection_establishment_duration_seconds",
+        duration.as_secs_f64()
+    );
 
     let state_str = format!("{:?}", peer_lock.get_state());
 

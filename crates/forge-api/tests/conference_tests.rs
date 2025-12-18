@@ -12,8 +12,8 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
-use forge_api::routes::sessions::AppState;
 use forge_api::routes;
+use forge_api::routes::sessions::AppState;
 use forge_conference_processor::ConferenceBridge;
 use forge_engine::{SessionManager, SessionManagerConfig};
 use forge_media_processor::AudioFormat;
@@ -117,8 +117,8 @@ async fn test_get_room() {
     .await;
 
     // Get room
-    let (status, response) = make_request(&app, Method::GET, "/v1/conferences/test-room-2", None)
-        .await;
+    let (status, response) =
+        make_request(&app, Method::GET, "/v1/conferences/test-room-2", None).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["data"]["room_id"], "test-room-2");
@@ -170,14 +170,13 @@ async fn test_delete_room() {
     .await;
 
     // Delete room
-    let (status, _) = make_request(&app, Method::DELETE, "/v1/conferences/room-to-delete", None)
-        .await;
+    let (status, _) =
+        make_request(&app, Method::DELETE, "/v1/conferences/room-to-delete", None).await;
 
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Verify deleted
-    let (status, _) = make_request(&app, Method::GET, "/v1/conferences/room-to-delete", None)
-        .await;
+    let (status, _) = make_request(&app, Method::GET, "/v1/conferences/room-to-delete", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -287,8 +286,7 @@ async fn test_remove_participant() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Verify participant removed
-    let (_, response) = make_request(&app, Method::GET, "/v1/conferences/removal-room", None)
-        .await;
+    let (_, response) = make_request(&app, Method::GET, "/v1/conferences/removal-room", None).await;
     assert_eq!(response["data"]["participant_count"], 0);
 }
 
@@ -365,14 +363,15 @@ async fn test_get_all_participants_metadata() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["data"]["count"], 3);
-    assert_eq!(response["data"]["participants"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        response["data"]["participants"].as_array().unwrap().len(),
+        3
+    );
 
     // Verify each participant has metadata
     let metadata_list = response["data"]["participants"].as_array().unwrap();
     for participant in &participants {
-        let found = metadata_list
-            .iter()
-            .any(|m| m["id"] == json!(participant));
+        let found = metadata_list.iter().any(|m| m["id"] == json!(participant));
         assert!(found, "Participant {} not found in metadata", participant);
     }
 }
@@ -497,8 +496,8 @@ async fn test_room_recording_lifecycle() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Verify room is recording
-    let (_, response) = make_request(&app, Method::GET, "/v1/conferences/recording-room", None)
-        .await;
+    let (_, response) =
+        make_request(&app, Method::GET, "/v1/conferences/recording-room", None).await;
     assert_eq!(response["data"]["is_recording"], true);
 
     // Stop recording
@@ -513,8 +512,8 @@ async fn test_room_recording_lifecycle() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Verify recording stopped
-    let (_, response) = make_request(&app, Method::GET, "/v1/conferences/recording-room", None)
-        .await;
+    let (_, response) =
+        make_request(&app, Method::GET, "/v1/conferences/recording-room", None).await;
     assert_eq!(response["data"]["is_recording"], false);
 }
 
@@ -665,13 +664,8 @@ async fn test_large_conference_5_participants() {
     }
 
     // Verify all participants present
-    let (status, response) = make_request(
-        &app,
-        Method::GET,
-        "/v1/conferences/large-conference",
-        None,
-    )
-    .await;
+    let (status, response) =
+        make_request(&app, Method::GET, "/v1/conferences/large-conference", None).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["data"]["participant_count"], 5);
@@ -722,7 +716,10 @@ async fn test_conference_with_mixed_states() {
         make_request(
             &app,
             Method::PUT,
-            &format!("/v1/conferences/mixed-state-room/participants/{}/state", participant),
+            &format!(
+                "/v1/conferences/mixed-state-room/participants/{}/state",
+                participant
+            ),
             Some(json!({"state": state})),
         )
         .await;
@@ -782,14 +779,13 @@ async fn test_conference_cleanup_on_delete() {
     .await;
 
     // Delete room
-    let (status, _) = make_request(&app, Method::DELETE, "/v1/conferences/cleanup-room", None)
-        .await;
+    let (status, _) =
+        make_request(&app, Method::DELETE, "/v1/conferences/cleanup-room", None).await;
 
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     // Verify room no longer exists
-    let (status, _) = make_request(&app, Method::GET, "/v1/conferences/cleanup-room", None)
-        .await;
+    let (status, _) = make_request(&app, Method::GET, "/v1/conferences/cleanup-room", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -817,7 +813,10 @@ async fn test_empty_room_operations() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["data"]["count"], 0);
-    assert_eq!(response["data"]["participants"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        response["data"]["participants"].as_array().unwrap().len(),
+        0
+    );
 }
 
 // ============================================================================

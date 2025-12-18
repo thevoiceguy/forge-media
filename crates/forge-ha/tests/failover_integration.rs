@@ -141,7 +141,10 @@ async fn test_session_state_persistence() {
     assert_eq!(retrieved_state.call_id, session_state.call_id);
     assert_eq!(retrieved_state.state, session_state.state);
     assert_eq!(retrieved_state.ports.rtp_port, session_state.ports.rtp_port);
-    assert_eq!(retrieved_state.ports.rtcp_port, session_state.ports.rtcp_port);
+    assert_eq!(
+        retrieved_state.ports.rtcp_port,
+        session_state.ports.rtcp_port
+    );
 
     // Cleanup
     let key = format!("sessions:{}", session_state.call_id);
@@ -184,14 +187,23 @@ async fn test_heartbeat_expiration_detection() {
         .expect("Failed to publish heartbeat");
 
     // Verify heartbeat exists
-    let exists = client.exists(heartbeat_key).await.expect("Failed to check existence");
-    assert!(exists, "Heartbeat should exist immediately after publishing");
+    let exists = client
+        .exists(heartbeat_key)
+        .await
+        .expect("Failed to check existence");
+    assert!(
+        exists,
+        "Heartbeat should exist immediately after publishing"
+    );
 
     // Wait for expiration (3 seconds to be safe)
     sleep(Duration::from_secs(3)).await;
 
     // Verify heartbeat expired
-    let exists_after = client.exists(heartbeat_key).await.expect("Failed to check existence");
+    let exists_after = client
+        .exists(heartbeat_key)
+        .await
+        .expect("Failed to check existence");
     assert!(!exists_after, "Heartbeat should have expired");
 }
 
@@ -504,10 +516,7 @@ async fn test_split_brain_prevention() {
     let won2 = result2.expect("Failed to attempt election 2");
 
     // Exactly one should win (split brain prevented)
-    assert!(
-        won1 ^ won2,
-        "Exactly one instance should win the election"
-    );
+    assert!(won1 ^ won2, "Exactly one instance should win the election");
 
     // Verify only one primary in Redis
     let winner: Option<String> = client1
@@ -566,8 +575,8 @@ async fn test_sentinel_master_discovery() {
     // 2. redis-server --port 26379 --sentinel
     // 3. Configure sentinel: SENTINEL MONITOR mymaster 127.0.0.1 6379 1
 
-    let redis_url = std::env::var("TEST_REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let redis_url =
+        std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
     let sentinel_url = std::env::var("TEST_SENTINEL_URL")
         .unwrap_or_else(|_| "redis://localhost:26379".to_string());
 
@@ -588,7 +597,10 @@ async fn test_sentinel_master_discovery() {
         .expect("Failed to discover master via Sentinel");
 
     // Verify we can connect and perform operations
-    client.ping().await.expect("Failed to ping discovered master");
+    client
+        .ping()
+        .await
+        .expect("Failed to ping discovered master");
 
     // Test with credentials in base URL
     let mut config_with_creds = config.clone();
@@ -643,7 +655,10 @@ async fn test_lock_renewal_race_condition() {
 
     // Only instance 1 (the owner) should succeed
     assert!(renewed1, "Instance 1 should renew (it owns the lock)");
-    assert!(!renewed2, "Instance 2 should fail (it doesn't own the lock)");
+    assert!(
+        !renewed2,
+        "Instance 2 should fail (it doesn't own the lock)"
+    );
 
     // Verify lock still belongs to instance 1
     let current_owner = client1
@@ -651,7 +666,10 @@ async fn test_lock_renewal_race_condition() {
         .await
         .expect("Failed to get lock value")
         .expect("Lock should exist");
-    assert_eq!(current_owner, instance1, "Lock should still belong to instance 1");
+    assert_eq!(
+        current_owner, instance1,
+        "Lock should still belong to instance 1"
+    );
 
     // Test case 2: Lock stolen between get and renewal attempt
     // This simulates the race condition that compare_and_expire prevents
@@ -670,7 +688,10 @@ async fn test_lock_renewal_race_condition() {
         .compare_and_expire(lock_key, instance1, Duration::from_secs(20))
         .await
         .expect("Final renewal should not error");
-    assert!(final_renewal, "Instance 1 should successfully renew its lock");
+    assert!(
+        final_renewal,
+        "Instance 1 should successfully renew its lock"
+    );
 
     // Cleanup
     let _ = client1.del(lock_key).await;

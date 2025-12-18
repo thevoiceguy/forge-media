@@ -293,7 +293,7 @@ impl MediaSession {
 
         // Publish session created event
         if let Some(bus) = &event_bus {
-            bus.publish(ForgeEvent::SessionCreated {
+            let _ = bus.publish(ForgeEvent::SessionCreated {
                 call_id,
                 timestamp: chrono::Utc::now(),
             });
@@ -430,7 +430,7 @@ impl MediaSession {
 
         // Publish session created event
         if let Some(bus) = &event_bus {
-            bus.publish(ForgeEvent::SessionCreated {
+            let _ = bus.publish(ForgeEvent::SessionCreated {
                 call_id,
                 timestamp: chrono::Utc::now(),
             });
@@ -440,9 +440,19 @@ impl MediaSession {
             "Session {} created with codecs: A={:?}@{}Hz, B={:?}@{}Hz",
             session.call_id.0,
             session.participant_a.try_read().unwrap().codec_config.codec,
-            session.participant_a.try_read().unwrap().codec_config.clock_rate,
+            session
+                .participant_a
+                .try_read()
+                .unwrap()
+                .codec_config
+                .clock_rate,
             session.participant_b.try_read().unwrap().codec_config.codec,
-            session.participant_b.try_read().unwrap().codec_config.clock_rate,
+            session
+                .participant_b
+                .try_read()
+                .unwrap()
+                .codec_config
+                .clock_rate,
         );
 
         // Automatic transcoding initialization on codec mismatch
@@ -599,7 +609,7 @@ impl MediaSession {
 
         // Publish session created event
         if let Some(bus) = &event_bus {
-            bus.publish(ForgeEvent::SessionCreated {
+            let _ = bus.publish(ForgeEvent::SessionCreated {
                 call_id,
                 timestamp: chrono::Utc::now(),
             });
@@ -985,7 +995,7 @@ impl MediaSession {
 
         // Publish state change event
         if let Some(bus) = &self.event_bus {
-            bus.publish(ForgeEvent::SessionActive {
+            let _ = bus.publish(ForgeEvent::SessionActive {
                 call_id: self.call_id.clone(),
                 timestamp: chrono::Utc::now(),
             });
@@ -1032,7 +1042,7 @@ impl MediaSession {
 
         // Publish termination event
         if let Some(bus) = &self.event_bus {
-            bus.publish(ForgeEvent::SessionTerminated {
+            let _ = bus.publish(ForgeEvent::SessionTerminated {
                 call_id: self.call_id.clone(),
                 reason: "Stopped by request".to_string(),
                 timestamp: chrono::Utc::now(),
@@ -1172,8 +1182,10 @@ impl MediaSession {
         };
 
         // Convert times (Instant can't be serialized, use Utc::now() as approximation)
-        let created_at = Utc::now() - chrono::Duration::from_std(self.created_at.elapsed()).unwrap_or_default();
-        let last_activity_time = Utc::now() - chrono::Duration::from_std(last_activity.elapsed()).unwrap_or_default();
+        let created_at =
+            Utc::now() - chrono::Duration::from_std(self.created_at.elapsed()).unwrap_or_default();
+        let last_activity_time =
+            Utc::now() - chrono::Duration::from_std(last_activity.elapsed()).unwrap_or_default();
 
         // Check if transcoders are active
         let transcoder_a_to_b_active = self.transcoder_a_to_b.lock().await.is_some();

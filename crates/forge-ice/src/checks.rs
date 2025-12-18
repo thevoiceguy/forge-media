@@ -35,10 +35,7 @@ pub async fn perform_connectivity_check(pair: &mut CandidatePair) -> Result<bool
     let stun_client = match StunClient::new(local_addr).await {
         Ok(client) => client,
         Err(e) => {
-            warn!(
-                "Failed to create STUN client for connectivity check: {}",
-                e
-            );
+            warn!("Failed to create STUN client for connectivity check: {}", e);
             pair.state = PairState::Failed;
             return Ok(false);
         }
@@ -113,8 +110,7 @@ pub async fn perform_checks_parallel(
     let total_pairs = pairs.len();
     debug!(
         "Performing parallel connectivity checks on {} pairs (max concurrent: {})",
-        total_pairs,
-        max_concurrent
+        total_pairs, max_concurrent
     );
 
     // Split pairs into chunks for parallel processing
@@ -126,9 +122,7 @@ pub async fn perform_checks_parallel(
 
         debug!(
             "Checking pair chunk {}-{} of {}",
-            chunk_start,
-            chunk_end,
-            total_pairs
+            chunk_start, chunk_end, total_pairs
         );
 
         // Start checks for all pairs in this chunk

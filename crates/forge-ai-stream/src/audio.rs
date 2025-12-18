@@ -39,7 +39,11 @@ impl AudioFormat {
 
     /// Get channel count
     pub fn channels(&self) -> u8 {
-        if self.is_stereo() { 2 } else { 1 }
+        if self.is_stereo() {
+            2
+        } else {
+            1
+        }
     }
 }
 
@@ -68,7 +72,9 @@ impl AudioConverter {
             (a, b) if a == b => Ok(input.to_vec()),
 
             // PCM to PCM with different sample rates
-            (AudioFormat::Pcm16Mono(src_rate), AudioFormat::Pcm16Mono(dst_rate)) if src_rate != dst_rate => {
+            (AudioFormat::Pcm16Mono(src_rate), AudioFormat::Pcm16Mono(dst_rate))
+                if src_rate != dst_rate =>
+            {
                 self.resample(input, *src_rate, *dst_rate)
             }
 
@@ -83,24 +89,16 @@ impl AudioConverter {
             }
 
             // G.711 μ-law to PCM
-            (AudioFormat::G711Mulaw, AudioFormat::Pcm16Mono(_)) => {
-                Ok(self.mulaw_to_pcm16(input))
-            }
+            (AudioFormat::G711Mulaw, AudioFormat::Pcm16Mono(_)) => Ok(self.mulaw_to_pcm16(input)),
 
             // PCM to G.711 μ-law
-            (AudioFormat::Pcm16Mono(_), AudioFormat::G711Mulaw) => {
-                Ok(self.pcm16_to_mulaw(input))
-            }
+            (AudioFormat::Pcm16Mono(_), AudioFormat::G711Mulaw) => Ok(self.pcm16_to_mulaw(input)),
 
             // G.711 A-law to PCM
-            (AudioFormat::G711Alaw, AudioFormat::Pcm16Mono(_)) => {
-                Ok(self.alaw_to_pcm16(input))
-            }
+            (AudioFormat::G711Alaw, AudioFormat::Pcm16Mono(_)) => Ok(self.alaw_to_pcm16(input)),
 
             // PCM to G.711 A-law
-            (AudioFormat::Pcm16Mono(_), AudioFormat::G711Alaw) => {
-                Ok(self.pcm16_to_alaw(input))
-            }
+            (AudioFormat::Pcm16Mono(_), AudioFormat::G711Alaw) => Ok(self.pcm16_to_alaw(input)),
 
             // Complex conversions (need multiple steps)
             _ => {
@@ -122,7 +120,12 @@ impl AudioConverter {
     }
 
     /// Resample audio using linear interpolation
-    fn resample(&self, input: &[AudioSample], src_rate: u32, dst_rate: u32) -> Result<Vec<AudioSample>> {
+    fn resample(
+        &self,
+        input: &[AudioSample],
+        src_rate: u32,
+        dst_rate: u32,
+    ) -> Result<Vec<AudioSample>> {
         if src_rate == dst_rate {
             return Ok(input.to_vec());
         }
@@ -138,7 +141,8 @@ impl AudioConverter {
 
             if src_idx + 1 < input.len() {
                 // Linear interpolation
-                let sample = input[src_idx] as f64 * (1.0 - frac) + input[src_idx + 1] as f64 * frac;
+                let sample =
+                    input[src_idx] as f64 * (1.0 - frac) + input[src_idx + 1] as f64 * frac;
                 output.push(sample as i16);
             } else if src_idx < input.len() {
                 output.push(input[src_idx]);
@@ -158,27 +162,42 @@ impl AudioConverter {
 
     /// Convert mono to stereo by duplicating channel
     fn mono_to_stereo(&self, input: &[AudioSample]) -> Vec<AudioSample> {
-        input.iter().flat_map(|&sample| vec![sample, sample]).collect()
+        input
+            .iter()
+            .flat_map(|&sample| vec![sample, sample])
+            .collect()
     }
 
     /// Convert G.711 μ-law to PCM16
     fn mulaw_to_pcm16(&self, input: &[AudioSample]) -> Vec<AudioSample> {
-        input.iter().map(|&sample| mulaw_decode(sample as u8)).collect()
+        input
+            .iter()
+            .map(|&sample| mulaw_decode(sample as u8))
+            .collect()
     }
 
     /// Convert PCM16 to G.711 μ-law
     fn pcm16_to_mulaw(&self, input: &[AudioSample]) -> Vec<AudioSample> {
-        input.iter().map(|&sample| mulaw_encode(sample) as i16).collect()
+        input
+            .iter()
+            .map(|&sample| mulaw_encode(sample) as i16)
+            .collect()
     }
 
     /// Convert G.711 A-law to PCM16
     fn alaw_to_pcm16(&self, input: &[AudioSample]) -> Vec<AudioSample> {
-        input.iter().map(|&sample| alaw_decode(sample as u8)).collect()
+        input
+            .iter()
+            .map(|&sample| alaw_decode(sample as u8))
+            .collect()
     }
 
     /// Convert PCM16 to G.711 A-law
     fn pcm16_to_alaw(&self, input: &[AudioSample]) -> Vec<AudioSample> {
-        input.iter().map(|&sample| alaw_encode(sample) as i16).collect()
+        input
+            .iter()
+            .map(|&sample| alaw_encode(sample) as i16)
+            .collect()
     }
 }
 
@@ -306,10 +325,8 @@ mod tests {
 
     #[test]
     fn test_stereo_to_mono() {
-        let converter = AudioConverter::new(
-            AudioFormat::Pcm16Stereo(8000),
-            AudioFormat::Pcm16Mono(8000),
-        );
+        let converter =
+            AudioConverter::new(AudioFormat::Pcm16Stereo(8000), AudioFormat::Pcm16Mono(8000));
 
         let stereo = vec![100, 200, 300, 400]; // 2 stereo samples
         let mono = converter.convert(&stereo).unwrap();
@@ -321,10 +338,8 @@ mod tests {
 
     #[test]
     fn test_mono_to_stereo() {
-        let converter = AudioConverter::new(
-            AudioFormat::Pcm16Mono(8000),
-            AudioFormat::Pcm16Stereo(8000),
-        );
+        let converter =
+            AudioConverter::new(AudioFormat::Pcm16Mono(8000), AudioFormat::Pcm16Stereo(8000));
 
         let mono = vec![100, 200];
         let stereo = converter.convert(&mono).unwrap();
@@ -337,16 +352,12 @@ mod tests {
     fn test_mulaw_roundtrip() {
         let original = vec![1000i16, -2000, 3000, -4000, 0];
 
-        let converter_encode = AudioConverter::new(
-            AudioFormat::Pcm16Mono(8000),
-            AudioFormat::G711Mulaw,
-        );
+        let converter_encode =
+            AudioConverter::new(AudioFormat::Pcm16Mono(8000), AudioFormat::G711Mulaw);
         let encoded = converter_encode.convert(&original).unwrap();
 
-        let converter_decode = AudioConverter::new(
-            AudioFormat::G711Mulaw,
-            AudioFormat::Pcm16Mono(8000),
-        );
+        let converter_decode =
+            AudioConverter::new(AudioFormat::G711Mulaw, AudioFormat::Pcm16Mono(8000));
         let decoded = converter_decode.convert(&encoded).unwrap();
 
         // G.711 is lossy with quantization error up to ±512 for high segments
@@ -360,16 +371,12 @@ mod tests {
     fn test_alaw_roundtrip() {
         let original = vec![1000i16, -2000, 3000, -4000, 0];
 
-        let converter_encode = AudioConverter::new(
-            AudioFormat::Pcm16Mono(8000),
-            AudioFormat::G711Alaw,
-        );
+        let converter_encode =
+            AudioConverter::new(AudioFormat::Pcm16Mono(8000), AudioFormat::G711Alaw);
         let encoded = converter_encode.convert(&original).unwrap();
 
-        let converter_decode = AudioConverter::new(
-            AudioFormat::G711Alaw,
-            AudioFormat::Pcm16Mono(8000),
-        );
+        let converter_decode =
+            AudioConverter::new(AudioFormat::G711Alaw, AudioFormat::Pcm16Mono(8000));
         let decoded = converter_decode.convert(&encoded).unwrap();
 
         // G.711 is lossy with quantization error up to ±512 for high segments
@@ -381,10 +388,8 @@ mod tests {
 
     #[test]
     fn test_resampling() {
-        let converter = AudioConverter::new(
-            AudioFormat::Pcm16Mono(8000),
-            AudioFormat::Pcm16Mono(16000),
-        );
+        let converter =
+            AudioConverter::new(AudioFormat::Pcm16Mono(8000), AudioFormat::Pcm16Mono(16000));
 
         let input = vec![0, 1000, 2000, 3000, 4000];
         let output = converter.convert(&input).unwrap();
@@ -395,10 +400,8 @@ mod tests {
 
     #[test]
     fn test_no_conversion_needed() {
-        let converter = AudioConverter::new(
-            AudioFormat::Pcm16Mono(24000),
-            AudioFormat::Pcm16Mono(24000),
-        );
+        let converter =
+            AudioConverter::new(AudioFormat::Pcm16Mono(24000), AudioFormat::Pcm16Mono(24000));
 
         let input = vec![100, 200, 300];
         let output = converter.convert(&input).unwrap();

@@ -91,20 +91,25 @@ fn bench_rtp_encryption(c: &mut Criterion) {
         for &size in &packet_sizes {
             let id = format!("{}/{}", profile_name, size);
             group.throughput(Throughput::Bytes(size as u64));
-            group.bench_with_input(BenchmarkId::from_parameter(id), &(profile, size), |b, &(profile, size)| {
-                let master_key = vec![0x42; profile.master_key_len()];
-                let master_salt = vec![0x43; profile.master_salt_len()];
-                let key_material = SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
+            group.bench_with_input(
+                BenchmarkId::from_parameter(id),
+                &(profile, size),
+                |b, &(profile, size)| {
+                    let master_key = vec![0x42; profile.master_key_len()];
+                    let master_salt = vec![0x43; profile.master_salt_len()];
+                    let key_material =
+                        SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
 
-                let mut ctx = SrtpContext::new();
-                ctx.set_local_key(key_material);
+                    let mut ctx = SrtpContext::new();
+                    ctx.set_local_key(key_material);
 
-                let packet = generate_rtp_packet(size);
+                    let packet = generate_rtp_packet(size);
 
-                b.iter(|| {
-                    black_box(ctx.protect_rtp(black_box(&packet)).unwrap());
-                });
-            });
+                    b.iter(|| {
+                        black_box(ctx.protect_rtp(black_box(&packet)).unwrap());
+                    });
+                },
+            );
         }
     }
 
@@ -179,7 +184,8 @@ fn bench_rtcp_encryption(c: &mut Criterion) {
                 |b, &(profile, size)| {
                     let master_key = vec![0x42; profile.master_key_len()];
                     let master_salt = vec![0x43; profile.master_salt_len()];
-                    let key_material = SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
+                    let key_material =
+                        SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
 
                     let mut ctx = SrtpContext::new();
                     ctx.set_local_key(key_material);
@@ -280,8 +286,10 @@ fn bench_rtp_roundtrip(c: &mut Criterion) {
                     let packet = generate_rtp_packet(size);
 
                     b.iter(|| {
-                        let encrypted = black_box(encrypt_ctx.protect_rtp(black_box(&packet)).unwrap());
-                        let _decrypted = black_box(decrypt_ctx.unprotect_rtp(black_box(&encrypted)).unwrap());
+                        let encrypted =
+                            black_box(encrypt_ctx.protect_rtp(black_box(&packet)).unwrap());
+                        let _decrypted =
+                            black_box(decrypt_ctx.unprotect_rtp(black_box(&encrypted)).unwrap());
                     });
                 },
             );

@@ -74,9 +74,7 @@ impl PortPair {
     /// Create a new port pair from an RTP port
     pub fn new(rtp_port: u16) -> Result<Self> {
         if rtp_port % 2 != 0 {
-            return Err(ForgeError::Rtp(
-                "RTP port must be even".to_string(),
-            ));
+            return Err(ForgeError::Rtp("RTP port must be even".to_string()));
         }
 
         Ok(Self {
@@ -122,7 +120,10 @@ impl PortPool {
     /// This constructor is used during failover to restore the port pool state
     /// with previously allocated ports marked as unavailable.
     #[cfg(feature = "ha")]
-    pub fn new_with_allocated(config: PortPoolConfig, allocated_ports: HashSet<u16>) -> Result<Self> {
+    pub fn new_with_allocated(
+        config: PortPoolConfig,
+        allocated_ports: HashSet<u16>,
+    ) -> Result<Self> {
         // Validate that all allocated ports are within range and even
         for &port in &allocated_ports {
             if port < config.min_port || port >= config.max_port {
@@ -191,9 +192,7 @@ impl PortPool {
         }
 
         if rtp_port % 2 != 0 {
-            return Err(ForgeError::Rtp(
-                "RTP port must be even".to_string(),
-            ));
+            return Err(ForgeError::Rtp("RTP port must be even".to_string()));
         }
 
         let mut state = self.state.lock().await;

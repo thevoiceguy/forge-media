@@ -33,17 +33,16 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-pub mod profiles;
-pub mod ice;
 pub mod dtls;
+pub mod ice;
+pub mod profiles;
 
 use thiserror::Error;
 
 // Re-export sip-sdp types for convenience
 pub use sip_sdp::{
-    negotiate::Direction, serialize, Attribute, Bandwidth, Connection, MediaDescription,
-    MediaType, Origin, Protocol, RtpMap, SessionDescription as SipSessionDescription,
-    TimeDescription,
+    negotiate::Direction, serialize, Attribute, Bandwidth, Connection, MediaDescription, MediaType,
+    Origin, Protocol, RtpMap, SessionDescription as SipSessionDescription, TimeDescription,
 };
 
 // Re-export ICE attribute helpers
@@ -174,10 +173,7 @@ pub struct CodecInfo {
 impl CodecInfo {
     /// Extract codec information from an rtpmap
     pub fn from_rtpmap(payload_type: u8, rtpmap: &RtpMap) -> Self {
-        let channels = rtpmap
-            .encoding_params
-            .as_ref()
-            .and_then(|s| s.parse().ok());
+        let channels = rtpmap.encoding_params.as_ref().and_then(|s| s.parse().ok());
 
         Self {
             payload_type,
@@ -244,11 +240,10 @@ pub mod helpers {
     /// Check if SDP has a specific codec
     pub fn has_codec(sdp: &SessionDescription, codec_name: &str) -> bool {
         sdp.media.iter().any(|media| {
-            media.rtpmaps.values().any(|rtpmap| {
-                rtpmap
-                    .encoding_name
-                    .eq_ignore_ascii_case(codec_name)
-            })
+            media
+                .rtpmaps
+                .values()
+                .any(|rtpmap| rtpmap.encoding_name.eq_ignore_ascii_case(codec_name))
         })
     }
 }

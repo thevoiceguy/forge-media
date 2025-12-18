@@ -3,6 +3,7 @@
 pub mod ai;
 pub mod conference_ai;
 pub mod conferences;
+pub mod event_bus;
 pub mod ha;
 pub mod health;
 pub mod metrics;
@@ -10,7 +11,6 @@ pub mod prometheus;
 pub mod sessions;
 pub mod webrtc;
 pub mod websocket;
-pub mod event_bus;
 
 use axum::Router;
 use std::sync::Arc;

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
-use validator::Validate;
 use uuid::Uuid;
+use validator::Validate;
 
 use crate::error::{ApiError, ApiResult};
 use crate::response::{created, no_content, success, ApiSuccess};
@@ -191,14 +191,8 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/v1/conferences/:room_id",
             get(get_room).delete(delete_room),
         )
-        .route(
-            "/v1/conferences/:room_id/configure",
-            post(configure_room),
-        )
-        .route(
-            "/v1/conferences/:room_id/config",
-            get(get_room_config),
-        )
+        .route("/v1/conferences/:room_id/configure", post(configure_room))
+        .route("/v1/conferences/:room_id/config", get(get_room_config))
         .route(
             "/v1/conferences/:room_id/participants",
             post(add_participant).get(list_participants_with_status),
@@ -615,12 +609,7 @@ async fn start_participant_rec(
     // Start participant recording
     room.start_participant_recording(&request.participant_id, &output_path)
         .await
-        .map_err(|e| {
-            ApiError::Internal(format!(
-                "Failed to start participant recording: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| ApiError::Internal(format!("Failed to start participant recording: {}", e)))?;
 
     // Register recording metadata
     let recording_id = Uuid::new_v4().to_string();
@@ -687,10 +676,7 @@ async fn stop_participant_rec(
                     participant_id, room_id
                 ))
             } else {
-                ApiError::Internal(format!(
-                    "Failed to stop participant recording: {}",
-                    e
-                ))
+                ApiError::Internal(format!("Failed to stop participant recording: {}", e))
             }
         })?;
 
@@ -920,7 +906,9 @@ async fn get_participant_metadata(
         is_recording: metadata.is_recording,
         packets_received: metadata.packets_received,
         is_speaking: metadata.is_speaking,
-        last_speech_ms: metadata.last_speech_detected.map(|t| t.elapsed().as_millis()),
+        last_speech_ms: metadata
+            .last_speech_detected
+            .map(|t| t.elapsed().as_millis()),
     };
 
     Ok(Json(success(response)))
@@ -966,7 +954,9 @@ async fn get_all_participants_metadata(
                 is_recording: metadata.is_recording,
                 packets_received: metadata.packets_received,
                 is_speaking: metadata.is_speaking,
-                last_speech_ms: metadata.last_speech_detected.map(|t| t.elapsed().as_millis()),
+                last_speech_ms: metadata
+                    .last_speech_detected
+                    .map(|t| t.elapsed().as_millis()),
             }
         })
         .collect();
@@ -1151,7 +1141,10 @@ async fn list_participants_with_status(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<Json<ApiSuccess<ParticipantDetailListResponse>>> {
-    tracing::info!("API request to list participants with status for room {}", room_id);
+    tracing::info!(
+        "API request to list participants with status for room {}",
+        room_id
+    );
 
     // Get room
     let room = state
@@ -1187,7 +1180,10 @@ async fn list_waiting_participants(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<Json<ApiSuccess<ParticipantDetailListResponse>>> {
-    tracing::info!("API request to list waiting participants for room {}", room_id);
+    tracing::info!(
+        "API request to list waiting participants for room {}",
+        room_id
+    );
 
     // Get room
     let room = state
@@ -1244,7 +1240,11 @@ async fn promote_participant(
             room.promote_to_host(&participant_id)
                 .map_err(|e| ApiError::Internal(format!("Failed to promote participant: {}", e)))?;
 
-            tracing::info!("Promoted participant {} to host in room {}", participant_id, room_id);
+            tracing::info!(
+                "Promoted participant {} to host in room {}",
+                participant_id,
+                room_id
+            );
             Ok(no_content())
         }
         _ => {

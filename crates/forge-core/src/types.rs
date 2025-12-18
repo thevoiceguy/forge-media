@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use zeroize::Zeroizing;
 
 /// Unique call identifier
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,17 +343,23 @@ impl fmt::Display for RecordingId {
 
 /// Secrets that should be redacted when formatted for logs, JSON, and serialization
 #[derive(Clone, PartialEq, Eq)]
-pub struct SecureString(String);
+pub struct SecureString(Zeroizing<String>);
+
+impl Default for SecureString {
+    fn default() -> Self {
+        Self(Zeroizing::new(String::new()))
+    }
+}
 
 impl SecureString {
     /// Create a new secure string
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self(Zeroizing::new(value.into()))
     }
 
     /// Reveal the underlying secret
     pub fn expose_secret(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 
     /// Check if the secret is empty
@@ -413,7 +420,7 @@ impl<'de> serde::Deserialize<'de> for SecureString {
         if value == "[REDACTED]" {
             return Err(serde::de::Error::custom(
                 "Cannot deserialize [REDACTED] placeholder as a secret. \
-                 Use environment variables or secret management systems instead."
+                 Use environment variables or secret management systems instead.",
             ));
         }
 
@@ -429,7 +436,7 @@ mod tests {
     fn test_secure_string_debug_redaction() {
         let secret = SecureString::new("sk-super-secret-api-key-12345");
         let debug_output = format!("{:?}", secret);
-        
+
         assert_eq!(debug_output, "[REDACTED]");
         assert!(!debug_output.contains("sk-super-secret"));
     }
@@ -438,7 +445,7 @@ mod tests {
     fn test_secure_string_display_redaction() {
         let secret = SecureString::new("password123");
         let display_output = format!("{}", secret);
-        
+
         assert_eq!(display_output, "[REDACTED]");
         assert!(!display_output.contains("password"));
     }
@@ -447,7 +454,7 @@ mod tests {
     fn test_secure_string_serialization_redaction() {
         let secret = SecureString::new("sk-openai-key-abc123xyz");
         let json = serde_json::to_string(&secret).unwrap();
-        
+
         // Should serialize as [REDACTED], not the actual secret
         assert_eq!(json, "\"[REDACTED]\"");
         assert!(!json.contains("sk-openai-key"));
@@ -467,15 +474,18 @@ mod tests {
         // Should reject [REDACTED] as a value
         let json = "\"[REDACTED]\"";
         let result: Result<SecureString, _> = serde_json::from_str(json);
-        
+
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Cannot deserialize [REDACTED]"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot deserialize [REDACTED]"));
     }
 
     #[test]
     fn test_secure_string_expose_secret() {
         let secret = SecureString::new("actual-secret-value");
-        
+
         // expose_secret() should reveal the actual value
         assert_eq!(secret.expose_secret(), "actual-secret-value");
     }
@@ -484,7 +494,7 @@ mod tests {
     fn test_secure_string_is_empty() {
         let empty = SecureString::new("");
         let non_empty = SecureString::new("value");
-        
+
         assert!(empty.is_empty());
         assert!(!non_empty.is_empty());
     }
@@ -493,7 +503,7 @@ mod tests {
     fn test_secure_string_from_conversions() {
         let from_string = SecureString::from("test".to_string());
         let from_str = SecureString::from("test");
-        
+
         assert_eq!(from_string.expose_secret(), "test");
         assert_eq!(from_str.expose_secret(), "test");
     }
@@ -502,7 +512,7 @@ mod tests {
     fn test_secure_string_as_ref() {
         let secret = SecureString::new("mykey");
         let as_ref: &str = secret.as_ref();
-        
+
         assert_eq!(as_ref, "mykey");
     }
 
@@ -510,7 +520,7 @@ mod tests {
     fn test_secure_string_clone() {
         let original = SecureString::new("original");
         let cloned = original.clone();
-        
+
         assert_eq!(original.expose_secret(), cloned.expose_secret());
     }
 
@@ -519,7 +529,7 @@ mod tests {
         let secret1 = SecureString::new("same");
         let secret2 = SecureString::new("same");
         let secret3 = SecureString::new("different");
-        
+
         assert_eq!(secret1, secret2);
         assert_ne!(secret1, secret3);
     }

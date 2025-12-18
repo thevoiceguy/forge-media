@@ -123,10 +123,7 @@ impl DtmfProcessor {
         };
 
         let inband_detector = if config.enable_inband {
-            Some(GoertzelDetector::new(
-                config.sample_rate,
-                config.frame_size,
-            ))
+            Some(GoertzelDetector::new(config.sample_rate, config.frame_size))
         } else {
             None
         };
@@ -138,8 +135,7 @@ impl DtmfProcessor {
         };
 
         let buffer = if config.enable_buffering {
-            let mut buf = DtmfBuffer::new()
-                .with_inter_digit_timeout(config.inter_digit_timeout);
+            let mut buf = DtmfBuffer::new().with_inter_digit_timeout(config.inter_digit_timeout);
 
             if let Some(total) = config.total_timeout {
                 buf = buf.with_total_timeout(total);
@@ -359,9 +355,7 @@ mod tests {
         // Send three digits
         for digit in [DtmfDigit::One, DtmfDigit::Two, DtmfDigit::Three] {
             let packet = Rfc2833Event::for_digit(digit, false, 0);
-            processor
-                .process_rfc2833(&packet.to_bytes(), 1000)
-                .unwrap();
+            processor.process_rfc2833(&packet.to_bytes(), 1000).unwrap();
         }
 
         // Check buffer
@@ -380,9 +374,7 @@ mod tests {
 
         // Add a digit
         let packet = Rfc2833Event::for_digit(DtmfDigit::Five, false, 0);
-        processor
-            .process_rfc2833(&packet.to_bytes(), 1000)
-            .unwrap();
+        processor.process_rfc2833(&packet.to_bytes(), 1000).unwrap();
 
         assert_eq!(processor.buffer().unwrap().len(), 1);
 

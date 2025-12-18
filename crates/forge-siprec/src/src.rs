@@ -3,11 +3,11 @@
 //! The SRC is responsible for forking media streams and sending them to an SRS
 //! (Session Recording Server) along with metadata.
 
+use base64::{engine::general_purpose::STANDARD, Engine};
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use base64::{engine::general_purpose::STANDARD, Engine};
-use dashmap::DashMap;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
@@ -171,12 +171,10 @@ impl SessionRecordingClient {
 
         // Add participants
         metadata.add_participant(
-            Participant::new("caller", &caller_uri, ParticipantRole::Caller)
-                .with_streams(vec![]),
+            Participant::new("caller", &caller_uri, ParticipantRole::Caller).with_streams(vec![]),
         );
         metadata.add_participant(
-            Participant::new("callee", &callee_uri, ParticipantRole::Callee)
-                .with_streams(vec![]),
+            Participant::new("callee", &callee_uri, ParticipantRole::Callee).with_streams(vec![]),
         );
 
         // Set recording reason if configured
@@ -189,7 +187,11 @@ impl SessionRecordingClient {
 
         // Create SIP dialog
         let local_uri = format!("sip:src@{}", self.config.local_address.ip());
-        let sip_call_id = format!("{}@{}", uuid::Uuid::new_v4(), self.config.local_address.ip());
+        let sip_call_id = format!(
+            "{}@{}",
+            uuid::Uuid::new_v4(),
+            self.config.local_address.ip()
+        );
         let local_tag = format!("{:x}", rand::random::<u64>());
 
         let dialog = self
@@ -229,8 +231,11 @@ impl SessionRecordingClient {
             if self.config.forward_srtp_keys {
                 if let Some(ref crypto_attr) = stream.crypto_attr {
                     // Parse and store SRTP keys
-                    self.srtp_key_manager
-                        .add_from_crypto_attr(stream_id.clone(), stream.ssrc, crypto_attr)?;
+                    self.srtp_key_manager.add_from_crypto_attr(
+                        stream_id.clone(),
+                        stream.ssrc,
+                        crypto_attr,
+                    )?;
 
                     // Add SRTP to SDP
                     let key_info = self.srtp_key_manager.get_key_by_stream(&stream_id).unwrap();
@@ -403,12 +408,8 @@ impl SessionRecordingClient {
             return Err(SrcError::Rtp("RTP packet too short".to_string()));
         }
 
-        let ssrc = u32::from_be_bytes([
-            rtp_packet[8],
-            rtp_packet[9],
-            rtp_packet[10],
-            rtp_packet[11],
-        ]);
+        let ssrc =
+            u32::from_be_bytes([rtp_packet[8], rtp_packet[9], rtp_packet[10], rtp_packet[11]]);
 
         // Forward by SSRC
         self.media_forker.forward_by_ssrc(ssrc, rtp_packet).await?;
@@ -432,7 +433,9 @@ impl SessionRecordingClient {
                 // Get SIP Call-ID synchronously to avoid nested lock
                 {
                     // Use try_read to avoid blocking
-                    session_state.dialog.try_read()
+                    session_state
+                        .dialog
+                        .try_read()
                         .map(|d| d.call_id.clone())
                         .unwrap_or_else(|_| {
                             // Fallback: generate a temporary call-id (shouldn't happen in practice)
@@ -687,7 +690,8 @@ mod tests {
         };
         let src = SessionRecordingClient::new(config).await.unwrap();
 
-        let crypto = "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz";
+        let crypto =
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz";
 
         let media_config = MediaConfig::new().add_stream(StreamConfig {
             codec: "PCMU".to_string(),

@@ -13,12 +13,12 @@ use axum::{
     Json, Router,
 };
 use forge_conference_processor::{AudioMode, ConferenceAIConfig, ConferenceAIManager};
+use forge_core::{CallId, SecureString};
 use forge_engine::ai_integration::{AISessionConfig, AISessionState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
 use validator::Validate;
-use forge_core::{CallId, SecureString};
 
 /// Create conference AI routes
 pub fn routes() -> Router<Arc<AppState>> {
@@ -92,18 +92,19 @@ async fn attach_ai(
     info!("Attaching AI to conference room: {}", room_id);
 
     // Validate request
-    request.validate().map_err(|e| {
-        ApiError::InvalidRequest(format!("Invalid request: {}", e))
-    })?;
+    request
+        .validate()
+        .map_err(|e| ApiError::InvalidRequest(format!("Invalid request: {}", e)))?;
 
     if let Some(endpoint) = request.endpoint.as_ref() {
         validate_ai_endpoint(endpoint, &state.ai_allowed_endpoints)?;
     }
 
     // Get conference room
-    let room = state.conference_bridge.get_room(&room_id).map_err(|e| {
-        ApiError::NotFound(format!("Conference room not found: {}", e))
-    })?;
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::NotFound(format!("Conference room not found: {}", e)))?;
 
     // Check if AI already attached
     if room.has_ai() {
@@ -149,9 +150,7 @@ async fn attach_ai(
         .ai_session_manager
         .attach_ai(call_id.clone(), ai_config.clone(), None)
         .await
-        .map_err(|e| {
-            ApiError::Internal(format!("Failed to attach AI session: {}", e))
-        })?;
+        .map_err(|e| ApiError::Internal(format!("Failed to attach AI session: {}", e)))?;
 
     // Create conference AI config
     let conference_ai_config = ConferenceAIConfig::new(room.format())
@@ -165,9 +164,7 @@ async fn attach_ai(
         Arc::clone(&state.ai_session_manager),
         conference_ai_config,
     )
-    .map_err(|e| {
-        ApiError::Internal(format!("Failed to create AI manager: {}", e))
-    })?;
+    .map_err(|e| ApiError::Internal(format!("Failed to create AI manager: {}", e)))?;
 
     // Attach AI to room with event bus for DTMF forwarding
     room.attach_ai(ai_manager, Some(Arc::clone(&state.core_event_bus)))
@@ -181,7 +178,8 @@ async fn attach_ai(
         room_id: room_id.clone(),
         state: format!(
             "{:?}",
-            room.ai_state().unwrap_or(forge_conference_processor::ConferenceAIState::Connecting)
+            room.ai_state()
+                .unwrap_or(forge_conference_processor::ConferenceAIState::Connecting)
         ),
         ai_session_state: format!(
             "{:?}",
@@ -211,9 +209,10 @@ async fn get_ai_status(
     Path(room_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
     // Get conference room
-    let room = state.conference_bridge.get_room(&room_id).map_err(|e| {
-        ApiError::NotFound(format!("Conference room not found: {}", e))
-    })?;
+    let room = state
+        .conference_bridge
+        .get_room(&room_id)
+        .map_err(|e| ApiError::NotFound(format!("Conference room not found: {}", e)))?;
 
     // Check if AI is attached
     if !room.has_ai() {

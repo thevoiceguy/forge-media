@@ -30,11 +30,7 @@ pub struct PrimaryElection {
 
 impl PrimaryElection {
     /// Create a new primary election manager
-    pub fn new(
-        instance_id: InstanceId,
-        redis: RedisHAClient,
-        role: Arc<RwLock<HARole>>,
-    ) -> Self {
+    pub fn new(instance_id: InstanceId, redis: RedisHAClient, role: Arc<RwLock<HARole>>) -> Self {
         Self {
             instance_id,
             redis,
@@ -61,10 +57,7 @@ impl PrimaryElection {
             .await?;
 
         if acquired {
-            info!(
-                "Successfully elected as primary: {}",
-                self.instance_id
-            );
+            info!("Successfully elected as primary: {}", self.instance_id);
             *self.is_primary.write().await = true;
             *self.role.write().await = HARole::Primary;
             // Note: Lock renewal must be started by caller (needs Arc<Self>)
@@ -299,10 +292,7 @@ impl ElectionCoordinator {
         info!("Handling primary failure");
 
         // Attempt to become primary
-        self.election
-            .clone()
-            .run_election_on_failure()
-            .await?;
+        self.election.clone().run_election_on_failure().await?;
 
         Ok(())
     }

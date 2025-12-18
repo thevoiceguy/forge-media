@@ -32,15 +32,9 @@ pub enum ConferenceEvent {
         timestamp: u64,
     },
     /// Room recording started
-    RecordingStarted {
-        room_id: String,
-        timestamp: u64,
-    },
+    RecordingStarted { room_id: String, timestamp: u64 },
     /// Room recording stopped
-    RecordingStopped {
-        room_id: String,
-        timestamp: u64,
-    },
+    RecordingStopped { room_id: String, timestamp: u64 },
     /// Participant recording started
     ParticipantRecordingStarted {
         room_id: String,

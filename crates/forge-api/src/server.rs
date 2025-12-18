@@ -16,7 +16,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tower::ServiceBuilder;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// API server configuration
 #[derive(Debug, Clone)]
@@ -26,10 +26,11 @@ pub struct ApiServerConfig {
     pub port_range_min: u16,
     pub port_range_max: u16,
     pub allowed_origins: Vec<String>,
+    pub disable_auth: bool,
     pub auth_tokens: Vec<String>,
     pub rate_limit_requests_per_window: usize,
     pub rate_limit_window_secs: u64,
-    pub trusted_proxies: Vec<IpAddr>,  // IPs allowed to set X-Forwarded-For
+    pub trusted_proxies: Vec<IpAddr>, // IPs allowed to set X-Forwarded-For
     pub enable_https: bool,
     pub https_bind: Option<SocketAddr>,
     pub tls_cert: Option<PathBuf>,
@@ -57,10 +58,11 @@ impl Default for ApiServerConfig {
             port_range_min: 10000,
             port_range_max: 20000,
             allowed_origins: vec![],
-            auth_tokens: Vec::new(),
+            disable_auth: false,
+            auth_tokens: vec![uuid::Uuid::new_v4().to_string()],
             rate_limit_requests_per_window: 120,
             rate_limit_window_secs: 60,
-            trusted_proxies: Vec::new(),  // No proxies trusted by default
+            trusted_proxies: Vec::new(), // No proxies trusted by default
             enable_https: false,
             https_bind: None,
             tls_cert: None,
@@ -76,7 +78,7 @@ impl Default for ApiServerConfig {
             xdp_mode: "generic".to_string(),
             ai_allowed_endpoints: forge_core::config::default_ai_allowed_endpoints(),
             #[cfg(feature = "ha")]
-            ha_config: None,  // HA disabled by default
+            ha_config: None, // HA disabled by default
         }
     }
 }
@@ -102,10 +104,18 @@ impl ApiServer {
 
         // Enforce safer defaults: require auth when binding beyond loopback
         let bind_is_loopback = config.bind_addr.ip().is_loopback();
-        if !bind_is_loopback && config.auth_tokens.is_empty() {
+        if config.disable_auth {
+            if !bind_is_loopback {
+                warn!(
+                    "API authentication explicitly disabled while binding to {}. \
+                     This will expose control APIs without protection.",
+                    config.bind_addr
+                );
+            }
+        } else if config.auth_tokens.is_empty() {
             panic!(
-                "Refusing to start API server on {} without authentication. Configure auth_tokens or bind to 127.0.0.1.",
-                config.bind_addr
+                "API authentication enabled but no auth_tokens configured. \
+                 Provide at least one token or set disable_auth=true to run without auth."
             );
         }
 
@@ -145,7 +155,12 @@ impl ApiServer {
                         xdp_config.interface, xdp_config.mode
                     );
 
-                    SessionManager::new_with_xdp(session_manager_config, xdp_config, Some(event_bus.clone())).await
+                    SessionManager::new_with_xdp(
+                        session_manager_config,
+                        xdp_config,
+                        Some(event_bus.clone()),
+                    )
+                    .await
                 } else {
                     SessionManager::new(session_manager_config, Some(event_bus.clone()))
                 }
@@ -189,11 +204,9 @@ impl ApiServer {
         };
 
         // Validate recording base directory
-        let canonical_recording_dir = Self::validate_recording_dir(
-            &config.recording_base_dir,
-            &config.recording_root_jail,
-        )
-        .expect("Invalid recording base directory");
+        let canonical_recording_dir =
+            Self::validate_recording_dir(&config.recording_base_dir, &config.recording_root_jail)
+                .expect("Invalid recording base directory");
         info!(
             "✓ Recording directory validated: {:?}",
             canonical_recording_dir
@@ -216,7 +229,8 @@ impl ApiServer {
         let ha_manager = if let Some(ref ha_cfg) = config.ha_config {
             if ha_cfg.enabled {
                 info!("HA enabled, initializing HAManager...");
-                match crate::ha::HAManager::new(ha_cfg.clone(), Some(session_manager.clone())).await {
+                match crate::ha::HAManager::new(ha_cfg.clone(), Some(session_manager.clone())).await
+                {
                     Ok(mgr) => {
                         // Start HA background tasks
                         if let Err(e) = mgr.clone().start().await {
@@ -347,10 +361,7 @@ impl ApiServer {
         }
 
         // Check writeability with temp file inside the canonical path
-        let test_file = canonical.join(format!(
-            ".forge_write_test-{}",
-            std::process::id()
-        ));
+        let test_file = canonical.join(format!(".forge_write_test-{}", std::process::id()));
         match fs::File::create(&test_file) {
             Ok(_) => {
                 let _ = fs::remove_file(&test_file);
@@ -453,11 +464,11 @@ impl ApiServer {
                     listener,
                     router.into_make_service_with_connect_info::<SocketAddr>(),
                 )
-                    .await
-                    .map_err(|e| {
-                        error!("HTTP server error: {}", e);
-                        std::io::Error::new(std::io::ErrorKind::Other, e)
-                    })
+                .await
+                .map_err(|e| {
+                    error!("HTTP server error: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                })
             }
         };
 
@@ -539,14 +550,14 @@ impl ApiServer {
                     listener,
                     router.into_make_service_with_connect_info::<SocketAddr>(),
                 )
-                    .with_graceful_shutdown(async move {
-                        shutdown.notified().await;
-                    })
-                    .await
-                    .map_err(|e| {
-                        error!("HTTP server error: {}", e);
-                        std::io::Error::new(std::io::ErrorKind::Other, e)
-                    })
+                .with_graceful_shutdown(async move {
+                    shutdown.notified().await;
+                })
+                .await
+                .map_err(|e| {
+                    error!("HTTP server error: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                })
             }
         };
 

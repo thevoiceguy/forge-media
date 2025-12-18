@@ -169,10 +169,7 @@ impl HeartbeatService {
         let interval = self.config.heartbeat_interval();
 
         tokio::spawn(async move {
-            info!(
-                "Starting heartbeat service (interval: {:?})",
-                interval
-            );
+            info!("Starting heartbeat service (interval: {:?})", interval);
 
             let mut ticker = time::interval(interval);
 
@@ -205,11 +202,7 @@ pub struct HeartbeatMonitor {
 
 impl HeartbeatMonitor {
     /// Create a new heartbeat monitor
-    pub fn new(
-        instance_id: InstanceId,
-        redis: RedisHAClient,
-        config: RedisConfig,
-    ) -> Self {
+    pub fn new(instance_id: InstanceId, redis: RedisHAClient, config: RedisConfig) -> Self {
         Self {
             instance_id,
             redis,
@@ -295,7 +288,10 @@ impl HeartbeatMonitor {
         // T+0: crash, T+20: TTL expires, T+20: check #1, T+30: check #2 → failure
         let required_failures = 2;
 
-        info!("Starting primary failure detection (check interval: {:?})", check_interval);
+        info!(
+            "Starting primary failure detection (check interval: {:?})",
+            check_interval
+        );
 
         let mut ticker = time::interval(check_interval);
 

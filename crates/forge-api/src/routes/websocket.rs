@@ -252,7 +252,11 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     }
 
     // Clean up any room-specific subscription to prevent channel leaks
-    if let Some(RoomSubscription { room_id: Some(room), .. }) = current_subscription {
+    if let Some(RoomSubscription {
+        room_id: Some(room),
+        ..
+    }) = current_subscription
+    {
         state.event_bus.prune_room(&room).await;
     }
 

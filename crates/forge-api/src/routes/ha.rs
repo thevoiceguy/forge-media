@@ -57,7 +57,10 @@ pub async fn get_ha_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
         if let Some(ha_manager) = &state.ha_manager {
             let status = ha_manager.get_status().await;
 
-            info!("HA status requested: role={}, health={}", status.role, status.health_state);
+            info!(
+                "HA status requested: role={}, health={}",
+                status.role, status.health_state
+            );
 
             Json(HAStatusResponse {
                 enabled: true,

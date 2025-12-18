@@ -3,7 +3,7 @@
 //! Stores AI session state in Redis with TTL support.
 
 #[cfg(feature = "persistence-redis")]
-use super::{PersistenceBackend, PersistedAISession};
+use super::{PersistedAISession, PersistenceBackend};
 #[cfg(feature = "persistence-redis")]
 use async_trait::async_trait;
 #[cfg(feature = "persistence-redis")]
@@ -40,9 +40,8 @@ impl RedisBackend {
         ttl_seconds: u64,
     ) -> Result<Self> {
         // Create Redis client
-        let client = redis::Client::open(redis_url).map_err(|e| {
-            ForgeError::Internal(format!("Failed to create Redis client: {}", e))
-        })?;
+        let client = redis::Client::open(redis_url)
+            .map_err(|e| ForgeError::Internal(format!("Failed to create Redis client: {}", e)))?;
 
         // Create connection manager for automatic reconnection
         let conn_manager = ConnectionManager::new(client.clone())
@@ -69,9 +68,10 @@ impl RedisBackend {
         let pattern = format!("{}*", self.key_prefix);
         let mut conn = self.conn_manager.clone();
 
-        let keys: Vec<String> = conn.keys(pattern).await.map_err(|e| {
-            ForgeError::Internal(format!("Failed to list Redis keys: {}", e))
-        })?;
+        let keys: Vec<String> = conn
+            .keys(pattern)
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to list Redis keys: {}", e)))?;
 
         Ok(keys)
     }
@@ -166,19 +166,17 @@ impl PersistenceBackend for RedisBackend {
         for key in keys {
             // Get value
             match conn.get::<_, Option<String>>(&key).await {
-                Ok(Some(json)) => {
-                    match serde_json::from_str::<PersistedAISession>(&json) {
-                        Ok(session) => {
-                            sessions.insert(session.call_id.clone(), session);
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to deserialize AI session from Redis key {}: {}. Skipping.",
-                                key, e
-                            );
-                        }
+                Ok(Some(json)) => match serde_json::from_str::<PersistedAISession>(&json) {
+                    Ok(session) => {
+                        sessions.insert(session.call_id.clone(), session);
                     }
-                }
+                    Err(e) => {
+                        warn!(
+                            "Failed to deserialize AI session from Redis key {}: {}. Skipping.",
+                            key, e
+                        );
+                    }
+                },
                 Ok(None) => {
                     // Key disappeared between listing and getting
                     continue;
@@ -201,10 +199,7 @@ impl PersistenceBackend for RedisBackend {
         let mut conn = self.conn_manager.clone();
 
         // Try a simple PING command
-        match redis::cmd("PING")
-            .query_async::<_, String>(&mut conn)
-            .await
-        {
+        match redis::cmd("PING").query_async::<_, String>(&mut conn).await {
             Ok(response) if response == "PONG" => Ok(true),
             Ok(_) => {
                 error!("Redis health check got unexpected response");

@@ -82,23 +82,24 @@
 //! srs.start().await?;
 //! ```
 
+pub mod forking;
 pub mod metadata;
 pub mod sip;
 pub mod src;
 pub mod srs;
-pub mod forking;
 pub mod srtp_keys;
 
 // Re-export legacy manager for backward compatibility
 mod manager;
 pub use manager::{
-    SiprecConfig, SiprecError, SiprecManager, SiprecManagerConfig, SiprecSession, Result,
+    Result, SiprecConfig, SiprecError, SiprecManager, SiprecManagerConfig, SiprecSession,
 };
 
 // Re-export new API
+pub use forking::{ForkedStream, ForkingError, MediaForker};
 pub use metadata::{
-    ExtensionData, MediaStream, MediaType, Participant, ParticipantRole,
-    RecordingSession, RtpSession,
+    ExtensionData, MediaStream, MediaType, Participant, ParticipantRole, RecordingSession,
+    RtpSession,
 };
 pub use sip::{
     DialogManager, DialogState, MediaDescription, SdpBuilder, SipDialog, SipMethod, SipRequest,
@@ -107,10 +108,7 @@ pub use src::{
     MediaConfig, RecordingSessionState, SessionRecordingClient, SrcConfig, SrcError, StreamConfig,
 };
 pub use srs::{ActiveRecording, SessionRecordingServer, SrsConfig, SrsError};
-pub use forking::{ForkedStream, ForkingError, MediaForker};
-pub use srtp_keys::{
-    extract_crypto_from_sdp, SrtpKeyError, SrtpKeyManager, StreamKeyInfo,
-};
+pub use srtp_keys::{extract_crypto_from_sdp, SrtpKeyError, SrtpKeyManager, StreamKeyInfo};
 
 #[cfg(test)]
 mod integration_tests {
@@ -217,7 +215,8 @@ mod integration_tests {
         };
         let src = SessionRecordingClient::new(src_config).await.unwrap();
 
-        let crypto = "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz";
+        let crypto =
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz";
 
         let media_config = MediaConfig::new().add_stream(StreamConfig {
             codec: "PCMU".to_string(),
@@ -324,7 +323,8 @@ mod integration_tests {
         src.failover_to_backup(&session_id).await.unwrap();
 
         // Verify failover state
-        let (using_backup, failover_attempts) = src.get_session_failover_state(&session_id).unwrap();
+        let (using_backup, failover_attempts) =
+            src.get_session_failover_state(&session_id).unwrap();
         assert!(using_backup);
         assert_eq!(failover_attempts, 1);
 

@@ -4,11 +4,11 @@
 //! call recording. Keys can be extracted from SDP crypto attributes or
 //! DTLS-SRTP key material.
 
-use std::sync::Arc;
-use dashmap::DashMap;
-use thiserror::Error;
 use base64::{engine::general_purpose::STANDARD, Engine};
+use dashmap::DashMap;
 use forge_rtp::{SrtpKeyMaterial, SrtpProfile};
+use std::sync::Arc;
+use thiserror::Error;
 
 /// SRTP key management error types
 #[derive(Debug, Error)]
@@ -107,7 +107,9 @@ impl SrtpKeyManager {
 
     /// Get key information by stream ID
     pub fn get_key_by_stream(&self, stream_id: &str) -> Option<StreamKeyInfo> {
-        self.keys_by_stream.get(stream_id).map(|entry| entry.clone())
+        self.keys_by_stream
+            .get(stream_id)
+            .map(|entry| entry.clone())
     }
 
     /// Get key information by SSRC
@@ -171,9 +173,9 @@ impl SrtpKeyManager {
         let key_b64 = key_param.split('|').next().unwrap();
 
         // Decode base64 key material
-        let key_material = STANDARD.decode(key_b64).map_err(|e| {
-            SrtpKeyError::Base64Error(format!("Failed to decode key: {}", e))
-        })?;
+        let key_material = STANDARD
+            .decode(key_b64)
+            .map_err(|e| SrtpKeyError::Base64Error(format!("Failed to decode key: {}", e)))?;
 
         // Split into master key and master salt based on crypto suite
         let (master_key, master_salt) = match suite.as_str() {
@@ -291,7 +293,8 @@ mod tests {
 
     #[test]
     fn test_parse_crypto_attribute() {
-        let crypto = "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz";
+        let crypto =
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:WVNfX19zZW1jdGwgKCkgewkyMjA7fQp9CnVubGVz";
 
         let result = SrtpKeyManager::parse_crypto_attribute(crypto);
         assert!(result.is_ok());

@@ -167,13 +167,9 @@ pub fn create_codec(format: &AudioFormat) -> Result<Box<dyn AudioCodec>> {
             };
             Ok(Box::new(opus::OpusCodec::with_config(config)?))
         }
-        AudioCodecType::G722 => {
-            Ok(Box::new(g722::G722Codec::new(g722::G722BitRate::Rate64k)))
-        }
-        AudioCodecType::G729 => {
-            Err(CodecError::NotSupported(
-                "G.729 codec not yet implemented".to_string(),
-            ))
-        }
+        AudioCodecType::G722 => Ok(Box::new(g722::G722Codec::new(g722::G722BitRate::Rate64k))),
+        AudioCodecType::G729 => Err(CodecError::NotSupported(
+            "G.729 codec not yet implemented".to_string(),
+        )),
     }
 }

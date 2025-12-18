@@ -123,19 +123,15 @@ impl DtmfRelay {
         // Inband → RFC 2833
         if self.config.inband_to_rfc2833 && event.method == crate::DtmfMethod::Inband {
             // Create generator for this digit
-            let mut generator = Rfc2833Generator::new(
-                self.config.sample_rate,
-                self.config.packet_interval_ms,
-            );
+            let mut generator =
+                Rfc2833Generator::new(self.config.sample_rate, self.config.packet_interval_ms);
 
             let start_packet = generator.start_digit(event.digit);
             outputs.push(DtmfRelayOutput::Rfc2833Packet(start_packet));
 
             // Store generator for continuation
-            self.active_digits.insert(
-                event.digit,
-                ActiveDigitState { generator },
-            );
+            self.active_digits
+                .insert(event.digit, ActiveDigitState { generator });
         }
 
         // RFC 2833 → Tone

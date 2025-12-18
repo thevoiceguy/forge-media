@@ -8,9 +8,7 @@
 //! Set environment variable:
 //!   export OPENAI_API_KEY=sk-...
 
-use forge_ai_stream::{
-    AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector,
-};
+use forge_ai_stream::{AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector};
 use forge_core::SecureString;
 use serde_json::json;
 use std::collections::HashMap;
@@ -37,15 +35,17 @@ fn get_weather(location: &str) -> String {
 
 /// Simulated calendar database
 fn get_calendar_events(date: &str) -> String {
-    format!("Events for {}: Meeting at 10am, Lunch at 12pm, Review at 3pm", date)
+    format!(
+        "Events for {}: Meeting at 10am, Lunch at 12pm, Review at 3pm",
+        date
+    )
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let api_key = env::var("OPENAI_API_KEY")
-        .expect("OPENAI_API_KEY environment variable not set");
+    let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY environment variable not set");
 
     // Define tools/functions the AI can call
     let tools = vec![
@@ -90,8 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         temperature: Some(0.8),
         max_tokens: Some(4096),
         instructions: Some(
-            "You are a helpful assistant. Use the available tools to answer questions."
-                .to_string(),
+            "You are a helpful assistant. Use the available tools to answer questions.".to_string(),
         ),
         tools,
         enable_vad: true,
@@ -127,9 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Execute the function
                     let result = match call.name.as_str() {
                         "get_weather" => {
-                            let location = call.arguments["location"]
-                                .as_str()
-                                .unwrap_or("unknown");
+                            let location = call.arguments["location"].as_str().unwrap_or("unknown");
                             println!("  → Getting weather for: {}", location);
                             get_weather(location)
                         }

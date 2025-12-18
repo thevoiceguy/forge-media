@@ -351,7 +351,10 @@ mod config_tests {
         };
 
         let result = config.validate();
-        assert!(result.is_err(), "Should fail validation when sentinels configured without master_name");
+        assert!(
+            result.is_err(),
+            "Should fail validation when sentinels configured without master_name"
+        );
         assert!(
             result.unwrap_err().contains("master_name is required"),
             "Error should mention master_name requirement"
@@ -387,9 +390,14 @@ mod config_tests {
         };
 
         let result = config.validate();
-        assert!(result.is_err(), "Should fail validation with empty sentinels list");
         assert!(
-            result.unwrap_err().contains("sentinels list cannot be empty"),
+            result.is_err(),
+            "Should fail validation with empty sentinels list"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("sentinels list cannot be empty"),
             "Error should mention empty sentinels list"
         );
     }
@@ -427,7 +435,10 @@ mod config_tests {
         };
 
         let result = config.validate();
-        assert!(result.is_ok(), "Valid sentinel config should pass validation");
+        assert!(
+            result.is_ok(),
+            "Valid sentinel config should pass validation"
+        );
     }
 }
 
@@ -518,7 +529,7 @@ mod timing_tests {
     #[test]
     fn test_failover_timing_budget() {
         // Target: Complete failover in 30-40 seconds
-        let detection_time = Duration::from_secs(30);  // 3 missed heartbeats
+        let detection_time = Duration::from_secs(30); // 3 missed heartbeats
         let recovery_budget = Duration::from_secs(10); // Redis ops, session recovery
 
         let total = detection_time + recovery_budget;

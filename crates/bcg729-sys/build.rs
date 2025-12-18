@@ -18,11 +18,7 @@ fn main() {
                 eprintln!("Attempting manual linking...");
 
                 // Common installation paths
-                let possible_paths = vec![
-                    "/usr/lib",
-                    "/usr/local/lib",
-                    "/opt/homebrew/lib",
-                ];
+                let possible_paths = vec!["/usr/lib", "/usr/local/lib", "/opt/homebrew/lib"];
 
                 for path in &possible_paths {
                     println!("cargo:rustc-link-search=native={}", path);

@@ -84,7 +84,10 @@ impl TryFrom<u8> for RtcpPacketType {
             202 => Ok(RtcpPacketType::SDES),
             203 => Ok(RtcpPacketType::BYE),
             204 => Ok(RtcpPacketType::APP),
-            _ => Err(ForgeError::Rtcp(format!("Unknown RTCP packet type: {}", value))),
+            _ => Err(ForgeError::Rtcp(format!(
+                "Unknown RTCP packet type: {}",
+                value
+            ))),
         }
     }
 }
@@ -120,7 +123,10 @@ impl RtcpHeader {
         let length = u16::from_be_bytes([data[2], data[3]]);
 
         if version != 2 {
-            return Err(ForgeError::Rtcp(format!("Invalid RTCP version: {}", version)));
+            return Err(ForgeError::Rtcp(format!(
+                "Invalid RTCP version: {}",
+                version
+            )));
         }
 
         Ok(Self {
@@ -179,7 +185,12 @@ impl SenderReport {
     }
 
     /// Create a new sender report with current NTP timestamp
-    pub fn with_current_time(ssrc: u32, rtp_timestamp: u32, packet_count: u32, octet_count: u32) -> Self {
+    pub fn with_current_time(
+        ssrc: u32,
+        rtp_timestamp: u32,
+        packet_count: u32,
+        octet_count: u32,
+    ) -> Self {
         let (ntp_msw, ntp_lsw) = ntp::now_split();
         Self {
             ssrc,
@@ -222,7 +233,9 @@ impl SenderReport {
         // Parse report blocks
         let mut report_blocks = Vec::new();
         while cursor.remaining() >= 24 {
-            report_blocks.push(ReceptionReportBlock::parse(&data[cursor.position() as usize..])?);
+            report_blocks.push(ReceptionReportBlock::parse(
+                &data[cursor.position() as usize..],
+            )?);
             cursor.set_position(cursor.position() + 24);
         }
 
@@ -290,11 +303,16 @@ impl ReceiverReport {
 
         let mut report_blocks = Vec::new();
         while cursor.remaining() >= 24 {
-            report_blocks.push(ReceptionReportBlock::parse(&data[cursor.position() as usize..])?);
+            report_blocks.push(ReceptionReportBlock::parse(
+                &data[cursor.position() as usize..],
+            )?);
             cursor.set_position(cursor.position() + 24);
         }
 
-        Ok(Self { ssrc, report_blocks })
+        Ok(Self {
+            ssrc,
+            report_blocks,
+        })
     }
 
     /// Serialize RR to bytes
@@ -418,10 +436,13 @@ impl SdesItem {
 
         // END item has no length or text
         if item_type == sdes_type::END {
-            return Ok((Self {
-                item_type,
-                text: String::new(),
-            }, 1));
+            return Ok((
+                Self {
+                    item_type,
+                    text: String::new(),
+                },
+                1,
+            ));
         }
 
         if data.len() < 2 {
@@ -720,9 +741,7 @@ impl RtcpPacket {
                 let bye = Bye::parse(&data[4..], header.count)?;
                 Ok(RtcpPacket::Bye(bye))
             }
-            RtcpPacketType::APP => {
-                Err(ForgeError::Rtcp("APP packets not supported".to_string()))
-            }
+            RtcpPacketType::APP => Err(ForgeError::Rtcp("APP packets not supported".to_string())),
         }
     }
 

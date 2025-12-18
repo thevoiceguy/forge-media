@@ -2,7 +2,7 @@
 //!
 //! Stores AI session state as JSON files in a directory.
 
-use super::{PersistenceBackend, PersistedAISession};
+use super::{PersistedAISession, PersistenceBackend};
 use async_trait::async_trait;
 use forge_core::{CallId, ForgeError, Result};
 use std::collections::HashMap;
@@ -117,7 +117,10 @@ impl PersistenceBackend for DiskBackend {
             ))
         })?;
 
-        debug!("Loaded AI session state for call {} from {:?}", call_id.0, path);
+        debug!(
+            "Loaded AI session state for call {} from {:?}",
+            call_id.0, path
+        );
 
         Ok(Some(session))
     }
@@ -151,9 +154,11 @@ impl PersistenceBackend for DiskBackend {
         })?;
 
         // Load each JSON file
-        while let Some(entry) = entries.next_entry().await.map_err(|e| {
-            ForgeError::Internal(format!("Failed to read directory entry: {}", e))
-        })? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to read directory entry: {}", e)))?
+        {
             let path = entry.path();
 
             // Skip non-JSON files
@@ -175,7 +180,10 @@ impl PersistenceBackend for DiskBackend {
                     }
                 },
                 Err(e) => {
-                    warn!("Failed to read AI session file {:?}: {}. Skipping.", path, e);
+                    warn!(
+                        "Failed to read AI session file {:?}: {}. Skipping.",
+                        path, e
+                    );
                 }
             }
         }

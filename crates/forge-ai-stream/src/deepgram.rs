@@ -67,7 +67,9 @@
 //! }
 //! ```
 
-use crate::connector::{AIConnector, AIConnectorConfig, AIConnectorType, AISession, AISessionState};
+use crate::connector::{
+    AIConnector, AIConnectorConfig, AIConnectorType, AISession, AISessionState,
+};
 use crate::events::{AIEvent, SessionConfig};
 use crate::{AIStreamError, AIStreamStats, Result};
 use async_trait::async_trait;
@@ -191,11 +193,7 @@ impl DeepgramConnector {
             } else {
                 &self.config.model
             };
-            let voice = self
-                .config
-                .voice
-                .as_deref()
-                .unwrap_or("aura-asteria-en");
+            let voice = self.config.voice.as_deref().unwrap_or("aura-asteria-en");
 
             format!(
                 "wss://api.deepgram.com/v1/agent?model={}&voice={}",

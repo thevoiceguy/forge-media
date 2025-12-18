@@ -1,7 +1,7 @@
 //! Health check endpoint
 
-use axum::routing::get;
 use axum::response::IntoResponse;
+use axum::routing::get;
 use axum::Router;
 use axum::{extract::State, http::StatusCode};
 use serde::{Deserialize, Serialize};

@@ -164,10 +164,7 @@ async fn test_opus_to_pcma_transcoder() {
 #[tokio::test]
 async fn test_all_codec_pairs() {
     // Test matrix of all supported codec pairs
-    let mut supported_codecs = vec![
-        (AudioCodec::PCMU, 0, 8000),
-        (AudioCodec::PCMA, 8, 8000),
-    ];
+    let mut supported_codecs = vec![(AudioCodec::PCMU, 0, 8000), (AudioCodec::PCMA, 8, 8000)];
 
     #[cfg(feature = "opus")]
     supported_codecs.push((AudioCodec::Opus, 111, 48000));
@@ -365,5 +362,8 @@ async fn test_bidirectional_transcoding() {
     let has_a_to_b = session.transcoder_a_to_b().lock().await.is_some();
     let has_b_to_a = session.transcoder_b_to_a().lock().await.is_some();
 
-    assert!(has_a_to_b && has_b_to_a, "Both transcoding directions should be initialized");
+    assert!(
+        has_a_to_b && has_b_to_a,
+        "Both transcoding directions should be initialized"
+    );
 }

@@ -45,7 +45,7 @@ impl PayloadTypeMap {
             AudioCodecType::PCMU => Some(self.pcmu),
             AudioCodecType::PCMA => Some(self.pcma),
             AudioCodecType::Opus => Some(self.opus),
-            AudioCodecType::G722 => Some(9),  // RFC 3551 static payload type
+            AudioCodecType::G722 => Some(9), // RFC 3551 static payload type
             AudioCodecType::G729 => Some(18), // RFC 3551 static payload type
             AudioCodecType::PCM => None,
         }
@@ -100,8 +100,8 @@ impl RtpTranscoder {
     fn codec_to_format(codec: AudioCodecType) -> AudioFormat {
         let (sample_rate, channels) = match codec {
             AudioCodecType::PCMU | AudioCodecType::PCMA => (8000, 1),
-            AudioCodecType::G722 => (16000, 1),  // Wideband
-            AudioCodecType::G729 => (8000, 1),   // Narrowband
+            AudioCodecType::G722 => (16000, 1), // Wideband
+            AudioCodecType::G729 => (8000, 1),  // Narrowband
             AudioCodecType::Opus => (48000, 1),
             AudioCodecType::PCM => (8000, 1),
         };

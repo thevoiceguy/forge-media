@@ -58,27 +58,38 @@ impl LoadTestResults {
         println!("Sessions:");
         println!("  Created: {}", total);
         println!("  Failed: {}", failed);
-        println!("  Success Rate: {:.2}%", (total as f64 / (total + failed) as f64) * 100.0);
+        println!(
+            "  Success Rate: {:.2}%",
+            (total as f64 / (total + failed) as f64) * 100.0
+        );
 
         if sdp_ok + sdp_fail > 0 {
             println!("\nSDP Negotiation:");
             println!("  Successful: {}", sdp_ok);
             println!("  Failed: {}", sdp_fail);
-            println!("  Success Rate: {:.2}%", (sdp_ok as f64 / (sdp_ok + sdp_fail) as f64) * 100.0);
+            println!(
+                "  Success Rate: {:.2}%",
+                (sdp_ok as f64 / (sdp_ok + sdp_fail) as f64) * 100.0
+            );
         }
 
         if rooms > 0 {
             println!("\nConferences:");
             println!("  Rooms Created: {}", rooms);
             println!("  Total Participants: {}", participants);
-            println!("  Avg Participants/Room: {:.2}", participants as f64 / rooms as f64);
+            println!(
+                "  Avg Participants/Room: {:.2}",
+                participants as f64 / rooms as f64
+            );
         }
 
         if duration_ms > 0 {
             println!("\nPerformance:");
             println!("  Total Duration: {}ms", duration_ms);
-            println!("  Throughput: {:.2} ops/sec",
-                (total as f64 / (duration_ms as f64 / 1000.0)));
+            println!(
+                "  Throughput: {:.2} ops/sec",
+                (total as f64 / (duration_ms as f64 / 1000.0))
+            );
         }
         println!("========================================\n");
     }
@@ -159,7 +170,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Base URL: {}", config.base_url);
     println!("  Sessions: {}", config.num_sessions);
     println!("  Conferences: {}", config.num_conferences);
-    println!("  Participants/Conference: {}", config.participants_per_conference);
+    println!(
+        "  Participants/Conference: {}",
+        config.participants_per_conference
+    );
     println!("  Duration: {}s", config.duration_secs);
     println!("  Test SDP: {}", config.test_sdp);
     println!("  Test Transcoding: {}", config.test_transcoding);
@@ -220,7 +234,10 @@ async fn run_session_load_test(
     client: &reqwest::Client,
     results: Arc<LoadTestResults>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Test 1: Creating {} concurrent sessions...", config.num_sessions);
+    println!(
+        "Test 1: Creating {} concurrent sessions...",
+        config.num_sessions
+    );
     let start = Instant::now();
 
     let mut handles = vec![];
@@ -253,11 +270,17 @@ async fn run_session_load_test(
     }
 
     let elapsed = start.elapsed();
-    results.total_duration_ms.store(elapsed.as_millis() as usize, Ordering::Relaxed);
+    results
+        .total_duration_ms
+        .store(elapsed.as_millis() as usize, Ordering::Relaxed);
 
     let created = results.sessions_created.load(Ordering::Relaxed);
-    println!("✓ Created {} sessions in {:?} ({:.2} sessions/sec)\n",
-        created, elapsed, created as f64 / elapsed.as_secs_f64());
+    println!(
+        "✓ Created {} sessions in {:?} ({:.2} sessions/sec)\n",
+        created,
+        elapsed,
+        created as f64 / elapsed.as_secs_f64()
+    );
 
     Ok(())
 }
@@ -314,7 +337,10 @@ async fn run_sdp_load_test(
 
     let elapsed = start.elapsed();
     let successful = results.sdp_negotiations.load(Ordering::Relaxed);
-    println!("✓ Completed {} SDP negotiations in {:?}\n", successful, elapsed);
+    println!(
+        "✓ Completed {} SDP negotiations in {:?}\n",
+        successful, elapsed
+    );
 
     Ok(())
 }
@@ -324,8 +350,10 @@ async fn run_conference_load_test(
     client: &reqwest::Client,
     results: Arc<LoadTestResults>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Test 3: Creating {} conference rooms with {} participants each...",
-        config.num_conferences, config.participants_per_conference);
+    println!(
+        "Test 3: Creating {} conference rooms with {} participants each...",
+        config.num_conferences, config.participants_per_conference
+    );
     let start = Instant::now();
 
     for i in 0..config.num_conferences {
@@ -340,8 +368,10 @@ async fn run_conference_load_test(
                 // Add participants
                 for j in 0..config.participants_per_conference {
                     let participant_id = format!("participant-{}-{}", i, j);
-                    let url = format!("{}/v1/conferences/{}/participants",
-                        config.base_url, room_id);
+                    let url = format!(
+                        "{}/v1/conferences/{}/participants",
+                        config.base_url, room_id
+                    );
                     let body = json!({
                         "participant_id": participant_id
                     });
@@ -359,8 +389,10 @@ async fn run_conference_load_test(
     let elapsed = start.elapsed();
     let rooms = results.conferences_created.load(Ordering::Relaxed);
     let participants = results.participants_added.load(Ordering::Relaxed);
-    println!("✓ Created {} rooms with {} total participants in {:?}\n",
-        rooms, participants, elapsed);
+    println!(
+        "✓ Created {} rooms with {} total participants in {:?}\n",
+        rooms, participants, elapsed
+    );
 
     Ok(())
 }

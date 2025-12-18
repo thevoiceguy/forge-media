@@ -28,9 +28,9 @@ use crate::{AudioFormat, CodecError, Result};
 // All operations saturate on overflow per ITU specification.
 
 /// Fixed-point constants
-const MAX_16: i16 = 0x7FFF;  // 32767
+const MAX_16: i16 = 0x7FFF; // 32767
 const MIN_16: i16 = -0x8000; // -32768
-const MAX_32: i32 = 0x7FFF_FFFF;  // 2147483647
+const MAX_32: i32 = 0x7FFF_FFFF; // 2147483647
 const MIN_32: i32 = -0x8000_0000; // -2147483648
 
 /// Saturated 16-bit addition (Q15 format)
@@ -177,7 +177,7 @@ impl G729Variant {
     /// - G729A: Always 10 bytes
     /// - G729B: 10 bytes (speech), 2 bytes (SID), or 0 bytes (untransmitted)
     pub fn max_frame_size(&self) -> usize {
-        10  // Both variants can produce up to 10-byte frames
+        10 // Both variants can produce up to 10-byte frames
     }
 
     /// Whether this variant supports Voice Activity Detection
@@ -475,8 +475,8 @@ mod bcg729_wrapper {
                     bit_stream,
                     bit_stream_len,
                     if erasure { 1 } else { 0 }, // frameErasureFlag
-                    sid_flag,                     // SIDFrameFlag
-                    0,                            // rfc3389PayloadFlag (not used for now)
+                    sid_flag,                    // SIDFrameFlag
+                    0,                           // rfc3389PayloadFlag (not used for now)
                     output.as_mut_ptr(),
                 );
 
@@ -868,7 +868,7 @@ impl AudioCodec for G729Codec {
             for frame in pcm.chunks(FRAME_SIZE) {
                 let frame_data = self.encode_frame(frame)?;
                 let len = frame_data.len() as u8;
-                encoded.push(len);  // 1-byte length prefix
+                encoded.push(len); // 1-byte length prefix
                 encoded.extend_from_slice(&frame_data);
             }
             Ok(encoded)
@@ -1030,7 +1030,11 @@ mod tests {
         assert_eq!(decoded.len(), 80);
         // Decoded silence should be low amplitude
         let max_amplitude = decoded.iter().map(|&s| s.abs()).max().unwrap();
-        assert!(max_amplitude < 1000, "Silence decoded with amplitude {}", max_amplitude);
+        assert!(
+            max_amplitude < 1000,
+            "Silence decoded with amplitude {}",
+            max_amplitude
+        );
     }
 
     #[test]
@@ -1038,7 +1042,9 @@ mod tests {
     fn test_g729_encode_decode_multi_frame() {
         let mut codec = G729Codec::new().unwrap();
         // 4 frames = 320 samples
-        let pcm: Vec<i16> = (0..320).map(|i| ((i as f32 * 0.1).sin() * 1000.0) as i16).collect();
+        let pcm: Vec<i16> = (0..320)
+            .map(|i| ((i as f32 * 0.1).sin() * 1000.0) as i16)
+            .collect();
 
         let encoded = codec.encode(&pcm).unwrap();
         // Framed format: (1 + 10) * 4 = 44 bytes
@@ -1079,7 +1085,10 @@ mod tests {
 
         // Encode same data again - should produce identical output
         let encoded2 = codec.encode(&pcm1).unwrap();
-        assert_eq!(encoded1, encoded2, "Reset should restore codec to initial state");
+        assert_eq!(
+            encoded1, encoded2,
+            "Reset should restore codec to initial state"
+        );
     }
 
     #[test]
@@ -1089,7 +1098,9 @@ mod tests {
 
         // Encode a frame
         let pcm = vec![100i16; 80];
-        let encoded = codec.encode_frame_unframed(pcm.as_slice().try_into().unwrap()).unwrap();
+        let encoded = codec
+            .encode_frame_unframed(pcm.as_slice().try_into().unwrap())
+            .unwrap();
         assert_eq!(encoded.len(), 10);
 
         // Decode normally
@@ -1145,10 +1156,17 @@ mod tests {
         // G.729 is optimized for speech, not pure tones, so decoded amplitude
         // may be lower than input. Just verify it's not silence.
         let max_amplitude = decoded.iter().map(|&s| s.abs()).max().unwrap();
-        assert!(max_amplitude > 10, "Decoded signal amplitude too low: {}", max_amplitude);
+        assert!(
+            max_amplitude > 10,
+            "Decoded signal amplitude too low: {}",
+            max_amplitude
+        );
 
         // Check that there's actual signal variation (not all zeros)
         let non_zero_count = decoded.iter().filter(|&&s| s != 0).count();
-        assert!(non_zero_count > decoded.len() / 2, "Decoded signal mostly zeros");
+        assert!(
+            non_zero_count > decoded.len() / 2,
+            "Decoded signal mostly zeros"
+        );
     }
 }

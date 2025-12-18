@@ -1,8 +1,8 @@
 //! ICE Candidate types and structures (RFC 8445)
 
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use std::fmt;
+use std::net::IpAddr;
 
 /// ICE candidate type as per RFC 8445 Section 5.1
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,7 +322,8 @@ mod tests {
     fn test_candidate_priority() {
         // Host candidate should have highest priority
         let host_priority = IceCandidate::compute_priority(CandidateType::Host, 65535, 1);
-        let srflx_priority = IceCandidate::compute_priority(CandidateType::ServerReflexive, 65535, 1);
+        let srflx_priority =
+            IceCandidate::compute_priority(CandidateType::ServerReflexive, 65535, 1);
         let relay_priority = IceCandidate::compute_priority(CandidateType::Relay, 65535, 1);
 
         assert!(host_priority > srflx_priority);

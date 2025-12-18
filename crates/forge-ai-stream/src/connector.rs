@@ -176,7 +176,11 @@ pub trait AIConnector: Send + Sync {
     async fn next_event(&mut self) -> Result<Option<AIEvent>>;
 
     /// Send a function call response
-    async fn send_function_response(&mut self, call_id: impl Into<String> + Send, output: impl Into<String> + Send) -> Result<()>;
+    async fn send_function_response(
+        &mut self,
+        call_id: impl Into<String> + Send,
+        output: impl Into<String> + Send,
+    ) -> Result<()>;
 
     /// Interrupt the current AI response (barge-in)
     async fn interrupt(&mut self) -> Result<()>;

@@ -8,9 +8,7 @@
 //! Set environment variable:
 //!   export OPENAI_API_KEY=sk-...
 
-use forge_ai_stream::{
-    AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector,
-};
+use forge_ai_stream::{AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector};
 use forge_core::SecureString;
 use std::env;
 use std::time::Duration;
@@ -21,8 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     // Get API key from environment
-    let api_key = env::var("OPENAI_API_KEY")
-        .expect("OPENAI_API_KEY environment variable not set");
+    let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY environment variable not set");
 
     // Configure the AI connector
     let config = AIConnectorConfig {
@@ -70,20 +67,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     AIEvent::Connected { session_id } => {
                         println!("✓ Session created: {}", session_id);
                     }
-                    AIEvent::AudioResponse { audio_data, sample_rate, .. } => {
-                        println!("♪ Received audio: {} samples at {}Hz",
-                            audio_data.len(), sample_rate);
+                    AIEvent::AudioResponse {
+                        audio_data,
+                        sample_rate,
+                        ..
+                    } => {
+                        println!(
+                            "♪ Received audio: {} samples at {}Hz",
+                            audio_data.len(),
+                            sample_rate
+                        );
                         // In a real app, play this audio through speakers
                     }
                     AIEvent::Transcript { segment } => {
-                        println!("💬 Transcript ({}): {}",
+                        println!(
+                            "💬 Transcript ({}): {}",
                             if segment.is_final { "final" } else { "partial" },
-                            segment.text);
+                            segment.text
+                        );
                     }
-                    AIEvent::VadStateChange { is_speech, confidence } => {
-                        println!("🎤 VAD: {} (confidence: {:.2})",
+                    AIEvent::VadStateChange {
+                        is_speech,
+                        confidence,
+                    } => {
+                        println!(
+                            "🎤 VAD: {} (confidence: {:.2})",
                             if is_speech { "SPEECH" } else { "SILENCE" },
-                            confidence);
+                            confidence
+                        );
                     }
                     AIEvent::Error { message, code } => {
                         eprintln!("❌ Error: {} (code: {:?})", message, code);

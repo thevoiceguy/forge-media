@@ -346,7 +346,9 @@ impl DtmfCommandHandler {
         // If we found a participant command, check if digits could also be a host command prefix
         if let Some(cmd) = participant_command {
             // Check if this is also a prefix of a longer host command
-            if self.is_host_command_prefix(digits) && digits.len() < self.longest_host_command_length() {
+            if self.is_host_command_prefix(digits)
+                && digits.len() < self.longest_host_command_length()
+            {
                 // Ambiguous - could be complete participant command or prefix of host command
                 // Return Incomplete to wait for more digits
                 return Some(DtmfCommand::Incomplete);
@@ -363,7 +365,8 @@ impl DtmfCommandHandler {
         let is_kick = digits.starts_with(&self.config.host_commands.kick_prefix)
             && digits.len() > self.config.host_commands.kick_prefix.len();
 
-        let is_host_command = is_mute_all || is_unmute_all || is_lock || is_unlock || is_end_conference || is_kick;
+        let is_host_command =
+            is_mute_all || is_unmute_all || is_lock || is_unlock || is_end_conference || is_kick;
 
         if is_host_command {
             if role == ParticipantRole::Host {
@@ -512,7 +515,7 @@ mod tests {
         assert_eq!(handler.process_digit("alice", '*'), None);
         assert_eq!(handler.process_digit("alice", '9'), None);
         let result = handler.process_digit("alice", '1'); // *91 = mute all
-        // Should prompt for PIN
+                                                          // Should prompt for PIN
         assert_eq!(result, None); // Entering PIN mode
 
         // Enter correct PIN

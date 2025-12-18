@@ -99,10 +99,7 @@ impl FailoverOrchestrator {
     }
 
     /// Execute the full failover process
-    pub async fn execute_failover<C: RecoveryCallbacks>(
-        &self,
-        callbacks: Arc<C>,
-    ) -> Result<()> {
+    pub async fn execute_failover<C: RecoveryCallbacks>(&self, callbacks: Arc<C>) -> Result<()> {
         info!("Starting failover process");
 
         // Phase 1: Detecting
@@ -181,10 +178,7 @@ impl FailoverOrchestrator {
                             debug!("Recovered session: {}", session_state.call_id);
                         }
                         Err(e) => {
-                            error!(
-                                "Failed to recover session {}: {}",
-                                session_state.call_id, e
-                            );
+                            error!("Failed to recover session {}: {}", session_state.call_id, e);
                             stats.sessions_failed += 1;
                         }
                     }
@@ -304,7 +298,10 @@ impl FailoverOrchestrator {
                         break;
                     }
                     Err(e) => {
-                        error!("Failover failed: {} - will retry on next failure detection", e);
+                        error!(
+                            "Failover failed: {} - will retry on next failure detection",
+                            e
+                        );
                         // Continue monitoring - another standby may have won the election
                         // or the failure may be transient
                     }
@@ -316,10 +313,7 @@ impl FailoverOrchestrator {
     }
 
     /// Manual failover (graceful transfer)
-    pub async fn manual_failover<C: RecoveryCallbacks>(
-        &self,
-        callbacks: Arc<C>,
-    ) -> Result<()> {
+    pub async fn manual_failover<C: RecoveryCallbacks>(&self, callbacks: Arc<C>) -> Result<()> {
         info!("Initiating manual failover");
 
         // Check current state

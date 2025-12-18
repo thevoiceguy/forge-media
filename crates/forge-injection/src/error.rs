@@ -59,12 +59,8 @@ impl From<symphonia::core::errors::Error> for InjectionError {
         use symphonia::core::errors::Error;
         match err {
             Error::IoError(e) => InjectionError::IoError(e),
-            Error::Unsupported(_) => {
-                InjectionError::UnsupportedFormat(err.to_string())
-            }
-            Error::DecodeError(_) => {
-                InjectionError::DecodingError(err.to_string())
-            }
+            Error::Unsupported(_) => InjectionError::UnsupportedFormat(err.to_string()),
+            Error::DecodeError(_) => InjectionError::DecodingError(err.to_string()),
             _ => InjectionError::Internal(err.to_string()),
         }
     }

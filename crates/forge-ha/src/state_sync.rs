@@ -218,7 +218,10 @@ impl PortPoolStateSync {
     /// Load allocated ports from Redis
     pub async fn load(redis: &RedisHAClient, instance_id: &str) -> Result<Option<Vec<u16>>> {
         let key = format!("ports:{}", instance_id);
-        debug!("Loading allocated ports for instance {} from Redis", instance_id);
+        debug!(
+            "Loading allocated ports for instance {} from Redis",
+            instance_id
+        );
 
         let ports: Option<Vec<u16>> = redis.get(&key).await?;
 
@@ -234,7 +237,10 @@ impl PortPoolStateSync {
     /// Delete port allocations from Redis
     pub async fn delete(redis: &RedisHAClient, instance_id: &str) -> Result<()> {
         let key = format!("ports:{}", instance_id);
-        debug!("Deleting port allocations for instance {} from Redis", instance_id);
+        debug!(
+            "Deleting port allocations for instance {} from Redis",
+            instance_id
+        );
 
         redis.del(&key).await?;
 
@@ -278,10 +284,7 @@ impl BatchUpdateCoordinator {
             }
         }
 
-        debug!(
-            "Batch updated statistics for {} sessions",
-            success_count
-        );
+        debug!("Batch updated statistics for {} sessions", success_count);
         Ok(success_count)
     }
 

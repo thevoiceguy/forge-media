@@ -143,12 +143,8 @@ mod integration_tests {
         assert_eq!(outputs.len(), 1);
 
         // End
-        let end_event = DtmfEvent::with_duration(
-            DtmfDigit::Five,
-            DtmfEventType::End,
-            DtmfMethod::Inband,
-            120,
-        );
+        let end_event =
+            DtmfEvent::with_duration(DtmfDigit::Five, DtmfEventType::End, DtmfMethod::Inband, 120);
         let outputs = relay.process_event(end_event).unwrap();
         assert_eq!(outputs.len(), 3); // 3 copies as per RFC
     }

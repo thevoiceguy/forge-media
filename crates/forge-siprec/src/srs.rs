@@ -3,11 +3,11 @@
 //! The SRS receives SIPREC sessions from SRCs and stores the recorded media
 //! along with metadata.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use dashmap::DashMap;
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
@@ -236,12 +236,9 @@ impl SessionRecordingServer {
         let recording_path = self.generate_recording_path(&session_id);
 
         // Create active recording
-        let recording = ActiveRecording::new(
-            session_id.clone(),
-            metadata.clone(),
-            recording_path.clone(),
-        )
-        .await?;
+        let recording =
+            ActiveRecording::new(session_id.clone(), metadata.clone(), recording_path.clone())
+                .await?;
 
         let recording_arc = Arc::new(RwLock::new(recording));
         self.active_recordings
@@ -266,11 +263,7 @@ impl SessionRecordingServer {
     }
 
     /// Receive and store an RTP packet
-    pub async fn receive_rtp_packet(
-        &self,
-        session_id: &str,
-        packet_data: &[u8],
-    ) -> Result<()> {
+    pub async fn receive_rtp_packet(&self, session_id: &str, packet_data: &[u8]) -> Result<()> {
         let recording = self
             .active_recordings
             .get(session_id)
@@ -361,11 +354,7 @@ impl SessionRecordingServer {
     }
 
     /// Store metadata to disk
-    async fn store_metadata(
-        &self,
-        session_id: &str,
-        metadata: &RecordingSession,
-    ) -> Result<()> {
+    async fn store_metadata(&self, session_id: &str, metadata: &RecordingSession) -> Result<()> {
         let metadata_path = self.config.storage_path.join(format!("{}.xml", session_id));
 
         let xml = metadata
@@ -383,8 +372,7 @@ impl SessionRecordingServer {
 
         let xml = tokio::fs::read_to_string(&metadata_path).await?;
 
-        RecordingSession::from_xml(&xml)
-            .map_err(|e| SrsError::Metadata(e.to_string()))
+        RecordingSession::from_xml(&xml).map_err(|e| SrsError::Metadata(e.to_string()))
     }
 
     /// Get the dialog manager
@@ -507,7 +495,10 @@ mod tests {
         // Load metadata back
         let loaded_metadata = srs.load_metadata("test-session-4").await.unwrap();
         assert_eq!(loaded_metadata.session_id, metadata.session_id);
-        assert_eq!(loaded_metadata.participants.len(), metadata.participants.len());
+        assert_eq!(
+            loaded_metadata.participants.len(),
+            metadata.participants.len()
+        );
         assert_eq!(loaded_metadata.streams.len(), metadata.streams.len());
 
         srs.stop_session("test-session-4").await.unwrap();
@@ -536,6 +527,9 @@ mod tests {
         // Third session should fail
         let result = srs.accept_session("limit-session-3", metadata3, None).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SrsError::SessionLimitReached(2)));
+        assert!(matches!(
+            result.unwrap_err(),
+            SrsError::SessionLimitReached(2)
+        ));
     }
 }

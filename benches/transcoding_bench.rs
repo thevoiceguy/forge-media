@@ -4,7 +4,10 @@
 //! for various codec pairs to ensure we meet the <5ms target.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use forge_codecs::{g711::{G711ALaw, G711MuLaw}, AudioCodec, AudioCodecType, AudioFormat};
+use forge_codecs::{
+    g711::{G711ALaw, G711MuLaw},
+    AudioCodec, AudioCodecType, AudioFormat,
+};
 use forge_resampler::Resampler;
 use forge_transcoder::Transcoder;
 
@@ -67,8 +70,13 @@ fn bench_pcmu_to_pcma(c: &mut Criterion) {
 
     group.bench_function("pcmu_to_pcma", |b| {
         b.iter(|| {
-            let mut transcoder = Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
-            black_box(transcoder.transcode(black_box(&pcmu_frame)).expect("Transcode failed"))
+            let mut transcoder =
+                Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
+            black_box(
+                transcoder
+                    .transcode(black_box(&pcmu_frame))
+                    .expect("Transcode failed"),
+            )
         });
     });
 
@@ -87,8 +95,13 @@ fn bench_pcma_to_pcmu(c: &mut Criterion) {
 
     group.bench_function("pcma_to_pcmu", |b| {
         b.iter(|| {
-            let mut transcoder = Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
-            black_box(transcoder.transcode(black_box(&pcma_frame)).expect("Transcode failed"))
+            let mut transcoder =
+                Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
+            black_box(
+                transcoder
+                    .transcode(black_box(&pcma_frame))
+                    .expect("Transcode failed"),
+            )
         });
     });
 
@@ -108,8 +121,13 @@ fn bench_opus_to_pcmu(c: &mut Criterion) {
 
     group.bench_function("opus_to_pcmu", |b| {
         b.iter(|| {
-            let mut transcoder = Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
-            black_box(transcoder.transcode(black_box(&opus_frame)).expect("Transcode failed"))
+            let mut transcoder =
+                Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
+            black_box(
+                transcoder
+                    .transcode(black_box(&opus_frame))
+                    .expect("Transcode failed"),
+            )
         });
     });
 
@@ -129,8 +147,13 @@ fn bench_pcmu_to_opus(c: &mut Criterion) {
 
     group.bench_function("pcmu_to_opus", |b| {
         b.iter(|| {
-            let mut transcoder = Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
-            black_box(transcoder.transcode(black_box(&pcmu_frame)).expect("Transcode failed"))
+            let mut transcoder =
+                Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
+            black_box(
+                transcoder
+                    .transcode(black_box(&pcmu_frame))
+                    .expect("Transcode failed"),
+            )
         });
     });
 
@@ -147,7 +170,11 @@ fn bench_resampling_8k_to_48k(c: &mut Criterion) {
     group.bench_function("8khz_to_48khz", |b| {
         b.iter(|| {
             let mut resampler = Resampler::new(8000, 48000, 1).expect("Failed to create resampler");
-            black_box(resampler.resample(black_box(&samples)).expect("Resample failed"))
+            black_box(
+                resampler
+                    .resample(black_box(&samples))
+                    .expect("Resample failed"),
+            )
         });
     });
 
@@ -164,7 +191,11 @@ fn bench_resampling_48k_to_8k(c: &mut Criterion) {
     group.bench_function("48khz_to_8khz", |b| {
         b.iter(|| {
             let mut resampler = Resampler::new(48000, 8000, 1).expect("Failed to create resampler");
-            black_box(resampler.resample(black_box(&samples)).expect("Resample failed"))
+            black_box(
+                resampler
+                    .resample(black_box(&samples))
+                    .expect("Resample failed"),
+            )
         });
     });
 
@@ -181,7 +212,11 @@ fn bench_decode_pcmu(c: &mut Criterion) {
     group.bench_function("pcmu", |b| {
         b.iter(|| {
             let mut decoder = G711MuLaw::new(8000);
-            black_box(decoder.decode(black_box(&pcmu_frame)).expect("Decode failed"))
+            black_box(
+                decoder
+                    .decode(black_box(&pcmu_frame))
+                    .expect("Decode failed"),
+            )
         });
     });
 
@@ -240,10 +275,15 @@ fn bench_sustained_transcoding(c: &mut Criterion) {
         b.iter(|| {
             let src_format = AudioFormat::new(8000, 1, AudioCodecType::PCMU);
             let dst_format = AudioFormat::new(8000, 1, AudioCodecType::PCMA);
-            let mut transcoder = Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
+            let mut transcoder =
+                Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
 
             for frame in &pcmu_frames {
-                black_box(transcoder.transcode(black_box(frame)).expect("Transcode failed"));
+                black_box(
+                    transcoder
+                        .transcode(black_box(frame))
+                        .expect("Transcode failed"),
+                );
             }
         });
     });
@@ -260,11 +300,16 @@ fn bench_reusable_transcoder(c: &mut Criterion) {
     group.bench_function("pcmu_to_pcma_reuse", |b| {
         let src_format = AudioFormat::new(8000, 1, AudioCodecType::PCMU);
         let dst_format = AudioFormat::new(8000, 1, AudioCodecType::PCMA);
-        let mut transcoder = Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
+        let mut transcoder =
+            Transcoder::new(src_format, dst_format).expect("Failed to create transcoder");
 
         b.iter(|| {
             // Benchmark just the transcode operation, not the transcoder creation
-            black_box(transcoder.transcode(black_box(&pcmu_frame)).expect("Transcode failed"))
+            black_box(
+                transcoder
+                    .transcode(black_box(&pcmu_frame))
+                    .expect("Transcode failed"),
+            )
         });
     });
 

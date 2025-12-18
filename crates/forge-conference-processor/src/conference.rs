@@ -2,10 +2,12 @@
 //!
 //! Manages multi-party audio conferences with mixing and recording
 
-use crate::{AudioFormat, ConferenceError, Result};
-use crate::dtmf_commands::{ConferenceDtmfConfig, DtmfCommand, DtmfCommandHandler, ParticipantRole};
+use crate::dtmf_commands::{
+    ConferenceDtmfConfig, DtmfCommand, DtmfCommandHandler, ParticipantRole,
+};
 use crate::pin_auth::PinAuthenticator;
 use crate::room_config::EffectiveRoomConfig;
+use crate::{AudioFormat, ConferenceError, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
 use forge_core::{CallId, DtmfEventKind, EventBus, ForgeEvent};
@@ -134,9 +136,7 @@ impl ConferenceRoom {
 
         if has_sounds {
             // Create audio feedback player with room's sample rate
-            let player = crate::audio_feedback::AudioFeedbackPlayer::new(
-                self.format.sample_rate
-            );
+            let player = crate::audio_feedback::AudioFeedbackPlayer::new(self.format.sample_rate);
 
             // Load all configured sounds
             let sounds = crate::audio_feedback::ConferenceSounds::load_from_config(
@@ -148,14 +148,18 @@ impl ConferenceRoom {
             *self.conference_sounds.write() = Some(sounds);
 
             // Add audio feedback as a virtual participant to the mixer
-            self.mixer.add_participant(AUDIO_FEEDBACK_PARTICIPANT_ID, None)?;
+            self.mixer
+                .add_participant(AUDIO_FEEDBACK_PARTICIPANT_ID, None)?;
 
             info!("Audio feedback enabled for room {}", self.id);
         }
 
         debug!(
             "Room {} configured: require_guest_pin={}, default_locked={}, audio_feedback={}",
-            self.id, effective_config.security.require_guest_pin, effective_config.security.default_locked, has_sounds
+            self.id,
+            effective_config.security.require_guest_pin,
+            effective_config.security.default_locked,
+            has_sounds
         );
 
         Ok(())
@@ -290,7 +294,8 @@ impl ConferenceRoom {
         let config = self.room_config.read();
         if let Some(cfg) = config.as_ref() {
             if cfg.max_channels > 0 {
-                let current_count = self.mixer.participant_count() + self.waiting_participants.len();
+                let current_count =
+                    self.mixer.participant_count() + self.waiting_participants.len();
                 return current_count >= cfg.max_channels;
             }
         }
@@ -312,7 +317,10 @@ impl ConferenceRoom {
 
         // Check if conference is locked
         if *self.is_locked.read() {
-            warn!("Participant {} denied entry - room {} is locked", participant_id, self.id);
+            warn!(
+                "Participant {} denied entry - room {} is locked",
+                participant_id, self.id
+            );
             return Err(ConferenceError::ConferenceLocked);
         }
 
@@ -323,7 +331,8 @@ impl ConferenceRoom {
         // Check capacity limits (if configured)
         if let Some(cfg) = config {
             if cfg.max_channels > 0 {
-                let current_count = self.mixer.participant_count() + self.waiting_participants.len();
+                let current_count =
+                    self.mixer.participant_count() + self.waiting_participants.len();
                 if current_count >= cfg.max_channels {
                     warn!(
                         "Participant {} denied entry - room {} is full ({}/{})",
@@ -375,7 +384,8 @@ impl ConferenceRoom {
             return;
         }
 
-        let waiting: Vec<String> = self.waiting_participants
+        let waiting: Vec<String> = self
+            .waiting_participants
             .iter()
             .map(|entry| entry.key().clone())
             .collect();
@@ -760,7 +770,8 @@ impl ConferenceRoom {
         } // read guard dropped here
 
         // Add AI participant to mixer
-        self.mixer.add_participant(ai_manager.participant_id(), None)?;
+        self.mixer
+            .add_participant(ai_manager.participant_id(), None)?;
 
         // Start AI manager (spawns audio routing tasks) - no lock held
         if let Err(err) = ai_manager.start(Arc::clone(self), event_bus).await {
@@ -785,9 +796,9 @@ impl ConferenceRoom {
         // Extract ai_manager in a scoped block to ensure the write guard is dropped
         let ai_manager = {
             let mut guard = self.ai_manager.write();
-            guard.take().ok_or_else(|| {
-                ConferenceError::NoAIAttached(self.id.clone())
-            })?
+            guard
+                .take()
+                .ok_or_else(|| ConferenceError::NoAIAttached(self.id.clone()))?
         }; // write guard dropped here
 
         // Stop AI manager (this will abort tasks)
@@ -813,7 +824,10 @@ impl ConferenceRoom {
 
     /// Get AI configuration if attached
     pub fn ai_config(&self) -> Option<crate::ai_manager::ConferenceAIConfig> {
-        self.ai_manager.read().as_ref().map(|ai| ai.config().clone())
+        self.ai_manager
+            .read()
+            .as_ref()
+            .map(|ai| ai.config().clone())
     }
 
     // ============================================================================
@@ -876,7 +890,9 @@ impl ConferenceRoom {
 
     /// Look up participant_id for a given call_id (used for DTMF scoping)
     pub(crate) fn participant_id_for_call_id(&self, call_id: &CallId) -> Option<String> {
-        self.call_id_map.get(call_id).map(|entry| entry.value().clone())
+        self.call_id_map
+            .get(call_id)
+            .map(|entry| entry.value().clone())
     }
 
     /// Unregister a participant's call_id
@@ -983,7 +999,10 @@ impl ConferenceRoom {
             );
 
             // Execute the command
-            if let Err(e) = self.execute_dtmf_command(participant_id, command, role).await {
+            if let Err(e) = self
+                .execute_dtmf_command(participant_id, command, role)
+                .await
+            {
                 warn!(
                     "Failed to execute DTMF command for {} in room {}: {}",
                     participant_id, self.id, e
@@ -1011,7 +1030,8 @@ impl ConferenceRoom {
                     ParticipantState::Muted => ParticipantState::Active,
                     other => other, // Keep OnHold as is
                 };
-                self.mixer.set_participant_state(participant_id, new_state)?;
+                self.mixer
+                    .set_participant_state(participant_id, new_state)?;
                 info!(
                     "Toggled mute for {} in room {}: {:?}",
                     participant_id, self.id, new_state
@@ -1055,7 +1075,10 @@ impl ConferenceRoom {
             // Host commands (require host role)
             DtmfCommand::MuteAll => {
                 if role != ParticipantRole::Host {
-                    warn!("Non-host {} tried to use MuteAll in room {}", participant_id, self.id);
+                    warn!(
+                        "Non-host {} tried to use MuteAll in room {}",
+                        participant_id, self.id
+                    );
                     return Ok(());
                 }
 
@@ -1063,15 +1086,22 @@ impl ConferenceRoom {
                 let participants = self.participants();
                 for pid in participants {
                     if pid != participant_id {
-                        self.mixer.set_participant_state(&pid, ParticipantState::Muted)?;
+                        self.mixer
+                            .set_participant_state(&pid, ParticipantState::Muted)?;
                     }
                 }
-                info!("Host {} muted all participants in room {}", participant_id, self.id);
+                info!(
+                    "Host {} muted all participants in room {}",
+                    participant_id, self.id
+                );
             }
 
             DtmfCommand::UnmuteAll => {
                 if role != ParticipantRole::Host {
-                    warn!("Non-host {} tried to use UnmuteAll in room {}", participant_id, self.id);
+                    warn!(
+                        "Non-host {} tried to use UnmuteAll in room {}",
+                        participant_id, self.id
+                    );
                     return Ok(());
                 }
 
@@ -1080,10 +1110,14 @@ impl ConferenceRoom {
                 for pid in participants {
                     let metadata = self.mixer.get_participant_metadata(&pid)?;
                     if metadata.state == ParticipantState::Muted {
-                        self.mixer.set_participant_state(&pid, ParticipantState::Active)?;
+                        self.mixer
+                            .set_participant_state(&pid, ParticipantState::Active)?;
                     }
                 }
-                info!("Host {} unmuted all participants in room {}", participant_id, self.id);
+                info!(
+                    "Host {} unmuted all participants in room {}",
+                    participant_id, self.id
+                );
             }
 
             DtmfCommand::LockConference => {
@@ -1097,7 +1131,10 @@ impl ConferenceRoom {
 
             DtmfCommand::UnlockConference => {
                 if role != ParticipantRole::Host {
-                    warn!("Non-host {} tried to unlock room {}", participant_id, self.id);
+                    warn!(
+                        "Non-host {} tried to unlock room {}",
+                        participant_id, self.id
+                    );
                     return Ok(());
                 }
 
@@ -1106,7 +1143,10 @@ impl ConferenceRoom {
 
             DtmfCommand::KickParticipant(participant_num) => {
                 if role != ParticipantRole::Host {
-                    warn!("Non-host {} tried to kick participant in room {}", participant_id, self.id);
+                    warn!(
+                        "Non-host {} tried to kick participant in room {}",
+                        participant_id, self.id
+                    );
                     return Ok(());
                 }
 
@@ -1131,7 +1171,10 @@ impl ConferenceRoom {
 
             DtmfCommand::EndConference => {
                 if role != ParticipantRole::Host {
-                    warn!("Non-host {} tried to end conference {}", participant_id, self.id);
+                    warn!(
+                        "Non-host {} tried to end conference {}",
+                        participant_id, self.id
+                    );
                     return Ok(());
                 }
 
@@ -1144,12 +1187,18 @@ impl ConferenceRoom {
             }
 
             DtmfCommand::InvalidCommand => {
-                debug!("Invalid DTMF command from {} in room {}", participant_id, self.id);
+                debug!(
+                    "Invalid DTMF command from {} in room {}",
+                    participant_id, self.id
+                );
                 // TODO: Play error tone
             }
 
             DtmfCommand::EnterHostPin => {
-                debug!("Host PIN accepted for {} in room {}", participant_id, self.id);
+                debug!(
+                    "Host PIN accepted for {} in room {}",
+                    participant_id, self.id
+                );
                 // TODO: Play success tone
             }
 
@@ -1171,7 +1220,10 @@ impl ConferenceRoom {
         }
 
         // Write samples to the audio feedback participant
-        if let Err(e) = self.mixer.write_samples(AUDIO_FEEDBACK_PARTICIPANT_ID, samples) {
+        if let Err(e) = self
+            .mixer
+            .write_samples(AUDIO_FEEDBACK_PARTICIPANT_ID, samples)
+        {
             warn!("Failed to play sound in room {}: {}", self.id, e);
         }
     }
@@ -1354,7 +1406,12 @@ impl ConferenceBridge {
     }
 
     /// Add a participant to a room
-    pub fn add_participant_to_room(&self, room_id: &str, participant_id: &str, is_host: bool) -> Result<()> {
+    pub fn add_participant_to_room(
+        &self,
+        room_id: &str,
+        participant_id: &str,
+        is_host: bool,
+    ) -> Result<()> {
         let room = self.get_room(room_id)?;
         room.add_participant(participant_id, is_host)
     }
@@ -1441,9 +1498,15 @@ mod tests {
         assert!(bridge.list_rooms().contains(&"room-1".to_string()));
 
         // Add participants
-        bridge.add_participant_to_room("room-1", "alice", false).unwrap();
-        bridge.add_participant_to_room("room-1", "bob", false).unwrap();
-        bridge.add_participant_to_room("room-2", "charlie", false).unwrap();
+        bridge
+            .add_participant_to_room("room-1", "alice", false)
+            .unwrap();
+        bridge
+            .add_participant_to_room("room-1", "bob", false)
+            .unwrap();
+        bridge
+            .add_participant_to_room("room-2", "charlie", false)
+            .unwrap();
 
         assert_eq!(bridge.total_participants(), 3);
         assert_eq!(room1.participant_count(), 2);

@@ -109,7 +109,8 @@ impl StunMessage {
         let crc = crc32(&buf);
         let fingerprint = crc ^ 0x5354554e; // XOR with "STUN" in ASCII
 
-        self.attributes.push(StunAttribute::Fingerprint(fingerprint));
+        self.attributes
+            .push(StunAttribute::Fingerprint(fingerprint));
     }
 
     /// Serialize message to bytes
@@ -120,7 +121,7 @@ impl StunMessage {
         let mut attr_length = 0;
         for attr in &self.attributes {
             attr_length += 4 + attr.value_len(); // 4-byte attribute header + value
-            // Pad to 4-byte boundary
+                                                 // Pad to 4-byte boundary
             let padding = (4 - (attr.value_len() % 4)) % 4;
             attr_length += padding;
         }
@@ -186,8 +187,9 @@ impl StunMessage {
             )));
         }
 
-        let message_type = MessageType::from_u16(msg_type)
-            .ok_or_else(|| ForgeError::Ice(format!("Unknown STUN message type: {:#x}", msg_type)))?;
+        let message_type = MessageType::from_u16(msg_type).ok_or_else(|| {
+            ForgeError::Ice(format!("Unknown STUN message type: {:#x}", msg_type))
+        })?;
 
         // Parse attributes
         let mut attributes = Vec::new();
@@ -204,7 +206,8 @@ impl StunMessage {
             }
 
             let attr_type = u16::from_be_bytes([attr_data[offset], attr_data[offset + 1]]);
-            let attr_len = u16::from_be_bytes([attr_data[offset + 2], attr_data[offset + 3]]) as usize;
+            let attr_len =
+                u16::from_be_bytes([attr_data[offset + 2], attr_data[offset + 3]]) as usize;
 
             offset += 4;
 
@@ -276,7 +279,7 @@ impl StunAttribute {
         match self {
             StunAttribute::XorMappedAddress(addr) | StunAttribute::MappedAddress(addr) => {
                 match addr.ip() {
-                    IpAddr::V4(_) => 8, // family(2) + port(2) + ipv4(4)
+                    IpAddr::V4(_) => 8,  // family(2) + port(2) + ipv4(4)
                     IpAddr::V6(_) => 20, // family(2) + port(2) + ipv6(16)
                 }
             }
@@ -330,7 +333,9 @@ fn parse_xor_mapped_address(data: &[u8], transaction_id: &[u8; 12]) -> Result<So
         0x01 => {
             // IPv4
             if data.len() < 8 {
-                return Err(ForgeError::Ice("Invalid XOR-MAPPED-ADDRESS length".to_string()));
+                return Err(ForgeError::Ice(
+                    "Invalid XOR-MAPPED-ADDRESS length".to_string(),
+                ));
             }
             let xor_addr = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
             let addr = xor_addr ^ MAGIC_COOKIE;
@@ -340,7 +345,9 @@ fn parse_xor_mapped_address(data: &[u8], transaction_id: &[u8; 12]) -> Result<So
         0x02 => {
             // IPv6
             if data.len() < 20 {
-                return Err(ForgeError::Ice("Invalid XOR-MAPPED-ADDRESS length".to_string()));
+                return Err(ForgeError::Ice(
+                    "Invalid XOR-MAPPED-ADDRESS length".to_string(),
+                ));
             }
             let mut xor_addr = [0u8; 16];
             xor_addr.copy_from_slice(&data[4..20]);
@@ -357,7 +364,10 @@ fn parse_xor_mapped_address(data: &[u8], transaction_id: &[u8; 12]) -> Result<So
             let ip = Ipv6Addr::from(xor_addr);
             Ok(SocketAddr::new(IpAddr::V6(ip), port))
         }
-        _ => Err(ForgeError::Ice(format!("Unknown address family: {}", family))),
+        _ => Err(ForgeError::Ice(format!(
+            "Unknown address family: {}",
+            family
+        ))),
     }
 }
 
@@ -387,7 +397,10 @@ fn parse_mapped_address(data: &[u8]) -> Result<SocketAddr> {
             let ip = Ipv6Addr::from(addr);
             Ok(SocketAddr::new(IpAddr::V6(ip), port))
         }
-        _ => Err(ForgeError::Ice(format!("Unknown address family: {}", family))),
+        _ => Err(ForgeError::Ice(format!(
+            "Unknown address family: {}",
+            family
+        ))),
     }
 }
 
@@ -512,7 +525,10 @@ impl StunClient {
         let response_bytes = match timeout(self.timeout, self.socket.recv(&mut buf)).await {
             Ok(Ok(len)) => &buf[..len],
             Ok(Err(e)) => {
-                return Err(ForgeError::Ice(format!("Failed to receive STUN response: {}", e)));
+                return Err(ForgeError::Ice(format!(
+                    "Failed to receive STUN response: {}",
+                    e
+                )));
             }
             Err(_) => {
                 return Err(ForgeError::Ice("STUN request timeout".to_string()));
@@ -529,7 +545,10 @@ impl StunClient {
 
         // Check message type
         if response.message_type != MessageType::BindingResponse {
-            warn!("Received non-success STUN response: {:?}", response.message_type);
+            warn!(
+                "Received non-success STUN response: {:?}",
+                response.message_type
+            );
             return Err(ForgeError::Ice("STUN binding failed".to_string()));
         }
 

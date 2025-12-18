@@ -167,7 +167,7 @@ impl ForwardingEngine {
 
                             // Publish event to EventBus
                             if let Some(bus) = session.event_bus() {
-                                bus.publish(event.to_forge_event(call_id.clone()));
+                                let _ = bus.publish(event.to_forge_event(call_id.clone()));
                             }
                         } else {
                             tracing::debug!(
@@ -255,7 +255,11 @@ impl ForwardingEngine {
                     if ai_manager.has_ai(call_id) {
                         // Send audio samples to AI
                         if let Err(e) = ai_manager.send_audio(call_id, &pcm_samples).await {
-                            tracing::debug!("Failed to send audio to AI for session {}: {}", call_id.0, e);
+                            tracing::debug!(
+                                "Failed to send audio to AI for session {}: {}",
+                                call_id.0,
+                                e
+                            );
                         }
                     }
                 }
@@ -280,7 +284,7 @@ impl ForwardingEngine {
 
                                 // Publish event to EventBus
                                 if let Some(bus) = session.event_bus() {
-                                    bus.publish(event.to_forge_event(call_id.clone()));
+                                    let _ = bus.publish(event.to_forge_event(call_id.clone()));
                                 }
                             } else {
                                 tracing::debug!(
@@ -713,10 +717,7 @@ impl ForwardingEngine {
         let base_seq_num: u16 = rand::random();
 
         // Send AI audio to both participants
-        for (side, participant) in [
-            (Side::A, participant_a),
-            (Side::B, participant_b),
-        ] {
+        for (side, participant) in [(Side::A, participant_a), (Side::B, participant_b)] {
             let p = participant.read().await;
 
             // Skip if participant doesn't have a remote address yet
@@ -790,17 +791,12 @@ impl ForwardingEngine {
                     }
                     #[cfg(not(feature = "opus"))]
                     {
-                        tracing::warn!(
-                            "Cannot encode AI audio to Opus - opus feature not enabled"
-                        );
+                        tracing::warn!("Cannot encode AI audio to Opus - opus feature not enabled");
                         continue;
                     }
                 }
                 _ => {
-                    tracing::warn!(
-                        "Unsupported codec for AI audio: {:?}",
-                        codec
-                    );
+                    tracing::warn!("Unsupported codec for AI audio: {:?}", codec);
                     continue;
                 }
             };

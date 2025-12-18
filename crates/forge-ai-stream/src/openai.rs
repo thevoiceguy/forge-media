@@ -2,7 +2,9 @@
 //!
 //! Client for OpenAI's Realtime API for voice conversations.
 
-use crate::connector::{AIConnector, AIConnectorConfig, AIConnectorType, AISession, AISessionState};
+use crate::connector::{
+    AIConnector, AIConnectorConfig, AIConnectorType, AISession, AISessionState,
+};
 use crate::events::{AIEvent, SessionConfig};
 use crate::{AIStreamError, AIStreamStats, Result};
 use async_trait::async_trait;
@@ -71,9 +73,9 @@ impl OpenAIConnector {
 
     /// Parse incoming WebSocket message into AIEvent
     fn parse_event(&mut self, msg: Value) -> Result<Option<AIEvent>> {
-        let event_type = msg["type"].as_str().ok_or_else(|| {
-            AIStreamError::Protocol("Missing event type in message".to_string())
-        })?;
+        let event_type = msg["type"]
+            .as_str()
+            .ok_or_else(|| AIStreamError::Protocol("Missing event type in message".to_string()))?;
 
         match event_type {
             "session.created" => {
@@ -105,7 +107,8 @@ impl OpenAIConnector {
                     item_id: msg["item_id"].as_str().map(|s| s.to_string()),
                 }))
             }
-            "response.audio_transcript.delta" | "conversation.item.input_audio_transcription.completed" => {
+            "response.audio_transcript.delta"
+            | "conversation.item.input_audio_transcription.completed" => {
                 let transcript = msg["delta"]
                     .as_str()
                     .or_else(|| msg["transcript"].as_str())
@@ -147,8 +150,10 @@ impl OpenAIConnector {
                     .to_string();
 
                 let arguments_str = msg["arguments"].as_str().unwrap_or("{}");
-                let arguments: serde_json::Value = serde_json::from_str(arguments_str)
-                    .map_err(|e| AIStreamError::Protocol(format!("Invalid function arguments: {}", e)))?;
+                let arguments: serde_json::Value =
+                    serde_json::from_str(arguments_str).map_err(|e| {
+                        AIStreamError::Protocol(format!("Invalid function arguments: {}", e))
+                    })?;
 
                 let item_id = msg["item_id"].as_str().map(|s| s.to_string());
 
@@ -163,23 +168,16 @@ impl OpenAIConnector {
                     },
                 }))
             }
-            "input_audio_buffer.speech_started" => {
-                Ok(Some(AIEvent::VadStateChange {
-                    is_speech: true,
-                    confidence: 1.0,
-                }))
-            }
-            "input_audio_buffer.speech_stopped" => {
-                Ok(Some(AIEvent::VadStateChange {
-                    is_speech: false,
-                    confidence: 0.0,
-                }))
-            }
+            "input_audio_buffer.speech_started" => Ok(Some(AIEvent::VadStateChange {
+                is_speech: true,
+                confidence: 1.0,
+            })),
+            "input_audio_buffer.speech_stopped" => Ok(Some(AIEvent::VadStateChange {
+                is_speech: false,
+                confidence: 0.0,
+            })),
             "response.cancelled" => {
-                let response_id = msg["response_id"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
+                let response_id = msg["response_id"].as_str().unwrap_or("unknown").to_string();
                 Ok(Some(AIEvent::BargeIn { response_id }))
             }
             "error" => {
@@ -201,9 +199,10 @@ impl OpenAIConnector {
     ///
     /// This creates a conversation item that notifies the AI that the user pressed a digit.
     pub async fn send_dtmf_event(&mut self, digit: char, detection_method: &str) -> Result<()> {
-        let ws = self.ws.as_mut().ok_or_else(|| {
-            AIStreamError::Connection("Not connected".to_string())
-        })?;
+        let ws = self
+            .ws
+            .as_mut()
+            .ok_or_else(|| AIStreamError::Connection("Not connected".to_string()))?;
 
         // Create a message that the AI can understand
         let content = format!("[DTMF: User pressed '{}' via {}]", digit, detection_method);
@@ -222,7 +221,9 @@ impl OpenAIConnector {
 
         ws.send(Message::Text(msg.to_string()))
             .await
-            .map_err(|e: tungstenite::Error| AIStreamError::Connection(format!("Failed to send DTMF event: {}", e)))?;
+            .map_err(|e: tungstenite::Error| {
+                AIStreamError::Connection(format!("Failed to send DTMF event: {}", e))
+            })?;
 
         // Trigger a response from the AI
         let response_msg = json!({
@@ -231,7 +232,9 @@ impl OpenAIConnector {
 
         ws.send(Message::Text(response_msg.to_string()))
             .await
-            .map_err(|e: tungstenite::Error| AIStreamError::Connection(format!("Failed to trigger AI response: {}", e)))?;
+            .map_err(|e: tungstenite::Error| {
+                AIStreamError::Connection(format!("Failed to trigger AI response: {}", e))
+            })?;
 
         self.stats.events_sent += 2;
         Ok(())
@@ -244,7 +247,12 @@ impl OpenAIConnector {
     ///
     /// Note: This sends audio through the normal input_audio_buffer.append mechanism.
     /// The participant label is included in the audio metadata for transcription purposes.
-    pub async fn send_labeled_audio(&mut self, participant_id: &str, audio_data: &[i16], sample_rate: u32) -> Result<()> {
+    pub async fn send_labeled_audio(
+        &mut self,
+        participant_id: &str,
+        audio_data: &[i16],
+        sample_rate: u32,
+    ) -> Result<()> {
         // For now, just send the audio with the participant ID as context
         // OpenAI Realtime API doesn't have native multi-speaker support,
         // so we send audio sequentially and rely on the model to distinguish speakers
@@ -253,8 +261,12 @@ impl OpenAIConnector {
         // In the future, we could prepend a very short text label before each audio chunk,
         // but that may interrupt the audio flow. For now, we just send the audio directly.
 
-        debug!("Sending labeled audio from participant {}: {} samples @ {}Hz",
-               participant_id, audio_data.len(), sample_rate);
+        debug!(
+            "Sending labeled audio from participant {}: {} samples @ {}Hz",
+            participant_id,
+            audio_data.len(),
+            sample_rate
+        );
 
         self.send_audio(audio_data, sample_rate).await
     }
@@ -278,13 +290,13 @@ impl AIConnector for OpenAIConnector {
 
         // Connect to WebSocket
         debug!("Connecting to OpenAI Realtime API: {}", url);
-        let (ws_stream, _) = tokio::time::timeout(
-            self.config.connect_timeout,
-            connect_async(request)
-        )
-        .await
-        .map_err(|_| AIStreamError::Timeout(self.config.connect_timeout))?
-        .map_err(|e| AIStreamError::Connection(format!("WebSocket connection failed: {}", e)))?;
+        let (ws_stream, _) =
+            tokio::time::timeout(self.config.connect_timeout, connect_async(request))
+                .await
+                .map_err(|_| AIStreamError::Timeout(self.config.connect_timeout))?
+                .map_err(|e| {
+                    AIStreamError::Connection(format!("WebSocket connection failed: {}", e))
+                })?;
 
         debug!("WebSocket connected successfully");
         self.ws = Some(ws_stream);
@@ -312,9 +324,9 @@ impl AIConnector for OpenAIConnector {
     async fn disconnect(&mut self) -> Result<()> {
         if let Some(mut ws) = self.ws.take() {
             debug!("Closing WebSocket connection");
-            ws.close(None)
-                .await
-                .map_err(|e| AIStreamError::Connection(format!("Failed to close WebSocket: {}", e)))?;
+            ws.close(None).await.map_err(|e| {
+                AIStreamError::Connection(format!("Failed to close WebSocket: {}", e))
+            })?;
         }
 
         if let Some(session) = &mut self.session {
@@ -325,9 +337,10 @@ impl AIConnector for OpenAIConnector {
     }
 
     async fn send_audio(&mut self, audio_data: &[i16], _sample_rate: u32) -> Result<()> {
-        let ws = self.ws.as_mut().ok_or_else(|| {
-            AIStreamError::Connection("Not connected".to_string())
-        })?;
+        let ws = self
+            .ws
+            .as_mut()
+            .ok_or_else(|| AIStreamError::Connection("Not connected".to_string()))?;
 
         // Convert i16 samples to bytes
         let mut audio_bytes = Vec::with_capacity(audio_data.len() * 2);
@@ -346,7 +359,9 @@ impl AIConnector for OpenAIConnector {
 
         ws.send(Message::Text(msg.to_string()))
             .await
-            .map_err(|e: tungstenite::Error| AIStreamError::Connection(format!("Failed to send audio: {}", e)))?;
+            .map_err(|e: tungstenite::Error| {
+                AIStreamError::Connection(format!("Failed to send audio: {}", e))
+            })?;
 
         self.stats.samples_sent += audio_data.len() as u64;
         self.stats.events_sent += 1;
@@ -355,15 +370,15 @@ impl AIConnector for OpenAIConnector {
     }
 
     async fn next_event(&mut self) -> Result<Option<AIEvent>> {
-        let ws = self.ws.as_mut().ok_or_else(|| {
-            AIStreamError::Connection("Not connected".to_string())
-        })?;
+        let ws = self
+            .ws
+            .as_mut()
+            .ok_or_else(|| AIStreamError::Connection("Not connected".to_string()))?;
 
         match ws.next().await {
             Some(Ok(Message::Text(text))) => {
-                let msg: Value = serde_json::from_str(&text).map_err(|e| {
-                    AIStreamError::Protocol(format!("Failed to parse JSON: {}", e))
-                })?;
+                let msg: Value = serde_json::from_str(&text)
+                    .map_err(|e| AIStreamError::Protocol(format!("Failed to parse JSON: {}", e)))?;
                 self.parse_event(msg)
             }
             Some(Ok(Message::Close(_))) => {
@@ -385,10 +400,15 @@ impl AIConnector for OpenAIConnector {
         }
     }
 
-    async fn send_function_response(&mut self, call_id: impl Into<String> + Send, output: impl Into<String> + Send) -> Result<()> {
-        let ws = self.ws.as_mut().ok_or_else(|| {
-            AIStreamError::Connection("Not connected".to_string())
-        })?;
+    async fn send_function_response(
+        &mut self,
+        call_id: impl Into<String> + Send,
+        output: impl Into<String> + Send,
+    ) -> Result<()> {
+        let ws = self
+            .ws
+            .as_mut()
+            .ok_or_else(|| AIStreamError::Connection("Not connected".to_string()))?;
 
         let msg = json!({
             "type": "conversation.item.create",
@@ -401,16 +421,19 @@ impl AIConnector for OpenAIConnector {
 
         ws.send(Message::Text(msg.to_string()))
             .await
-            .map_err(|e: tungstenite::Error| AIStreamError::Connection(format!("Failed to send function response: {}", e)))?;
+            .map_err(|e: tungstenite::Error| {
+                AIStreamError::Connection(format!("Failed to send function response: {}", e))
+            })?;
 
         self.stats.events_sent += 1;
         Ok(())
     }
 
     async fn interrupt(&mut self) -> Result<()> {
-        let ws = self.ws.as_mut().ok_or_else(|| {
-            AIStreamError::Connection("Not connected".to_string())
-        })?;
+        let ws = self
+            .ws
+            .as_mut()
+            .ok_or_else(|| AIStreamError::Connection("Not connected".to_string()))?;
 
         let msg = json!({
             "type": "response.cancel"
@@ -418,7 +441,9 @@ impl AIConnector for OpenAIConnector {
 
         ws.send(Message::Text(msg.to_string()))
             .await
-            .map_err(|e: tungstenite::Error| AIStreamError::Connection(format!("Failed to send interrupt: {}", e)))?;
+            .map_err(|e: tungstenite::Error| {
+                AIStreamError::Connection(format!("Failed to send interrupt: {}", e))
+            })?;
 
         self.stats.events_sent += 1;
         Ok(())

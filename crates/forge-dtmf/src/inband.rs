@@ -77,11 +77,34 @@ impl GoertzelFilter {
     }
 }
 
-/// Goertzel-based DTMF detector
+/// Goertzel-based DTMF detector with state machine for reliable event emission
+///
+/// # State Transitions
+/// ```text
+/// None → Detecting → Active → None
+///        (< min)    (>= min)
+///
+/// Events:
+/// - Start: Emitted when frames_detected >= min_detection_frames
+/// - Continue: Emitted every 5 frames after Start
+/// - End: Emitted when detection stops (only if Start was emitted)
+/// ```
+///
+/// # Timing Accuracy
+/// Duration is calculated as: `frames_detected × frame_duration_ms`
+/// where `frame_duration_ms = (frame_size / sample_rate) × 1000`
+///
+/// # Example
+/// For 8kHz audio with 160 samples per frame:
+/// - Frame duration = 160/8000 × 1000 = 20ms
+/// - Min detection = 100ms / 20ms = 5 frames
+/// - A 200ms tone press = 10 frames × 20ms = 200ms duration
 pub struct GoertzelDetector {
     /// Sample rate
     #[allow(dead_code)]
     sample_rate: u32,
+    /// Duration of one frame in milliseconds (derived from frame_size/sample_rate)
+    frame_duration_ms: u32,
     /// Low frequency filters
     low_filters: Vec<GoertzelFilter>,
     /// High frequency filters
@@ -100,6 +123,8 @@ pub struct GoertzelDetector {
     frames_detected: u32,
     /// Minimum frames to confirm detection
     min_detection_frames: u32,
+    /// Whether the start event has been emitted for the current digit
+    start_emitted: bool,
 }
 
 impl GoertzelDetector {
@@ -118,6 +143,13 @@ impl GoertzelDetector {
     /// * `sample_rate` - Audio sample rate (e.g., 8000)
     /// * `frame_size` - Number of samples per detection frame (e.g., 160 for 20ms at 8kHz)
     pub fn new(sample_rate: u32, frame_size: usize) -> Self {
+        // Derive frame duration (guard against invalid inputs to avoid division by zero)
+        let frame_duration_ms = (frame_size as u32)
+            .saturating_mul(1000)
+            .checked_div(sample_rate)
+            .unwrap_or(0)
+            .max(1);
+
         let low_filters = LOW_FREQS
             .iter()
             .map(|&freq| GoertzelFilter::new(freq, sample_rate))
@@ -128,12 +160,13 @@ impl GoertzelDetector {
             .map(|&freq| GoertzelFilter::new(freq, sample_rate))
             .collect();
 
-        // Calculate minimum frames for 100ms detection
-        let frame_duration_ms = (frame_size as u32 * 1000) / sample_rate;
-        let min_detection_frames = Self::DEFAULT_MIN_DURATION_MS / frame_duration_ms;
+        // Calculate minimum frames for ~100ms detection (ceiling)
+        let min_detection_frames =
+            (Self::DEFAULT_MIN_DURATION_MS + frame_duration_ms - 1) / frame_duration_ms;
 
         Self {
             sample_rate,
+            frame_duration_ms,
             low_filters,
             high_filters,
             min_samples: frame_size,
@@ -143,6 +176,7 @@ impl GoertzelDetector {
             current_digit: None,
             frames_detected: 0,
             min_detection_frames: min_detection_frames.max(1),
+            start_emitted: false,
         }
     }
 
@@ -224,47 +258,70 @@ impl GoertzelDetector {
             return self.handle_no_detection();
         }
 
-        // Map to DTMF digit
+        // Map to DTMF digit and handle state transition
         let digit = Self::map_frequencies(low_idx, high_idx)?;
+        self.handle_detected_digit(digit)
+    }
 
-        // Check if this is a new digit or continuation
+    /// Handle state transitions for a detected digit (factored for testability)
+    fn handle_detected_digit(&mut self, digit: DtmfDigit) -> Result<Option<DtmfEvent>> {
         if let Some(current) = self.current_digit {
             if current == digit {
-                // Same digit - increment frame count
-                self.frames_detected += 1;
+                self.frames_detected = self.frames_detected.saturating_add(1);
 
-                // Emit Continue event every few frames
-                if self.frames_detected % 5 == 0 {
-                    Ok(Some(DtmfEvent::new(
+                if !self.start_emitted && self.frames_detected >= self.min_detection_frames {
+                    self.start_emitted = true;
+                    return Ok(Some(DtmfEvent::new(
+                        digit,
+                        DtmfEventType::Start,
+                        DtmfMethod::Inband,
+                    )));
+                }
+
+                if self.start_emitted && self.frames_detected % 5 == 0 {
+                    return Ok(Some(DtmfEvent::new(
                         digit,
                         DtmfEventType::Continue,
                         DtmfMethod::Inband,
-                    )))
-                } else {
-                    Ok(None)
+                    )));
                 }
+
+                Ok(None)
             } else {
-                // Different digit - end previous, start new
-                let end_event = DtmfEvent::with_duration(
-                    current,
-                    DtmfEventType::End,
-                    DtmfMethod::Inband,
-                    self.frames_detected * 20, // Approximate ms
-                );
+                // Different digit - end previous (if started), prime state for new digit
+                let end_event = if self.start_emitted {
+                    Some(DtmfEvent::with_duration(
+                        current,
+                        DtmfEventType::End,
+                        DtmfMethod::Inband,
+                        self.frames_detected
+                            .saturating_mul(self.frame_duration_ms),
+                    ))
+                } else {
+                    None
+                };
 
                 self.current_digit = Some(digit);
                 self.frames_detected = 1;
+                self.start_emitted = self.min_detection_frames <= 1;
 
-                // Emit both end and start events
-                Ok(Some(end_event))
+                if self.start_emitted {
+                    return Ok(Some(DtmfEvent::new(
+                        digit,
+                        DtmfEventType::Start,
+                        DtmfMethod::Inband,
+                    )));
+                }
+
+                Ok(end_event)
             }
         } else {
             // New digit detected
             self.current_digit = Some(digit);
             self.frames_detected = 1;
+            self.start_emitted = self.min_detection_frames <= 1;
 
-            // Only emit start event if we've detected enough frames
-            if self.frames_detected >= self.min_detection_frames {
+            if self.start_emitted {
                 Ok(Some(DtmfEvent::new(
                     digit,
                     DtmfEventType::Start,
@@ -280,18 +337,21 @@ impl GoertzelDetector {
     fn handle_no_detection(&mut self) -> Result<Option<DtmfEvent>> {
         if let Some(digit) = self.current_digit.take() {
             // Emit end event only if we had enough valid detections
-            if self.frames_detected >= self.min_detection_frames {
+            if self.start_emitted && self.frames_detected >= self.min_detection_frames {
                 let event = DtmfEvent::with_duration(
                     digit,
                     DtmfEventType::End,
                     DtmfMethod::Inband,
-                    self.frames_detected * 20, // Approximate ms
+                    self.frames_detected
+                        .saturating_mul(self.frame_duration_ms),
                 );
                 self.frames_detected = 0;
+                self.start_emitted = false;
                 Ok(Some(event))
             } else {
-                // Too short, ignore
+                // Too short or never started, ignore
                 self.frames_detected = 0;
+                self.start_emitted = false;
                 Ok(None)
             }
         } else {
@@ -353,6 +413,7 @@ impl DtmfDetector for GoertzelDetector {
         self.sample_count = 0;
         self.current_digit = None;
         self.frames_detected = 0;
+        self.start_emitted = false;
     }
 
     fn method(&self) -> DtmfMethod {
@@ -424,5 +485,126 @@ mod tests {
 
         assert_eq!(detector.sample_count, 0);
         assert_eq!(detector.current_digit, None);
+    }
+
+    #[test]
+    fn test_start_emitted_after_min_frames() {
+        let mut detector = GoertzelDetector::new(8000, 160);
+
+        // Speed up detection for the test
+        detector.min_detection_frames = 3;
+
+        // First two detections should not emit anything
+        assert!(detector
+            .handle_detected_digit(DtmfDigit::Five)
+            .unwrap()
+            .is_none());
+        assert!(detector
+            .handle_detected_digit(DtmfDigit::Five)
+            .unwrap()
+            .is_none());
+
+        // Third detection reaches the threshold and should emit Start
+        let event = detector
+            .handle_detected_digit(DtmfDigit::Five)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event_type, DtmfEventType::Start);
+        assert_eq!(event.digit, DtmfDigit::Five);
+    }
+
+    #[test]
+    fn test_duration_respects_frame_size() {
+        // 160 samples at 16 kHz = 10ms frames
+        let mut detector = GoertzelDetector::new(16000, 160);
+        detector.current_digit = Some(DtmfDigit::One);
+        detector.frames_detected = 4;
+        detector.start_emitted = true;
+        detector.min_detection_frames = 1;
+
+        let event = detector.handle_no_detection().unwrap().unwrap();
+        assert_eq!(event.duration_ms, Some(40)); // 4 frames * 10ms
+    }
+
+    #[test]
+    fn test_digit_change_before_start() {
+        let mut detector = GoertzelDetector::new(8000, 160);
+        detector.min_detection_frames = 5;
+
+        // Detect digit '1' for 2 frames (below threshold)
+        assert!(detector
+            .handle_detected_digit(DtmfDigit::One)
+            .unwrap()
+            .is_none());
+        assert!(detector
+            .handle_detected_digit(DtmfDigit::One)
+            .unwrap()
+            .is_none());
+
+        // Switch to digit '2' (should not emit End for '1' since Start never emitted)
+        let result = detector.handle_detected_digit(DtmfDigit::Two).unwrap();
+        assert!(result.is_none()); // No End event for '1'
+
+        // Continue with '2' - first 3 detections emit nothing
+        for _ in 0..3 {
+            assert!(detector
+                .handle_detected_digit(DtmfDigit::Two)
+                .unwrap()
+                .is_none());
+        }
+
+        // 4th detection reaches threshold (frames_detected becomes 5) and emits Start
+        let event = detector
+            .handle_detected_digit(DtmfDigit::Two)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event_type, DtmfEventType::Start);
+        assert_eq!(event.digit, DtmfDigit::Two);
+    }
+
+    #[test]
+    fn test_continue_events_every_5_frames() {
+        let mut detector = GoertzelDetector::new(8000, 160);
+        detector.min_detection_frames = 1;
+
+        // First detection emits Start (frames_detected = 1)
+        let event = detector
+            .handle_detected_digit(DtmfDigit::Five)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event_type, DtmfEventType::Start);
+        assert_eq!(event.digit, DtmfDigit::Five);
+
+        // Next 3 detections emit nothing (frames_detected = 2, 3, 4)
+        for _ in 0..3 {
+            assert!(detector
+                .handle_detected_digit(DtmfDigit::Five)
+                .unwrap()
+                .is_none());
+        }
+
+        // 4th additional detection (frames_detected = 5) emits Continue
+        let event = detector
+            .handle_detected_digit(DtmfDigit::Five)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event_type, DtmfEventType::Continue);
+        assert_eq!(event.digit, DtmfDigit::Five);
+
+        // Next 4 detections emit nothing (frames_detected = 6, 7, 8, 9)
+        for _ in 0..4 {
+            assert!(detector
+                .handle_detected_digit(DtmfDigit::Five)
+                .unwrap()
+                .is_none());
+        }
+
+        // 9th additional detection (frames_detected = 10) emits Continue again
+        let event = detector
+            .handle_detected_digit(DtmfDigit::Five)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event_type, DtmfEventType::Continue);
+        assert_eq!(event.digit, DtmfDigit::Five);
     }
 }

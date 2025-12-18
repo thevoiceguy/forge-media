@@ -1194,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "forge-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "forge-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "bytes",

@@ -46,7 +46,7 @@ pub use sip_sdp::{
 };
 
 // Re-export ICE attribute helpers
-pub use ice::{IceAttributesExt, MediaIceAttributesExt};
+pub use ice::{IceCandidateParams, IceAttributesExt, MediaIceAttributesExt};
 
 // Re-export DTLS attribute helpers
 pub use dtls::{DtlsAttributesExt, DtlsSetup, MediaDtlsAttributesExt};
@@ -144,6 +144,9 @@ impl SessionDescriptionExt for SessionDescription {
 
     fn get_audio_codec(&self) -> Option<(u8, String)> {
         let audio = self.find_media(MediaType::Audio)?;
+        if audio.port == 0 {
+            return None;
+        }
 
         // Get first format (primary negotiated codec)
         let pt = *audio.formats.first()?;
@@ -333,5 +336,22 @@ mod tests {
         };
 
         assert_eq!(codec_info.to_audio_codec(), None);
+    }
+
+    #[test]
+    fn test_get_audio_codec_rejected_media() {
+        let sdp = sip_sdp::builder::SessionDescriptionBuilder::new()
+            .origin("alice", "1", "192.168.1.100")
+            .session_name("Test")
+            .connection("192.168.1.100")
+            .time(0, 0)
+            .media(
+                sip_sdp::MediaDescription::audio(0)
+                    .add_format(0)
+                    .add_rtpmap(0, "PCMU", 8000, None),
+            )
+            .build();
+
+        assert!(sdp.get_audio_codec().is_none());
     }
 }

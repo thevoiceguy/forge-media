@@ -128,7 +128,7 @@ impl SdpProfile {
     ///
     /// # Codecs
     /// - Opus (PT 111) @ 48kHz, 2 channels
-    /// - telephone-event (PT 101) @ 48kHz - DTMF
+    /// - telephone-event (PT 101) @ 8kHz - DTMF
     ///
     /// # WebRTC Features
     /// - DTLS-SRTP key exchange (requires fingerprint and setup attributes)
@@ -187,8 +187,69 @@ impl SdpProfile {
         if self.name == "webrtc-audio" {
             return self.build_webrtc_sdp(local_addr, audio_port);
         }
+        if self.name == "audio-opus" {
+            return self.build_audio_opus_sdp(local_addr, audio_port);
+        }
 
         self.builder.build("forge", local_addr, audio_port, None)
+    }
+
+    /// Build audio-only Opus SDP without G.711 fallbacks.
+    fn build_audio_opus_sdp(&self, local_addr: &str, audio_port: u16) -> SessionDescription {
+        use crate::{Attribute, MediaDescription};
+        use sip_sdp::builder::SessionDescriptionBuilder;
+        use smol_str::SmolStr;
+
+        let session_id = chrono::Utc::now().timestamp().to_string();
+        let mut media = MediaDescription::audio(audio_port);
+
+        media.formats.push(111);
+        media.rtpmaps.insert(
+            111,
+            crate::RtpMap {
+                payload_type: 111,
+                encoding_name: SmolStr::new("opus"),
+                clock_rate: 48000,
+                encoding_params: Some(SmolStr::new("2")),
+            },
+        );
+        media.attributes.push(Attribute::Value {
+            name: SmolStr::new("rtpmap"),
+            value: SmolStr::new("111 opus/48000/2"),
+        });
+
+        media.formats.push(101);
+        media.rtpmaps.insert(
+            101,
+            crate::RtpMap {
+                payload_type: 101,
+                encoding_name: SmolStr::new("telephone-event"),
+                clock_rate: 8000,
+                encoding_params: None,
+            },
+        );
+        media.attributes.push(Attribute::Value {
+            name: SmolStr::new("rtpmap"),
+            value: SmolStr::new("101 telephone-event/8000"),
+        });
+        media.attributes.push(Attribute::Value {
+            name: SmolStr::new("fmtp"),
+            value: SmolStr::new("101 0-16"),
+        });
+        media
+            .attributes
+            .push(Attribute::Property(SmolStr::new("rtcp-mux")));
+        media
+            .attributes
+            .push(Attribute::Property(SmolStr::new("sendrecv")));
+
+        SessionDescriptionBuilder::new()
+            .origin("forge", &session_id, local_addr)
+            .session_name("Opus Audio Session")
+            .connection(local_addr)
+            .time(0, 0)
+            .media(media)
+            .build()
     }
 
     /// Build WebRTC-specific SDP with UDP/TLS/RTP/SAVPF protocol
@@ -229,13 +290,13 @@ impl SdpProfile {
             crate::RtpMap {
                 payload_type: 101,
                 encoding_name: SmolStr::new("telephone-event"),
-                clock_rate: 48000,
+                clock_rate: 8000,
                 encoding_params: None,
             },
         );
         media.attributes.push(Attribute::Value {
             name: SmolStr::new("rtpmap"),
-            value: SmolStr::new("101 telephone-event/48000"),
+            value: SmolStr::new("101 telephone-event/8000"),
         });
         media.attributes.push(Attribute::Value {
             name: SmolStr::new("fmtp"),
@@ -300,9 +361,9 @@ mod tests {
         assert_eq!(sdp.media.len(), 1);
         assert_eq!(sdp.media[0].port, 6000);
 
-        // Should have PCMU, PCMA, Opus (111), and telephone-event (101)
-        assert!(sdp.media[0].formats.contains(&0));
-        assert!(sdp.media[0].formats.contains(&8));
+        // Should have Opus (111) and telephone-event (101)
+        assert!(!sdp.media[0].formats.contains(&0));
+        assert!(!sdp.media[0].formats.contains(&8));
         assert!(sdp.media[0].formats.contains(&111));
         assert!(sdp.media[0].formats.contains(&101));
 
@@ -394,7 +455,7 @@ mod tests {
         // Check telephone-event rtpmap
         let dtmf = sdp.media[0].rtpmaps.get(&101).unwrap();
         assert_eq!(dtmf.encoding_name.as_str(), "telephone-event");
-        assert_eq!(dtmf.clock_rate, 48000);
+        assert_eq!(dtmf.clock_rate, 8000);
 
         // Check for WebRTC-specific attributes
         let has_rtcp_mux = sdp.media[0]

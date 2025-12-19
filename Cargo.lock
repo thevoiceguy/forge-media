@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "forge-sdp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "forge-core",
@@ -1418,8 +1418,6 @@ dependencies = [
  "sip-sdp",
  "smol_str",
  "thiserror 1.0.69",
- "tokio",
- "tracing",
 ]
 
 [[package]]

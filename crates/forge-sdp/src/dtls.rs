@@ -96,6 +96,10 @@ pub trait MediaDtlsAttributesExt {
 
 impl DtlsAttributesExt for SessionDescription {
     fn set_dtls_fingerprint(&mut self, algorithm: &str, hash: &str) {
+        if !is_valid_fingerprint_algorithm(algorithm) || !is_valid_fingerprint_hash(hash) {
+            return;
+        }
+
         // Remove existing fingerprint
         self.attributes
             .retain(|attr| !matches!(attr, Attribute::Value { name, .. } if name == "fingerprint"));
@@ -149,6 +153,10 @@ impl DtlsAttributesExt for SessionDescription {
 
 impl MediaDtlsAttributesExt for MediaDescription {
     fn set_media_dtls_fingerprint(&mut self, algorithm: &str, hash: &str) {
+        if !is_valid_fingerprint_algorithm(algorithm) || !is_valid_fingerprint_hash(hash) {
+            return;
+        }
+
         // Remove existing media-level fingerprint
         self.attributes
             .retain(|attr| !matches!(attr, Attribute::Value { name, .. } if name == "fingerprint"));
@@ -198,6 +206,20 @@ impl MediaDtlsAttributesExt for MediaDescription {
         }
         None
     }
+}
+
+fn is_valid_fingerprint_algorithm(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-'))
+}
+
+fn is_valid_fingerprint_hash(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'F' | b'a'..=b'f' | b'0'..=b'9' | b':'))
 }
 
 #[cfg(test)]
@@ -294,5 +316,23 @@ mod tests {
         let (algorithm, hash) = sdp.get_dtls_fingerprint().unwrap();
         assert_eq!(algorithm, "sha-512");
         assert_eq!(hash, "123:456");
+    }
+
+    #[test]
+    fn test_rejects_invalid_fingerprint() {
+        let mut sdp = SessionDescriptionBuilder::new()
+            .origin("test", "12345", "192.168.1.1")
+            .session_name("Test")
+            .build();
+
+        sdp.set_dtls_fingerprint("sha-256\r\n", "ABC");
+        assert!(sdp.get_dtls_fingerprint().is_none());
+
+        sdp.set_dtls_fingerprint("sha-256", "ZZ:11");
+        assert!(sdp.get_dtls_fingerprint().is_none());
+
+        let mut media = MediaDescription::audio(5000);
+        media.set_media_dtls_fingerprint("sha-256", "ABC\r\nDEF");
+        assert!(media.get_media_dtls_fingerprint().is_none());
     }
 }

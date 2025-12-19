@@ -129,16 +129,30 @@ impl RtpPacket {
 
         // Determine padding length
         let padding_len = if header.padding() {
-            if data.len() == 0 {
+            if data.is_empty() {
                 return Err(ForgeError::Rtp("Missing padding length".into()));
             }
-            data[data.len() - 1]
+            let len = data[data.len() - 1] as usize;
+            if len == 0 {
+                return Err(ForgeError::Rtp("Invalid padding length".into()));
+            }
+            let payload_end = data
+                .len()
+                .checked_sub(len)
+                .ok_or_else(|| ForgeError::Rtp("Invalid padding length".into()))?;
+            if payload_end < offset {
+                return Err(ForgeError::Rtp("Invalid padding length".into()));
+            }
+            len as u8
         } else {
             0
         };
 
         // Extract payload
-        let payload_end = data.len() - padding_len as usize;
+        let payload_end = data
+            .len()
+            .checked_sub(padding_len as usize)
+            .ok_or_else(|| ForgeError::Rtp("Invalid padding length".into()))?;
         if offset > payload_end {
             return Err(ForgeError::Rtp("Invalid payload length".into()));
         }
@@ -243,9 +257,13 @@ impl RtpExtension {
     }
 
     fn write(&self, buf: &mut BytesMut) {
+        let padded_len = (self.data.len() + 3) & !3;
         buf.put_u16(self.profile);
-        buf.put_u16((self.data.len() / 4) as u16);
+        buf.put_u16((padded_len / 4) as u16);
         buf.put(self.data.clone());
+        if padded_len > self.data.len() {
+            buf.resize(buf.len() + (padded_len - self.data.len()), 0);
+        }
     }
 
     fn total_size(&self) -> usize {

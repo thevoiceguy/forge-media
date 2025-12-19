@@ -82,16 +82,6 @@ impl JitterBuffer {
             }
         }
 
-        // Check if packet arrived too late (older than target delay)
-        if let Some(base) = self.base_time {
-            let age = now.duration_since(base);
-            if age > self.max_delay {
-                self.stats.packets_dropped += 1;
-                tracing::trace!("Dropping late packet seq={}, age={:?}", sequence, age);
-                return;
-            }
-        }
-
         self.stats.packets_received += 1;
 
         // Insert packet

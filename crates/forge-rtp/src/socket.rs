@@ -95,7 +95,6 @@ impl RtpSocketPair {
     /// Create a UDP socket with QoS settings
     fn create_qos_socket(addr: SocketAddr, config: &RtpSocketConfig) -> Result<UdpSocket> {
         use socket2::{Domain, Protocol, Socket, Type};
-        use std::net::SocketAddr as StdSocketAddr;
 
         // Determine domain based on address type
         let domain = match addr {
@@ -160,7 +159,7 @@ impl RtpSocketPair {
 
         // Bind the socket
         socket
-            .bind(&StdSocketAddr::from(addr).into())
+            .bind(&addr.into())
             .map_err(|e| {
                 ForgeError::Network(format!("Failed to bind socket to {}: {}", addr, e))
             })?;

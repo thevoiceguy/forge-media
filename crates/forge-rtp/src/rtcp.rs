@@ -45,11 +45,7 @@ pub mod ntp {
         let ntp_secs = ntp_msw as u64;
 
         // Convert from NTP epoch to Unix epoch
-        if ntp_secs >= NTP_UNIX_OFFSET {
-            ntp_secs - NTP_UNIX_OFFSET
-        } else {
-            0
-        }
+        ntp_secs.saturating_sub(NTP_UNIX_OFFSET)
     }
 
     /// Convert NTP timestamp to fractional seconds (0.0 - 1.0)
@@ -336,8 +332,8 @@ pub struct ReceptionReportBlock {
     pub ssrc: u32,
     /// Fraction lost
     pub fraction_lost: u8,
-    /// Cumulative number of packets lost
-    pub cumulative_lost: u32, // 24 bits
+    /// Cumulative number of packets lost (signed 24-bit)
+    pub cumulative_lost: i32,
     /// Extended highest sequence number received
     pub extended_highest_seq: u32,
     /// Interarrival jitter
@@ -373,11 +369,16 @@ impl ReceptionReportBlock {
         let ssrc = cursor.get_u32();
         let fraction_lost = cursor.get_u8();
         // Read 24-bit cumulative_lost (3 bytes)
-        let cumulative_lost = {
+        let cumulative_lost_raw = {
             let b1 = cursor.get_u8() as u32;
             let b2 = cursor.get_u8() as u32;
             let b3 = cursor.get_u8() as u32;
             (b1 << 16) | (b2 << 8) | b3
+        };
+        let cumulative_lost = if (cumulative_lost_raw & 0x0080_0000) != 0 {
+            (cumulative_lost_raw | 0xFF00_0000) as i32
+        } else {
+            cumulative_lost_raw as i32
         };
         let extended_highest_seq = cursor.get_u32();
         let jitter = cursor.get_u32();
@@ -398,10 +399,14 @@ impl ReceptionReportBlock {
     /// Serialize report block to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = BytesMut::with_capacity(24);
+        let cumulative_lost = self.cumulative_lost.clamp(-0x0080_0000, 0x007F_FFFF);
+        let cumulative_lost_raw = (cumulative_lost as u32) & 0x00FF_FFFF;
 
         buf.put_u32(self.ssrc);
         buf.put_u8(self.fraction_lost);
-        buf.put_uint(self.cumulative_lost as u64, 3);
+        buf.put_u8((cumulative_lost_raw >> 16) as u8);
+        buf.put_u8((cumulative_lost_raw >> 8) as u8);
+        buf.put_u8(cumulative_lost_raw as u8);
         buf.put_u32(self.extended_highest_seq);
         buf.put_u32(self.jitter);
         buf.put_u32(self.last_sr);
@@ -493,6 +498,7 @@ pub mod sdes_type {
 
 /// RTCP Source Description (SDES) packet (RFC 3550 Section 6.5)
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct SourceDescription {
     /// Chunks (one per SSRC)
     pub chunks: Vec<SdesChunk>,
@@ -582,7 +588,7 @@ impl SdesChunk {
 impl SourceDescription {
     /// Create new SDES packet
     pub fn new() -> Self {
-        Self { chunks: Vec::new() }
+        Self::default()
     }
 
     /// Add a chunk
@@ -619,6 +625,7 @@ impl SourceDescription {
         buf
     }
 }
+
 
 /// RTCP BYE packet (RFC 3550 Section 6.6)
 #[derive(Debug, Clone)]

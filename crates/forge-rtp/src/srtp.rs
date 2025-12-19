@@ -10,6 +10,7 @@ use forge_core::{ForgeError, Result};
 use hmac::{Hmac, Mac};
 use metrics::counter;
 use sha1::Sha1;
+use subtle::ConstantTimeEq;
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -162,7 +163,6 @@ impl SrtpKeyMaterial {
 
         // RFC 3711 Section 4.3.3: key_id = <label> || r
         // x = key_id XOR master_salt (padded to 16 bytes with zeros)
-        let salt_len = self.master_salt.len();
         let mut x = [0u8; 16];
 
         // Set label in byte 7 (RFC 3711 uses specific byte positions)
@@ -173,8 +173,8 @@ impl SrtpKeyMaterial {
         x[8..14].copy_from_slice(&div_bytes[2..8]);
 
         // XOR with master_salt (master_salt is typically 14 bytes)
-        for i in 0..salt_len {
-            x[i] ^= self.master_salt[i];
+        for (i, &salt_byte) in self.master_salt.iter().enumerate() {
+            x[i] ^= salt_byte;
         }
 
         // Derive key using AES-CM (Counter Mode)
@@ -194,7 +194,7 @@ impl SrtpKeyMaterial {
         counter_block[..copy_len].copy_from_slice(&iv[..copy_len]);
 
         // Generate output blocks
-        let num_blocks = (out_len + 15) / 16; // Round up to block count
+        let num_blocks = out_len.div_ceil(16); // Round up to block count
 
         // Use AES-128 or AES-256 based on master key length
         match self.master_key.len() {
@@ -358,15 +358,17 @@ pub struct SrtpContext {
     local_key: Option<SrtpKeyMaterial>,
     /// Key material for inbound (decrypting) traffic
     remote_key: Option<SrtpKeyMaterial>,
-    /// Replay protection window
+    /// Replay protection window for RTP
     replay_window: ReplayWindow,
+    /// Replay protection window for RTCP (separate per RFC 3711 Section 3.4)
+    srtcp_replay_window: ReplayWindow,
     /// ROC tracker for local (outbound) SSRC
     local_roc: RocTracker,
     /// ROC tracker for remote (inbound) SSRC
     remote_roc: RocTracker,
     /// SRTCP index for local (outbound) RTCP packets
     local_srtcp_index: u32,
-    /// SRTCP index for remote (inbound) RTCP packets
+    /// SRTCP index for remote (inbound) RTCP packets (highest received)
     remote_srtcp_index: u32,
 }
 
@@ -377,6 +379,7 @@ impl SrtpContext {
             local_key: None,
             remote_key: None,
             replay_window: ReplayWindow::new(64),
+            srtcp_replay_window: ReplayWindow::new(64),
             local_roc: RocTracker::new(),
             remote_roc: RocTracker::new(),
             local_srtcp_index: 0,
@@ -390,6 +393,7 @@ impl SrtpContext {
             local_key: Some(local_key),
             remote_key: Some(remote_key),
             replay_window: ReplayWindow::new(64),
+            srtcp_replay_window: ReplayWindow::new(64),
             local_roc: RocTracker::new(),
             remote_roc: RocTracker::new(),
             local_srtcp_index: 0,
@@ -434,7 +438,10 @@ impl SrtpContext {
         // Calculate header length (fixed 12 bytes + CSRCs + extension)
         let mut header_len = 12 + (csrc_count as usize * 4);
 
-        if extension == 1 && packet.len() > header_len + 4 {
+        if extension == 1 {
+            if packet.len() < header_len + 4 {
+                return Err(ForgeError::Srtp("Invalid RTP header extension".to_string()));
+            }
             let ext_len =
                 u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]) as usize;
             header_len += 4 + (ext_len * 4);
@@ -659,7 +666,10 @@ impl SrtpContext {
         // Calculate header length
         let mut header_len = 12 + (csrc_count as usize * 4);
 
-        if extension == 1 && packet.len() > header_len + 4 {
+        if extension == 1 {
+            if packet.len() < header_len + 4 {
+                return Err(ForgeError::Srtp("Invalid RTP header extension".to_string()));
+            }
             let ext_len =
                 u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]) as usize;
             header_len += 4 + (ext_len * 4);
@@ -755,7 +765,7 @@ impl SrtpContext {
         let computed_tag = mac.finalize().into_bytes();
 
         // Constant-time comparison
-        if &computed_tag[..tag_len] != received_tag {
+        if !bool::from(computed_tag[..tag_len].ct_eq(received_tag)) {
             return Err(ForgeError::Srtp("Authentication failed".to_string()));
         }
 
@@ -920,8 +930,8 @@ impl SrtpContext {
         let ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
 
         // SRTCP uses its own index counter (separate from RTP ROC)
-        let srtcp_index = self.local_srtcp_index;
-        self.local_srtcp_index = self.local_srtcp_index.wrapping_add(1);
+        let srtcp_index = self.local_srtcp_index & 0x7FFF_FFFF;
+        self.local_srtcp_index = self.local_srtcp_index.wrapping_add(1) & 0x7FFF_FFFF;
 
         // Derive session keys using SRTCP index
         let derived_keys = key_material.derive_session_keys(ssrc, srtcp_index as u64)?;
@@ -1141,6 +1151,13 @@ impl SrtpContext {
             ));
         }
 
+        // SRTCP replay protection (RFC 3711 Section 3.4)
+        // Check if this index has been seen before
+        if self.srtcp_replay_window.check(srtcp_index as u64) {
+            counter!("forge_srtcp_replay_attacks_blocked_total", 1);
+            return Err(ForgeError::Srtp("SRTCP replay attack detected".to_string()));
+        }
+
         // Extract SSRC
         let ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
 
@@ -1166,6 +1183,12 @@ impl SrtpContext {
                     key_material.profile,
                 )?,
         };
+
+        // Update SRTCP replay window and highest index
+        self.srtcp_replay_window.update(srtcp_index as u64);
+        if srtcp_index > self.remote_srtcp_index {
+            self.remote_srtcp_index = srtcp_index;
+        }
 
         // Increment metrics counter
         counter!("forge_srtcp_packets_decrypted_total", 1);
@@ -1200,7 +1223,7 @@ impl SrtpContext {
 
         let computed_tag = mac.finalize().into_bytes();
 
-        if &computed_tag[..tag_len] != received_tag {
+        if !bool::from(computed_tag[..tag_len].ct_eq(received_tag)) {
             return Err(ForgeError::Srtp("SRTCP authentication failed".to_string()));
         }
 

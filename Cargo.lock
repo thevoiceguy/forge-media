@@ -1138,7 +1138,6 @@ dependencies = [
  "forge-engine",
  "forge-ha",
  "forge-ice",
- "forge-media-processor",
  "forge-rtp",
  "forge-sdp",
  "forge-siprec",
@@ -1340,31 +1339,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "forge-media-processor"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "dashmap",
- "forge-codecs",
- "forge-core",
- "forge-mixer",
- "forge-recorder",
- "forge-resampler",
- "forge-rtp",
- "hound",
- "lazy_static",
- "parking_lot",
- "rubato",
- "serde",
- "serde_json",
- "symphonia",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
 ]
 
 [[package]]

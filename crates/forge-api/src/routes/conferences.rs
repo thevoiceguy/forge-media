@@ -473,7 +473,7 @@ async fn start_recording(
 
     // Parse codec if specified
     let format = if let Some(codec_str) = &request.codec {
-        let codec = forge_media_processor::AudioCodec::from_str(codec_str)
+        let codec = forge_core::AudioCodec::from_str(codec_str)
             .ok_or_else(|| ApiError::InvalidRequest(format!("Invalid codec: {}", codec_str)))?;
 
         // Get room's current format and override codec
@@ -483,7 +483,7 @@ async fn start_recording(
             .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?
             .format();
 
-        Some(forge_media_processor::AudioFormat {
+        Some(forge_core::AudioFormat {
             sample_rate: room_format.sample_rate,
             channels: room_format.channels,
             codec,
@@ -1268,7 +1268,7 @@ mod tests {
     fn create_test_state() -> Arc<AppState> {
         let bridge = Arc::new(
             forge_conference_processor::ConferenceBridge::new(
-                forge_media_processor::AudioFormat::pcm_mono(),
+                forge_core::AudioFormat::pcm_mono(),
                 480,
             )
             .unwrap(),

@@ -70,10 +70,12 @@ struct ParticipantBuffer {
     speech_frames: u32,
     /// Consecutive frames below silence threshold
     silence_frames: u32,
+    /// Maximum buffered samples before dropping oldest data
+    max_buffer_samples: usize,
 }
 
 impl ParticipantBuffer {
-    fn new(gain: f32) -> Self {
+    fn new(gain: f32, max_buffer_samples: usize) -> Self {
         Self {
             samples: VecDeque::new(),
             gain: gain.clamp(0.0, 1.0),
@@ -85,11 +87,20 @@ impl ParticipantBuffer {
             last_speech_detected: None,
             speech_frames: 0,
             silence_frames: 0,
+            max_buffer_samples,
         }
     }
 
     fn push_samples(&mut self, samples: &[i16]) {
         self.samples.extend(samples);
+        if self.samples.len() > self.max_buffer_samples {
+            let overflow = self.samples.len() - self.max_buffer_samples;
+            self.samples.drain(..overflow);
+            warn!(
+                "Dropped {} samples due to buffer limit (max {})",
+                overflow, self.max_buffer_samples
+            );
+        }
         self.packets_received += 1;
 
         // Perform Voice Activity Detection
@@ -162,13 +173,6 @@ impl ParticipantBuffer {
         self.samples.len()
     }
 
-    async fn start_recording<P: AsRef<Path>>(&self, path: P, format: AudioFormat) -> Result<()> {
-        let recorder = AudioRecorder::new(path, format).await?;
-        recorder.start()?;
-        *self.recorder.lock() = Some(recorder);
-        Ok(())
-    }
-
     fn stop_recording(&self) -> Result<()> {
         let mut recorder_guard = self.recorder.lock();
         if let Some(recorder) = recorder_guard.take() {
@@ -200,9 +204,14 @@ pub struct AudioMixer {
     frame_size: usize,
     /// Auto-gain control enabled
     auto_gain: bool,
+    /// Maximum buffered samples per participant
+    max_buffer_samples: usize,
 }
 
 impl AudioMixer {
+    /// Number of frames to buffer per participant before dropping oldest data
+    const DEFAULT_MAX_BUFFER_FRAMES: usize = 50;
+
     /// Create a new audio mixer
     ///
     /// # Arguments
@@ -225,6 +234,7 @@ impl AudioMixer {
             format: Arc::new(RwLock::new(format)),
             frame_size,
             auto_gain: true,
+            max_buffer_samples: frame_size * Self::DEFAULT_MAX_BUFFER_FRAMES,
         })
     }
 
@@ -239,7 +249,8 @@ impl AudioMixer {
 
         info!("Adding participant {} with gain {}", id, gain);
 
-        self.participants.insert(id, ParticipantBuffer::new(gain));
+        self.participants
+            .insert(id, ParticipantBuffer::new(gain, self.max_buffer_samples));
         Ok(())
     }
 
@@ -264,6 +275,14 @@ impl AudioMixer {
             .get_mut(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
+        if participant.state != ParticipantState::Active {
+            debug!(
+                "Ignoring samples for participant {} due to state {:?}",
+                id, participant.state
+            );
+            return Ok(());
+        }
+
         participant.push_samples(samples);
         debug!("Wrote {} samples for participant {}", samples.len(), id);
         Ok(())
@@ -275,6 +294,21 @@ impl AudioMixer {
     /// * `id` - Participant identifier
     /// * `payload` - Raw RTP payload bytes
     pub fn write_rtp_payload(&self, id: &str, payload: &Bytes) -> Result<()> {
+        if payload.len() % 2 != 0 {
+            return Err(MixerError::InvalidFormat(format!(
+                "RTP payload length {} is not 16-bit aligned",
+                payload.len()
+            )));
+        }
+
+        let format = *self.format.read();
+        if format.channels != 1 || !matches!(format.codec, forge_core::AudioCodec::PCM) {
+            return Err(MixerError::InvalidFormat(format!(
+                "Unsupported RTP format for mixer: {:?} channels {}",
+                format.codec, format.channels
+            )));
+        }
+
         // Convert bytes to i16 samples (assuming big-endian 16-bit PCM)
         let samples: Vec<i16> = payload
             .chunks_exact(2)
@@ -293,21 +327,26 @@ impl AudioMixer {
             return Ok(None);
         }
 
-        // Check if any participant has enough samples
-        let has_data = self
-            .participants
-            .iter()
-            .any(|p| p.available_samples() >= self.frame_size);
+        // Collect only active participants that can contribute a full frame
+        let mut ready_participants = Vec::new();
+        for participant in self.participants.iter_mut() {
+            if participant.state != ParticipantState::Active {
+                continue;
+            }
+            if participant.available_samples() >= self.frame_size {
+                ready_participants.push(participant);
+            }
+        }
 
-        if !has_data {
+        if ready_participants.is_empty() {
             return Ok(None);
         }
 
-        let num_participants = self.participants.len();
+        let contributors = ready_participants.len();
         let mut mixed = vec![0i32; self.frame_size];
 
         // Mix all participants
-        for mut participant in self.participants.iter_mut() {
+        for mut participant in ready_participants {
             let samples = participant.drain_samples(self.frame_size);
 
             for (i, &sample) in samples.iter().enumerate() {
@@ -322,8 +361,8 @@ impl AudioMixer {
         }
 
         // Apply auto-gain to prevent clipping
-        let output: Vec<i16> = if self.auto_gain && num_participants > 1 {
-            let gain = 1.0 / (num_participants as f32).sqrt();
+        let output: Vec<i16> = if self.auto_gain && contributors > 1 {
+            let gain = 1.0 / (contributors as f32).sqrt();
             mixed
                 .iter()
                 .map(|&s| ((s as f32 * gain).clamp(-32768.0, 32767.0)) as i16)
@@ -339,7 +378,7 @@ impl AudioMixer {
         debug!(
             "Mixed {} samples from {} participants",
             output.len(),
-            num_participants
+            contributors
         );
         Ok(Some(output))
     }
@@ -352,28 +391,26 @@ impl AudioMixer {
             return Ok(None);
         }
 
-        // Check if any other participant has enough samples
-        let has_data = self
-            .participants
-            .iter()
-            .filter(|p| p.key() != exclude_id)
-            .any(|p| p.available_samples() >= self.frame_size);
+        // Collect only active, non-excluded participants that can contribute a full frame
+        let mut ready_participants = Vec::new();
+        for participant in self.participants.iter_mut() {
+            if participant.key() == exclude_id || participant.state != ParticipantState::Active {
+                continue;
+            }
+            if participant.available_samples() >= self.frame_size {
+                ready_participants.push(participant);
+            }
+        }
 
-        if !has_data {
+        if ready_participants.is_empty() {
             return Ok(None);
         }
 
-        let mut num_mixed = 0;
         let mut mixed = vec![0i32; self.frame_size];
 
         // Mix all participants except the excluded one
-        for mut participant in self.participants.iter_mut() {
-            if participant.key() == exclude_id {
-                continue;
-            }
-
+        for participant in ready_participants.iter_mut() {
             let samples = participant.drain_samples(self.frame_size);
-            num_mixed += 1;
 
             for (i, &sample) in samples.iter().enumerate() {
                 if i >= self.frame_size {
@@ -385,13 +422,10 @@ impl AudioMixer {
             }
         }
 
-        if num_mixed == 0 {
-            return Ok(None);
-        }
-
         // Apply auto-gain
-        let output: Vec<i16> = if self.auto_gain && num_mixed > 1 {
-            let gain = 1.0 / (num_mixed as f32).sqrt();
+        let contributors = ready_participants.len();
+        let output: Vec<i16> = if self.auto_gain && contributors > 1 {
+            let gain = 1.0 / (contributors as f32).sqrt();
             mixed
                 .iter()
                 .map(|&s| ((s as f32 * gain).clamp(-32768.0, 32767.0)) as i16)
@@ -406,7 +440,7 @@ impl AudioMixer {
         debug!(
             "Mixed {} samples from {} participants (excluding {})",
             output.len(),
-            num_mixed,
+            contributors,
             exclude_id
         );
         Ok(Some(output))
@@ -467,20 +501,52 @@ impl AudioMixer {
         id: &str,
         path: P,
     ) -> Result<()> {
-        let participant = self
+        let path = path.as_ref();
+
+        if path.is_absolute() || path.components().any(|c| c == std::path::Component::ParentDir) {
+            return Err(MixerError::InvalidFormat(format!(
+                "Recording path {:?} must be relative and without parent traversal",
+                path
+            )));
+        }
+
+        let participant_recorder = self
             .participants
             .get(id)
-            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?
+            .recorder
+            .clone();
 
         // Copy format before await to ensure RwLockReadGuard is dropped
         let format = *self.format.read();
+        if format.channels != 1 || !matches!(format.codec, forge_core::AudioCodec::PCM) {
+            return Err(MixerError::InvalidFormat(format!(
+                "Recording only supports mono PCM, got codec {:?} channels {}",
+                format.codec, format.channels
+            )));
+        }
+
+        let expected_ext = format.codec.file_extension();
+        if let Some(ext) = path.extension() {
+            if ext != expected_ext {
+                warn!(
+                    "Recording path {:?} extension {:?} does not match expected {:?}",
+                    path,
+                    ext,
+                    expected_ext
+                );
+            }
+        }
 
         info!(
             "Starting recording for participant {} to {:?}",
             id,
-            path.as_ref()
+            path
         );
-        participant.start_recording(path, format).await
+        let recorder = AudioRecorder::new(path, format).await?;
+        recorder.start()?;
+        *participant_recorder.lock() = Some(recorder);
+        Ok(())
     }
 
     /// Stop recording for a specific participant
@@ -582,6 +648,10 @@ impl AudioMixer {
             .get_mut(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
+        if participant.state != ParticipantState::Active {
+            return Ok(None);
+        }
+
         // Check if participant has enough samples
         if participant.available_samples() < count {
             return Ok(None);
@@ -632,6 +702,11 @@ impl AudioMixer {
                 if id == exclude {
                     continue;
                 }
+            }
+
+            // Skip if not active
+            if participant.state != ParticipantState::Active {
+                continue;
             }
 
             // Check if participant has enough samples
@@ -742,5 +817,75 @@ mod tests {
 
         let mixed = mixer.mix().unwrap();
         assert!(mixed.is_some());
+    }
+
+    #[test]
+    fn test_muted_participant_ignored() {
+        let mixer = AudioMixer::new(AudioFormat::pcm_mono(), 4).unwrap();
+
+        mixer.add_participant("alice", None).unwrap();
+        mixer.add_participant("bob", None).unwrap();
+        mixer
+            .set_participant_state("bob", ParticipantState::Muted)
+            .unwrap();
+
+        let alice_samples: Vec<i16> = vec![500; 4];
+        let bob_samples: Vec<i16> = vec![1000; 4];
+
+        mixer.write_samples("alice", &alice_samples).unwrap();
+        mixer.write_samples("bob", &bob_samples).unwrap(); // ignored
+
+        let mixed = mixer.mix().unwrap().unwrap();
+        // Only alice should contribute, so output equals alice samples (no auto-gain)
+        assert_eq!(mixed, alice_samples);
+    }
+
+    #[test]
+    fn test_autogain_counts_only_contributors() {
+        let mixer = AudioMixer::new(AudioFormat::pcm_mono(), 4).unwrap();
+
+        mixer.add_participant("alice", None).unwrap();
+        mixer.add_participant("bob", None).unwrap();
+        mixer.add_participant("charlie", None).unwrap();
+
+        // Charlie provides no samples; should not affect gain
+        let alice_samples: Vec<i16> = vec![1000; 4];
+        let bob_samples: Vec<i16> = vec![1000; 4];
+
+        mixer.write_samples("alice", &alice_samples).unwrap();
+        mixer.write_samples("bob", &bob_samples).unwrap();
+
+        let mixed = mixer.mix().unwrap().unwrap();
+        // Two contributors -> divided by sqrt(2)
+        let expected: Vec<i16> = vec![(2000f32 / 2f32.sqrt()) as i16; 4];
+        assert_eq!(mixed, expected);
+    }
+
+    #[test]
+    fn test_rtp_payload_validation() {
+        let mixer = AudioMixer::new(AudioFormat::pcm_mono(), 4).unwrap();
+        mixer.add_participant("alice", None).unwrap();
+
+        let bad_payload = Bytes::from_static(&[0x00, 0x01, 0x02]); // odd length
+        let err = mixer.write_rtp_payload("alice", &bad_payload).unwrap_err();
+        assert!(matches!(err, MixerError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_buffer_limit_enforced() {
+        let mixer = AudioMixer::new(AudioFormat::pcm_mono(), 2).unwrap();
+        mixer.add_participant("alice", None).unwrap();
+
+        // Default buffer: frame_size * 50 = 100 samples. Push 120 samples.
+        let samples: Vec<i16> = (0..120).map(|i| i as i16).collect();
+        mixer.write_samples("alice", &samples).unwrap();
+
+        // Request more than limit should return None
+        assert!(mixer.get_participant_audio("alice", 120).unwrap().is_none());
+
+        // Exactly the capped amount should succeed
+        let audio = mixer.get_participant_audio("alice", 100).unwrap();
+        assert!(audio.is_some());
+        assert_eq!(audio.unwrap().len(), 100);
     }
 }

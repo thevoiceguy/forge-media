@@ -18,7 +18,6 @@ members = [
     "crates/forge-api",
     "bins/forge-test-daemon",
     "bins/forge-sip-server",
-    "crates/forge-media-processor",
     "crates/forge-codecs",
     "crates/bcg729-sys",
     "crates/forge-resampler",

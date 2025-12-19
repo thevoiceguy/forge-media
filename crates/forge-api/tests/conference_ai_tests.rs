@@ -15,7 +15,7 @@ use forge_api::routes;
 use forge_api::routes::sessions::AppState;
 use forge_conference_processor::ConferenceBridge;
 use forge_engine::{SessionManager, SessionManagerConfig};
-use forge_media_processor::AudioFormat;
+use forge_core::AudioFormat;
 use serde_json::json;
 use std::sync::Arc;
 use tower::ServiceExt;

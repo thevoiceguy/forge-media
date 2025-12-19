@@ -178,7 +178,7 @@ impl ApiServer {
         // Create conference bridge for media processing
         let conference_bridge = Arc::new(
             forge_conference_processor::ConferenceBridge::new(
-                forge_media_processor::AudioFormat::pcm_mono(),
+                forge_core::AudioFormat::pcm_mono(),
                 480, // 10ms frame at 48kHz
             )
             .expect("Failed to create conference bridge"),

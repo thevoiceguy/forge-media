@@ -10,7 +10,7 @@ use forge_sdp::{
     DtlsAttributesExt, DtlsSetup, IceAttributesExt, MediaIceAttributesExt, SessionDescription,
     SessionDescriptionExt,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -67,8 +67,8 @@ pub struct PeerConnection {
     #[allow(dead_code)]
     rtp_socket: Option<Arc<RtpSocketPair>>,
 
-    /// Connection state
-    state: ConnectionState,
+    /// Connection state shared with background tasks
+    state: Arc<StdMutex<ConnectionState>>,
 
     /// STUN servers for server-reflexive candidates
     /// TODO: Use for ICE restart and re-negotiation
@@ -119,7 +119,7 @@ impl PeerConnection {
             #[cfg(feature = "dtls")]
             dtls_task: None,
             rtp_socket: None,
-            state: ConnectionState::New,
+            state: Arc::new(StdMutex::new(ConnectionState::New)),
             stun_servers,
             local_sdp: None,
             remote_sdp: None,
@@ -137,17 +137,17 @@ impl PeerConnection {
     ///
     /// SDP offer as a string
     pub async fn create_offer(&mut self) -> Result<String> {
-        if self.state != ConnectionState::New {
+        if self.get_state() != ConnectionState::New {
             return Err(WebRtcError::InvalidState(format!(
                 "Cannot create offer in state {:?}",
-                self.state
+                self.get_state()
             )));
         }
 
         info!("Creating SDP offer for connection {}", self.connection_id);
 
         // Transition to gathering state
-        self.state = ConnectionState::Gathering;
+        self.set_state(ConnectionState::Gathering);
 
         // Gather ICE candidates
         let mut ice_agent = self.ice_agent.lock().await;
@@ -223,10 +223,10 @@ impl PeerConnection {
     ///
     /// * `sdp` - Remote SDP answer as a string
     pub async fn set_remote_answer(&mut self, sdp: &str) -> Result<()> {
-        if self.state != ConnectionState::Gathering {
+        if self.get_state() != ConnectionState::Gathering {
             return Err(WebRtcError::InvalidState(format!(
                 "Cannot set remote answer in state {:?}",
-                self.state
+                self.get_state()
             )));
         }
 
@@ -243,7 +243,7 @@ impl PeerConnection {
         })?;
 
         // Extract DTLS fingerprint
-        let (_algorithm, remote_fingerprint) =
+        let (fingerprint_alg, remote_fingerprint) =
             remote_sdp.get_dtls_fingerprint().ok_or_else(|| {
                 WebRtcError::SdpError(forge_sdp::SdpError::MissingField(
                     "DTLS fingerprint".to_string(),
@@ -251,9 +251,11 @@ impl PeerConnection {
             })?;
 
         // Extract DTLS setup
-        let _remote_setup = remote_sdp.get_dtls_setup().ok_or_else(|| {
+        let remote_setup = remote_sdp.get_dtls_setup().ok_or_else(|| {
             WebRtcError::SdpError(forge_sdp::SdpError::MissingField("DTLS setup".to_string()))
         })?;
+
+        validate_dtls_fingerprint(&fingerprint_alg, &remote_fingerprint)?;
 
         debug!(
             "Remote ICE credentials: ufrag={}, pwd={}",
@@ -295,7 +297,9 @@ impl PeerConnection {
 
         // Set remote credentials in ICE agent
         let mut ice_agent = self.ice_agent.lock().await;
-        ice_agent.set_remote_credentials(remote_ufrag, remote_pwd);
+        ice_agent
+            .set_remote_credentials(remote_ufrag, remote_pwd)
+            .map_err(|e| WebRtcError::IceError(format!("Failed to set remote credentials: {}", e)))?;
 
         // Add remote candidates to ICE agent
         for candidate in remote_candidates {
@@ -311,7 +315,7 @@ impl PeerConnection {
         self.remote_sdp = Some(sdp.to_string());
 
         // Transition to checking state
-        self.state = ConnectionState::Checking;
+        self.set_state(ConnectionState::Checking);
 
         // Start connectivity checks and DTLS handshake
         info!(
@@ -327,7 +331,7 @@ impl PeerConnection {
             .map_err(|e| WebRtcError::ConnectionFailed(format!("ICE checks failed: {}", e)))?;
 
         if !checks_succeeded {
-            self.state = ConnectionState::Failed;
+            self.set_state(ConnectionState::Failed);
             return Err(WebRtcError::ConnectionFailed(
                 "No ICE candidate pairs succeeded".to_string(),
             ));
@@ -358,21 +362,29 @@ impl PeerConnection {
         {
             use forge_rtp::dtls::{DtlsConnection, DtlsContext, DtlsRole};
 
+            let dtls_role = match remote_setup {
+                DtlsSetup::Active => DtlsRole::Server,
+                DtlsSetup::Passive => DtlsRole::Client,
+                DtlsSetup::Actpass | DtlsSetup::Holdconn => {
+                    return Err(WebRtcError::SdpError(forge_sdp::SdpError::Internal(
+                        "Invalid DTLS setup value in answer".to_string(),
+                    )))
+                }
+            };
+
             info!(
                 "Starting DTLS handshake with remote fingerprint: {}",
                 remote_fingerprint
             );
 
-            let dtls_ctx =
-                DtlsContext::new(self.dtls_cert.clone(), DtlsRole::Client).map_err(|e| {
-                    WebRtcError::DtlsError(format!("Failed to create DTLS context: {}", e))
-                })?;
+            let dtls_ctx = DtlsContext::new(self.dtls_cert.clone(), dtls_role).map_err(|e| {
+                WebRtcError::DtlsError(format!("Failed to create DTLS context: {}", e))
+            })?;
 
-            let dtls_conn =
-                DtlsConnection::new(&dtls_ctx, DtlsRole::Client, Some(remote_fingerprint))
-                    .map_err(|e| {
-                        WebRtcError::DtlsError(format!("Failed to create DTLS connection: {}", e))
-                    })?;
+            let dtls_conn = DtlsConnection::new(&dtls_ctx, dtls_role, Some(remote_fingerprint))
+                .map_err(|e| {
+                    WebRtcError::DtlsError(format!("Failed to create DTLS connection: {}", e))
+                })?;
 
             let dtls_conn = Arc::new(Mutex::new(dtls_conn));
             self.dtls_connection = Some(dtls_conn.clone());
@@ -381,6 +393,7 @@ impl PeerConnection {
             let task_socket = socket.clone();
             let task_remote_addr = remote_addr;
             let task_connection_id = self.connection_id.clone();
+            let task_state = self.state.clone();
 
             let dtls_task = tokio::spawn(async move {
                 if let Err(e) = Self::drive_dtls_handshake(
@@ -388,6 +401,7 @@ impl PeerConnection {
                     task_remote_addr,
                     dtls_conn,
                     task_connection_id,
+                    task_state,
                 )
                 .await
                 {
@@ -400,11 +414,13 @@ impl PeerConnection {
             debug!("DTLS handshake task spawned");
         }
 
-        // Note: State will transition to Connected after DTLS handshake completes
-        // For now, mark as connected after ICE succeeds (DTLS runs in background)
-        self.state = ConnectionState::Connected;
+        // Note: State will transition to Connected after DTLS handshake completes.
+        #[cfg(not(feature = "dtls"))]
+        {
+            self.set_state(ConnectionState::Connected);
+        }
 
-        info!("Connection established for {}", self.connection_id);
+        info!("ICE connectivity established for {}", self.connection_id);
 
         Ok(())
     }
@@ -429,7 +445,18 @@ impl PeerConnection {
 
     /// Get the current connection state
     pub fn get_state(&self) -> ConnectionState {
-        self.state
+        *self
+            .state
+            .lock()
+            .expect("state mutex should not be poisoned")
+    }
+
+    fn set_state(&self, state: ConnectionState) {
+        let mut guard = self
+            .state
+            .lock()
+            .expect("state mutex should not be poisoned");
+        *guard = state;
     }
 
     /// Get the connection ID
@@ -477,6 +504,7 @@ impl PeerConnection {
         remote_addr: std::net::SocketAddr,
         dtls_conn: Arc<Mutex<forge_rtp::dtls::DtlsConnection>>,
         connection_id: String,
+        state: Arc<StdMutex<ConnectionState>>,
     ) -> Result<()> {
         use forge_rtp::dtls::DtlsState;
 
@@ -486,7 +514,15 @@ impl PeerConnection {
         let mut dtls = dtls_conn.lock().await;
         let (complete, outgoing) = dtls
             .handshake(None)
-            .map_err(|e| WebRtcError::DtlsError(format!("Failed to initiate handshake: {}", e)))?;
+            .map_err(|e| {
+                {
+                    let mut guard = state
+                        .lock()
+                        .expect("state mutex should not be poisoned");
+                    *guard = ConnectionState::Failed;
+                }
+                WebRtcError::DtlsError(format!("Failed to initiate handshake: {}", e))
+            })?;
 
         if !outgoing.is_empty() {
             debug!(
@@ -496,13 +532,27 @@ impl PeerConnection {
             socket
                 .send_to(&outgoing, remote_addr)
                 .await
-                .map_err(|e| WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e)))?;
+                .map_err(|e| {
+                    {
+                        let mut guard = state
+                            .lock()
+                            .expect("state mutex should not be poisoned");
+                        *guard = ConnectionState::Failed;
+                    }
+                    WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e))
+                })?;
         }
 
         if complete {
             info!("DTLS handshake completed immediately (unexpected for client)");
             drop(dtls);
-            Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await?;
+            if let Err(err) = Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await {
+                let mut guard = state
+                    .lock()
+                    .expect("state mutex should not be poisoned");
+                *guard = ConnectionState::Failed;
+                return Err(err);
+            }
             return Ok(());
         }
 
@@ -517,17 +567,23 @@ impl PeerConnection {
             // Check for timeout
             if start_time.elapsed() > timeout_duration {
                 error!("DTLS handshake timeout for {}", connection_id);
+                {
+                    let mut guard = state
+                        .lock()
+                        .expect("state mutex should not be poisoned");
+                    *guard = ConnectionState::Failed;
+                }
                 return Err(WebRtcError::DtlsError("Handshake timeout".to_string()));
             }
 
             // Receive packet with timeout
-            let len = match tokio::time::timeout(
+            let (len, addr) = match tokio::time::timeout(
                 tokio::time::Duration::from_secs(1),
-                socket.recv(&mut buf),
+                socket.recv_from(&mut buf),
             )
             .await
             {
-                Ok(Ok(len)) => len,
+                Ok(Ok((len, addr))) => (len, addr),
                 Ok(Err(e)) => {
                     warn!("Socket recv error: {}", e);
                     continue;
@@ -538,7 +594,21 @@ impl PeerConnection {
                     if dtls.state() == DtlsState::Connected {
                         info!("DTLS handshake completed");
                         drop(dtls);
-                        Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await?;
+                        {
+                            let mut guard = state
+                                .lock()
+                                .expect("state mutex should not be poisoned");
+                            *guard = ConnectionState::Connected;
+                        }
+                        if let Err(err) =
+                            Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await
+                        {
+                            let mut guard = state
+                                .lock()
+                                .expect("state mutex should not be poisoned");
+                            *guard = ConnectionState::Failed;
+                            return Err(err);
+                        }
                         return Ok(());
                     }
                     drop(dtls);
@@ -548,6 +618,11 @@ impl PeerConnection {
 
             // Demultiplex packet based on first byte
             if len == 0 {
+                continue;
+            }
+
+            if addr != remote_addr {
+                debug!("Ignoring DTLS packet from unexpected addr {}", addr);
                 continue;
             }
 
@@ -565,6 +640,12 @@ impl PeerConnection {
             // Process DTLS packet
             let mut dtls = dtls_conn.lock().await;
             let (complete, outgoing) = dtls.handshake(Some(&buf[..len])).map_err(|e| {
+                {
+                    let mut guard = state
+                        .lock()
+                        .expect("state mutex should not be poisoned");
+                    *guard = ConnectionState::Failed;
+                }
                 WebRtcError::DtlsError(format!("Handshake processing failed: {}", e))
             })?;
 
@@ -572,6 +653,12 @@ impl PeerConnection {
             if !outgoing.is_empty() {
                 debug!("Sending DTLS response ({} bytes)", outgoing.len());
                 socket.send_to(&outgoing, remote_addr).await.map_err(|e| {
+                    {
+                        let mut guard = state
+                            .lock()
+                            .expect("state mutex should not be poisoned");
+                        *guard = ConnectionState::Failed;
+                    }
                     WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e))
                 })?;
             }
@@ -579,7 +666,20 @@ impl PeerConnection {
             if complete {
                 info!("DTLS handshake completed for {}", connection_id);
                 drop(dtls);
-                Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await?;
+                {
+                    let mut guard = state
+                        .lock()
+                        .expect("state mutex should not be poisoned");
+                    *guard = ConnectionState::Connected;
+                }
+                if let Err(err) = Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await
+                {
+                    let mut guard = state
+                        .lock()
+                        .expect("state mutex should not be poisoned");
+                    *guard = ConnectionState::Failed;
+                    return Err(err);
+                }
                 return Ok(());
             }
 
@@ -606,9 +706,6 @@ impl PeerConnection {
         );
 
         // TODO: Store these keys for SRTP encryption/decryption
-        // For now, just log that we have them
-        debug!("Client master key: {:02X?}", &client_keys.master_key[..8]);
-        debug!("Server master key: {:02X?}", &server_keys.master_key[..8]);
 
         Ok(())
     }
@@ -616,14 +713,32 @@ impl PeerConnection {
 
 /// Generate a unique connection ID
 fn generate_connection_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    format!("webrtc-{}", uuid::Uuid::new_v4())
+}
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
+fn validate_dtls_fingerprint(algorithm: &str, fingerprint: &str) -> Result<()> {
+    if !algorithm.eq_ignore_ascii_case("sha-256") {
+        return Err(WebRtcError::SdpError(forge_sdp::SdpError::Internal(
+            "Unsupported DTLS fingerprint algorithm".to_string(),
+        )));
+    }
 
-    format!("webrtc-{}", timestamp)
+    if fingerprint.len() != 95 {
+        return Err(WebRtcError::SdpError(forge_sdp::SdpError::Internal(
+            "Invalid DTLS fingerprint length".to_string(),
+        )));
+    }
+
+    if !fingerprint
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || c == ':')
+    {
+        return Err(WebRtcError::SdpError(forge_sdp::SdpError::Internal(
+            "Invalid DTLS fingerprint format".to_string(),
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

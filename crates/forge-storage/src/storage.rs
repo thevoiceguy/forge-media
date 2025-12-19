@@ -5,7 +5,7 @@
 use crate::{Result, StorageError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tokio::fs;
 use tracing::{debug, info, warn};
@@ -103,7 +103,7 @@ pub struct StorageManager {
     /// Active room-level recordings (room_id -> recording_id)
     active_room_recordings: HashMap<String, String>,
     /// Base directory for recordings
-    _base_dir: PathBuf,
+    base_dir: PathBuf,
     /// Retention period (recordings older than this will be deleted)
     retention_period: Duration,
     /// Maximum storage size in bytes (0 = unlimited)
@@ -125,7 +125,7 @@ impl StorageManager {
         Self {
             recordings: HashMap::new(),
             active_room_recordings: HashMap::new(),
-            _base_dir: base_dir.as_ref().to_path_buf(),
+            base_dir: base_dir.as_ref().to_path_buf(),
             retention_period,
             max_storage_bytes,
         }
@@ -133,6 +133,27 @@ impl StorageManager {
 
     /// Register a new recording
     pub fn register_recording(&mut self, info: RecordingInfo) {
+        if self.recordings.contains_key(&info.id) {
+            warn!(
+                recording_id = %info.id,
+                "Recording already registered; skipping duplicate"
+            );
+            return;
+        }
+
+        let mut info = info;
+        match self.normalize_recording_path(&info.path) {
+            Ok(path) => info.path = path,
+            Err(err) => {
+                warn!(
+                    recording_id = %info.id,
+                    error = %err,
+                    "Recording path rejected; skipping registration"
+                );
+                return;
+            }
+        }
+
         debug!("Registering recording: {}", info.id);
         if info.participant_id.is_none() {
             self.active_room_recordings
@@ -227,11 +248,22 @@ impl StorageManager {
 
     /// Delete a recording
     pub async fn delete_recording(&mut self, id: &str) -> Result<()> {
-        let recording = self.recordings.remove(id).ok_or_else(|| {
+        let mut recording = self.recordings.get(id).cloned().ok_or_else(|| {
             StorageError::RecordingNotFound(format!("Recording {} not found", id))
         })?;
 
+        recording.path = self.normalize_recording_path(&recording.path)?;
         recording.delete().await?;
+
+        if recording.participant_id.is_none() {
+            if let Some(active_id) = self.active_room_recordings.get(&recording.room_id) {
+                if active_id == id {
+                    self.active_room_recordings.remove(&recording.room_id);
+                }
+            }
+        }
+
+        self.recordings.remove(id);
         info!("Deleted recording {}", id);
         Ok(())
     }
@@ -331,6 +363,44 @@ impl StorageManager {
         );
         Ok(deleted_count)
     }
+
+    fn normalize_recording_path(&self, path: &Path) -> Result<PathBuf> {
+        if path.is_absolute() {
+            if self.has_relative_components(path) {
+                return Err(StorageError::Internal(format!(
+                    "Recording path contains invalid components: {}",
+                    path.display()
+                )));
+            }
+            if !path.starts_with(&self.base_dir) {
+                return Err(StorageError::Internal(format!(
+                    "Recording path is outside base dir: {}",
+                    path.display()
+                )));
+            }
+            return Ok(path.to_path_buf());
+        }
+
+        if !self.is_safe_relative_path(path) {
+            return Err(StorageError::Internal(format!(
+                "Recording path contains invalid components: {}",
+                path.display()
+            )));
+        }
+
+        Ok(self.base_dir.join(path))
+    }
+
+    fn is_safe_relative_path(&self, path: &Path) -> bool {
+        path.components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    }
+
+    fn has_relative_components(&self, path: &Path) -> bool {
+        path.components().any(|component| {
+            matches!(component, Component::ParentDir | Component::CurDir)
+        })
+    }
 }
 
 impl Default for StorageManager {
@@ -353,7 +423,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("test.wav");
 
-        let mut info = RecordingInfo::new(
+        let info = RecordingInfo::new(
             "rec-1",
             path.clone(),
             "room-1",
@@ -384,7 +454,8 @@ mod tests {
     #[test]
     fn test_list_room_recordings() {
         let temp_dir = TempDir::new().unwrap();
-        let mut manager = StorageManager::default();
+        let mut manager =
+            StorageManager::new(temp_dir.path(), Duration::from_secs(3600), 1_000_000);
 
         let path1 = temp_dir.path().join("rec1.wav");
         let path2 = temp_dir.path().join("rec2.wav");

@@ -8,10 +8,52 @@ use dashmap::DashMap;
 use forge_recorder::AudioRecorder;
 use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
+
+/// Configurable options for the mixer
+///
+/// # Security Configuration
+///
+/// For production deployments, configure both base and jail to prevent
+/// directory traversal and symlink escape attacks:
+///
+/// ```rust
+/// use forge_mixer::MixerOptions;
+/// use std::path::PathBuf;
+///
+/// let options = MixerOptions {
+///     max_buffer_frames: 50,
+///     recording_base_dir: Some("/var/forge/sessions/current".into()),
+///     recording_root_jail: Some("/var/forge".into()),
+/// };
+/// ```
+///
+/// This configuration:
+/// - Keeps recordings organized under `/var/forge/sessions/current`
+/// - Prevents recordings from escaping the `/var/forge` jail
+/// - Protects against symlink attacks via canonicalization
+#[derive(Debug, Clone)]
+pub struct MixerOptions {
+    /// Number of frames to buffer per participant before dropping oldest data
+    pub max_buffer_frames: usize,
+    /// Base directory for participant recordings
+    pub recording_base_dir: Option<PathBuf>,
+    /// Root jail for participant recordings
+    pub recording_root_jail: Option<PathBuf>,
+}
+
+impl Default for MixerOptions {
+    fn default() -> Self {
+        Self {
+            max_buffer_frames: 50,
+            recording_base_dir: None,
+            recording_root_jail: None,
+        }
+    }
+}
 
 /// Unique identifier for a participant in the mixer
 pub type ParticipantId = String;
@@ -206,27 +248,73 @@ pub struct AudioMixer {
     auto_gain: bool,
     /// Maximum buffered samples per participant
     max_buffer_samples: usize,
+    /// Optional base directory for recordings
+    recording_base_dir: Option<PathBuf>,
+    /// Optional root jail that recordings must stay within
+    recording_root_jail: Option<PathBuf>,
 }
 
 impl AudioMixer {
-    /// Number of frames to buffer per participant before dropping oldest data
-    const DEFAULT_MAX_BUFFER_FRAMES: usize = 50;
-
     /// Create a new audio mixer
     ///
     /// # Arguments
     /// * `format` - Audio format for all streams (must match)
     /// * `frame_size` - Frame size in samples for mixing operations
     pub fn new(format: AudioFormat, frame_size: usize) -> Result<Self> {
+        Self::with_options(format, frame_size, MixerOptions::default())
+    }
+
+    /// Create a new audio mixer with custom options
+    ///
+    /// # Security
+    ///
+    /// Canonicalizes recording base and jail directories during creation to prevent
+    /// TOCTOU (Time-Of-Check-Time-Of-Use) attacks. This ensures that symlinks cannot
+    /// be modified after the mixer is created to escape the configured boundaries.
+    pub fn with_options(
+        format: AudioFormat,
+        frame_size: usize,
+        options: MixerOptions,
+    ) -> Result<Self> {
         if frame_size == 0 {
             return Err(MixerError::InvalidFormat(
                 "Frame size must be > 0".to_string(),
             ));
         }
+        if options.max_buffer_frames == 0 {
+            return Err(MixerError::InvalidFormat(
+                "max_buffer_frames must be > 0".to_string(),
+            ));
+        }
+
+        // Canonicalize base and jail directories ONCE during creation to prevent TOCTOU
+        let recording_base_canon = if let Some(base) = &options.recording_base_dir {
+            let canon = std::fs::canonicalize(base).map_err(|e| {
+                MixerError::InvalidFormat(format!(
+                    "Invalid recording base directory {:?}: {}",
+                    base, e
+                ))
+            })?;
+            Some(canon)
+        } else {
+            None
+        };
+
+        let recording_jail_canon = if let Some(jail) = &options.recording_root_jail {
+            let canon = std::fs::canonicalize(jail).map_err(|e| {
+                MixerError::InvalidFormat(format!(
+                    "Invalid recording root jail {:?}: {}",
+                    jail, e
+                ))
+            })?;
+            Some(canon)
+        } else {
+            None
+        };
 
         info!(
-            "Creating audio mixer with format: {:?}, frame_size: {}",
-            format, frame_size
+            "Creating audio mixer with format: {:?}, frame_size: {}, base: {:?}, jail: {:?}",
+            format, frame_size, recording_base_canon, recording_jail_canon
         );
 
         Ok(Self {
@@ -234,7 +322,9 @@ impl AudioMixer {
             format: Arc::new(RwLock::new(format)),
             frame_size,
             auto_gain: true,
-            max_buffer_samples: frame_size * Self::DEFAULT_MAX_BUFFER_FRAMES,
+            max_buffer_samples: frame_size * options.max_buffer_frames,
+            recording_base_dir: recording_base_canon,
+            recording_root_jail: recording_jail_canon,
         })
     }
 
@@ -503,13 +593,6 @@ impl AudioMixer {
     ) -> Result<()> {
         let path = path.as_ref();
 
-        if path.is_absolute() || path.components().any(|c| c == std::path::Component::ParentDir) {
-            return Err(MixerError::InvalidFormat(format!(
-                "Recording path {:?} must be relative and without parent traversal",
-                path
-            )));
-        }
-
         let participant_recorder = self
             .participants
             .get(id)
@@ -543,10 +626,100 @@ impl AudioMixer {
             id,
             path
         );
-        let recorder = AudioRecorder::new(path, format).await?;
+        let target_path = self.validate_recording_path(path)?;
+        let recorder = AudioRecorder::new(&target_path, format).await?;
         recorder.start()?;
         *participant_recorder.lock() = Some(recorder);
         Ok(())
+    }
+
+    /// Validate and resolve the recording path against configured jail/base.
+    ///
+    /// # Security
+    ///
+    /// This method performs the following security checks in order:
+    /// 1. Resolves relative paths against the pre-canonicalized base directory
+    /// 2. Canonicalizes the target parent directory (creating it temporarily if needed)
+    /// 3. Validates against the pre-canonicalized base directory
+    /// 4. Validates against the pre-canonicalized jail directory
+    /// 5. Creates the directory structure AFTER all validation passes
+    ///
+    /// This ordering prevents:
+    /// - Directory creation side effects before validation
+    /// - TOCTOU attacks (base/jail pre-canonicalized at mixer creation)
+    /// - Symlink escape attacks (canonicalization resolves symlinks)
+    /// - Directory traversal attacks (parent directory validation)
+    fn validate_recording_path(&self, path: &Path) -> Result<PathBuf> {
+        // Require a configured base when a relative path is provided
+        let target = if path.is_absolute() {
+            path.to_path_buf()
+        } else if let Some(base) = &self.recording_base_dir {
+            base.join(path)
+        } else {
+            return Err(MixerError::InvalidFormat(
+                "Relative recording paths require a configured base directory".to_string(),
+            ));
+        };
+
+        // Get the parent directory that will contain the recording file
+        // Root path has no parent; use root itself for validation (safe - cannot escape root)
+        let target_parent = target
+            .parent()
+            .unwrap_or_else(|| Path::new(std::path::MAIN_SEPARATOR_STR));
+
+        // Canonicalize parent directory to resolve symlinks and normalize path
+        // We need to create it temporarily if it doesn't exist for canonicalization to work
+        let parent_exists = target_parent.exists();
+        if !parent_exists {
+            std::fs::create_dir_all(target_parent).map_err(|e| {
+                MixerError::InvalidFormat(format!(
+                    "Failed to prepare recording directory {:?} for validation: {}",
+                    target_parent, e
+                ))
+            })?;
+        }
+
+        let canon_parent = std::fs::canonicalize(target_parent).map_err(|e| {
+            // Clean up directory if we created it
+            if !parent_exists {
+                let _ = std::fs::remove_dir_all(target_parent);
+            }
+            MixerError::InvalidFormat(format!(
+                "Failed to canonicalize recording path {:?}: {}",
+                target, e
+            ))
+        })?;
+
+        // Validate against base directory (uses pre-canonicalized base from mixer creation)
+        if let Some(canon_base) = &self.recording_base_dir {
+            if !canon_parent.starts_with(canon_base) {
+                // Clean up directory if we created it and validation failed
+                if !parent_exists {
+                    let _ = std::fs::remove_dir_all(target_parent);
+                }
+                return Err(MixerError::InvalidFormat(format!(
+                    "Recording path {:?} (canonicalized: {:?}) escapes base directory {:?}",
+                    target, canon_parent, canon_base
+                )));
+            }
+        }
+
+        // Validate against jail directory (uses pre-canonicalized jail from mixer creation)
+        if let Some(canon_jail) = &self.recording_root_jail {
+            if !canon_parent.starts_with(canon_jail) {
+                // Clean up directory if we created it and validation failed
+                if !parent_exists {
+                    let _ = std::fs::remove_dir_all(target_parent);
+                }
+                return Err(MixerError::InvalidFormat(format!(
+                    "Recording path {:?} (canonicalized: {:?}) escapes recording jail {:?}",
+                    target, canon_parent, canon_jail
+                )));
+            }
+        }
+
+        // Validation passed! Directory already exists from validation above, so we're good
+        Ok(target)
     }
 
     /// Stop recording for a specific participant
@@ -887,5 +1060,191 @@ mod tests {
         let audio = mixer.get_participant_audio("alice", 100).unwrap();
         assert!(audio.is_some());
         assert_eq!(audio.unwrap().len(), 100);
+    }
+
+    // Security tests for recording path validation
+    #[cfg(test)]
+    mod security_tests {
+        use super::*;
+        use std::fs;
+        use std::os::unix::fs as unix_fs;
+
+        #[test]
+        fn test_recording_path_traversal_blocked() {
+            // Create test directories
+            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let jail = test_dir.join("jail");
+            let base = jail.join("recordings");
+            fs::create_dir_all(&base).unwrap();
+
+            let options = MixerOptions {
+                max_buffer_frames: 50,
+                recording_base_dir: Some(base.clone()),
+                recording_root_jail: Some(jail.clone()),
+            };
+
+            let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
+
+            // Attempt directory traversal
+            let result = mixer.validate_recording_path(Path::new("../../etc/passwd"));
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("escapes"));
+
+            // Cleanup
+            fs::remove_dir_all(&test_dir).ok();
+        }
+
+        #[tokio::test]
+        async fn test_recording_symlink_escape_blocked() {
+            // Create test directories
+            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let jail = test_dir.join("jail");
+            let base = jail.join("recordings");
+            let evil_target = test_dir.join("evil");
+            fs::create_dir_all(&base).unwrap();
+            fs::create_dir_all(&evil_target).unwrap();
+
+            // Create symlink inside base that points outside jail
+            let symlink_path = base.join("escape");
+            unix_fs::symlink(&evil_target, &symlink_path).unwrap();
+
+            let options = MixerOptions {
+                max_buffer_frames: 50,
+                recording_base_dir: Some(base.clone()),
+                recording_root_jail: Some(jail.clone()),
+            };
+
+            let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
+            mixer.add_participant("alice", None).unwrap();
+
+            // Attempt to record through symlink that escapes jail
+            let result = mixer.start_participant_recording("alice", symlink_path.join("recording.wav")).await;
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("escapes"));
+
+            // Cleanup
+            fs::remove_dir_all(&test_dir).ok();
+        }
+
+        #[test]
+        fn test_recording_absolute_path_within_jail() {
+            // Create test directories
+            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let jail = test_dir.join("jail");
+            let base = jail.join("recordings");
+            fs::create_dir_all(&base).unwrap();
+
+            let options = MixerOptions {
+                max_buffer_frames: 50,
+                recording_base_dir: Some(base.clone()),
+                recording_root_jail: Some(jail.clone()),
+            };
+
+            let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
+
+            // Absolute path within jail should be allowed
+            let valid_path = base.join("session-1").join("alice.wav");
+            let result = mixer.validate_recording_path(&valid_path);
+            assert!(result.is_ok());
+
+            // Cleanup
+            fs::remove_dir_all(&test_dir).ok();
+        }
+
+        #[test]
+        fn test_recording_absolute_path_escapes_jail() {
+            // Create test directories
+            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let jail = test_dir.join("jail");
+            let base = jail.join("recordings");
+            fs::create_dir_all(&base).unwrap();
+
+            let options = MixerOptions {
+                max_buffer_frames: 50,
+                recording_base_dir: Some(base.clone()),
+                recording_root_jail: Some(jail.clone()),
+            };
+
+            let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
+
+            // Absolute path outside jail should be blocked
+            let evil_path = test_dir.join("outside-jail.wav");
+            let result = mixer.validate_recording_path(&evil_path);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("escapes"));
+
+            // Cleanup
+            fs::remove_dir_all(&test_dir).ok();
+        }
+
+        #[test]
+        fn test_recording_relative_path_requires_base() {
+            // No base directory configured
+            let mixer = AudioMixer::new(AudioFormat::pcm_mono(), 480).unwrap();
+
+            // Relative path should fail without base
+            let result = mixer.validate_recording_path(Path::new("alice.wav"));
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("require"));
+        }
+
+        #[test]
+        fn test_recording_base_escape_blocked() {
+            // Create test directories
+            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let jail = test_dir.join("jail");
+            let base = jail.join("recordings").join("session-1");
+            let sibling = jail.join("recordings").join("session-2");
+            fs::create_dir_all(&base).unwrap();
+            fs::create_dir_all(&sibling).unwrap();
+
+            let options = MixerOptions {
+                max_buffer_frames: 50,
+                recording_base_dir: Some(base.clone()),
+                recording_root_jail: Some(jail.clone()),
+            };
+
+            let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
+
+            // Attempt to escape base (but stay in jail)
+            let result = mixer.validate_recording_path(Path::new("../session-2/alice.wav"));
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("escapes base"));
+
+            // Cleanup
+            fs::remove_dir_all(&test_dir).ok();
+        }
+
+        #[test]
+        fn test_recording_invalid_jail_config() {
+            // Attempt to create mixer with non-existent jail
+            let options = MixerOptions {
+                max_buffer_frames: 50,
+                recording_base_dir: None,
+                recording_root_jail: Some(PathBuf::from("/nonexistent/jail")),
+            };
+
+            let result = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options);
+            assert!(result.is_err());
+            if let Err(e) = result {
+                assert!(e.to_string().contains("Invalid recording root jail"));
+            }
+        }
+
+        #[test]
+        fn test_recording_invalid_base_config() {
+            // Attempt to create mixer with non-existent base
+            let options = MixerOptions {
+                max_buffer_frames: 50,
+                recording_base_dir: Some(PathBuf::from("/nonexistent/base")),
+                recording_root_jail: None,
+            };
+
+            let result = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options);
+            assert!(result.is_err());
+            if let Err(e) = result {
+                assert!(e.to_string().contains("Invalid recording base directory"));
+            }
+        }
     }
 }

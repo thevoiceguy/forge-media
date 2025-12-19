@@ -1133,11 +1133,12 @@ dependencies = [
  "clap",
  "dashmap",
  "forge-ai-stream",
- "forge-conference-processor",
+ "forge-conference",
  "forge-core",
  "forge-engine",
  "forge-ha",
  "forge-ice",
+ "forge-mixer",
  "forge-rtp",
  "forge-sdp",
  "forge-siprec",
@@ -1171,7 +1172,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "forge-conference-processor"
+name = "forge-conference"
 version = "0.3.1"
 dependencies = [
  "bytes",
@@ -1351,7 +1352,9 @@ dependencies = [
  "forge-recorder",
  "parking_lot",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

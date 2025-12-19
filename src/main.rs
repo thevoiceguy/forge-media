@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
         xdp_interface: config.engine.xdp.interface.clone(),
         xdp_mode: format!("{:?}", config.engine.xdp.mode).to_lowercase(),
         ai_allowed_endpoints: config.api.ai_allowed_endpoints.clone(),
+        mixer_max_buffer_frames: config.engine.mixer.max_buffer_frames,
         ..Default::default()
     };
 

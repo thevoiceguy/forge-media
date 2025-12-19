@@ -267,7 +267,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 mod tests {
     use super::*;
     use axum::Router;
-    use forge_conference_processor::ConferenceBridge;
+    use forge_conference::ConferenceBridge;
     use forge_engine::SessionManager;
     use std::sync::Arc;
 

@@ -69,11 +69,16 @@ impl ConferenceRoom {
     /// * `id` - Unique room identifier
     /// * `format` - Audio format for all streams
     /// * `frame_size` - Frame size for mixing operations (e.g., 480 for 10ms at 48kHz)
-    pub fn new<S: Into<String>>(id: S, format: AudioFormat, frame_size: usize) -> Result<Self> {
+    pub fn new<S: Into<String>>(
+        id: S,
+        format: AudioFormat,
+        frame_size: usize,
+        mixer_options: forge_mixer::MixerOptions,
+    ) -> Result<Self> {
         let id = id.into();
         info!("Creating conference room: {}", id);
 
-        let mixer = AudioMixer::new(format, frame_size)?;
+        let mixer = AudioMixer::with_options(format, frame_size, mixer_options.clone())?;
 
         Ok(Self {
             id,
@@ -1292,6 +1297,8 @@ pub struct ConferenceBridge {
     default_format: AudioFormat,
     /// Default frame size for mixing
     default_frame_size: usize,
+    /// Mixer options to apply to new rooms
+    mixer_options: forge_mixer::MixerOptions,
 }
 
 impl ConferenceBridge {
@@ -1300,13 +1307,19 @@ impl ConferenceBridge {
     /// # Arguments
     /// * `default_format` - Default audio format for new rooms
     /// * `default_frame_size` - Default frame size for mixing (e.g., 480 for 10ms at 48kHz)
-    pub fn new(default_format: AudioFormat, default_frame_size: usize) -> Result<Self> {
+    /// * `mixer_options` - Mixer configuration for all rooms
+    pub fn new(
+        default_format: AudioFormat,
+        default_frame_size: usize,
+        mixer_options: forge_mixer::MixerOptions,
+    ) -> Result<Self> {
         info!("Creating conference bridge");
 
         Ok(Self {
             rooms: Arc::new(DashMap::new()),
             default_format,
             default_frame_size,
+            mixer_options,
         })
     }
 
@@ -1334,6 +1347,7 @@ impl ConferenceBridge {
             &room_id,
             format,
             self.default_frame_size,
+            self.mixer_options.clone(),
         )?);
 
         self.rooms.insert(room_id.clone(), room.clone());
@@ -1433,7 +1447,12 @@ impl ConferenceBridge {
 
 impl Default for ConferenceBridge {
     fn default() -> Self {
-        Self::new(AudioFormat::pcm_mono(), 480).unwrap()
+        Self::new(
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap()
     }
 }
 
@@ -1444,7 +1463,13 @@ mod tests {
 
     #[test]
     fn test_conference_room_lifecycle() {
-        let room = ConferenceRoom::new("test-room", AudioFormat::pcm_mono(), 480).unwrap();
+        let room = ConferenceRoom::new(
+            "test-room",
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
 
         // Add participants
         room.add_participant("alice", false).unwrap();
@@ -1463,7 +1488,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let recording_path = temp_dir.path().join("conference.wav");
 
-        let room = ConferenceRoom::new("test-room", AudioFormat::pcm_mono(), 480).unwrap();
+        let room = ConferenceRoom::new(
+            "test-room",
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
 
         // Start recording
         room.start_recording(&recording_path, None).await.unwrap();
@@ -1535,7 +1566,13 @@ mod tests {
 
     #[test]
     fn test_mix_for_participant() {
-        let room = ConferenceRoom::new("test-room", AudioFormat::pcm_mono(), 480).unwrap();
+        let room = ConferenceRoom::new(
+            "test-room",
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
 
         room.add_participant("alice", false).unwrap();
         room.add_participant("bob", false).unwrap();

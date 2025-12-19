@@ -893,9 +893,9 @@ async fn get_participant_metadata(
 
     // Convert to response
     let state_str = match metadata.state {
-        forge_conference_processor::ParticipantState::Active => "active",
-        forge_conference_processor::ParticipantState::Muted => "muted",
-        forge_conference_processor::ParticipantState::OnHold => "on_hold",
+        forge_conference::ParticipantState::Active => "active",
+        forge_conference::ParticipantState::Muted => "muted",
+        forge_conference::ParticipantState::OnHold => "on_hold",
     };
 
     let response = ParticipantMetadataResponse {
@@ -941,9 +941,9 @@ async fn get_all_participants_metadata(
         .into_iter()
         .map(|metadata| {
             let state_str = match metadata.state {
-                forge_conference_processor::ParticipantState::Active => "active",
-                forge_conference_processor::ParticipantState::Muted => "muted",
-                forge_conference_processor::ParticipantState::OnHold => "on_hold",
+                forge_conference::ParticipantState::Active => "active",
+                forge_conference::ParticipantState::Muted => "muted",
+                forge_conference::ParticipantState::OnHold => "on_hold",
             };
 
             ParticipantMetadataResponse {
@@ -993,9 +993,9 @@ async fn update_participant_state(
 
     // Parse state
     let state_enum = match request.state.to_lowercase().as_str() {
-        "active" => forge_conference_processor::ParticipantState::Active,
-        "muted" => forge_conference_processor::ParticipantState::Muted,
-        "on_hold" | "onhold" => forge_conference_processor::ParticipantState::OnHold,
+        "active" => forge_conference::ParticipantState::Active,
+        "muted" => forge_conference::ParticipantState::Muted,
+        "on_hold" | "onhold" => forge_conference::ParticipantState::OnHold,
         _ => {
             return Err(ApiError::InvalidRequest(format!(
                 "Invalid state '{}'. Must be 'active', 'muted', or 'on_hold'",
@@ -1057,7 +1057,7 @@ async fn configure_room(
         .map_err(|e| ApiError::RoomNotFound(format!("Room not found: {}", e)))?;
 
     // Build RoomConfig from request
-    let room_config = forge_conference_processor::RoomConfig {
+    let room_config = forge_conference::RoomConfig {
         guest_pin: request.guest_pin,
         host_pin: request.host_pin,
         require_guest_pin: request.require_guest_pin,
@@ -1086,7 +1086,7 @@ async fn configure_room(
 
     // Load global config (this should come from AppState in a real implementation)
     // For now, use default global config
-    let global_config = forge_conference_processor::ConferenceConfig::default();
+    let global_config = forge_conference::ConferenceConfig::default();
 
     // Configure room
     room.configure(room_config, &global_config)
@@ -1235,7 +1235,7 @@ async fn promote_participant(
     let auth_result = room.authenticate_participant(&participant_id, &request.host_pin);
 
     match auth_result {
-        forge_conference_processor::PinAuthResult::HostAuthenticated => {
+        forge_conference::PinAuthResult::HostAuthenticated => {
             // Promote participant to host
             room.promote_to_host(&participant_id)
                 .map_err(|e| ApiError::Internal(format!("Failed to promote participant: {}", e)))?;
@@ -1267,9 +1267,10 @@ mod tests {
 
     fn create_test_state() -> Arc<AppState> {
         let bridge = Arc::new(
-            forge_conference_processor::ConferenceBridge::new(
+            forge_conference::ConferenceBridge::new(
                 forge_core::AudioFormat::pcm_mono(),
                 480,
+                forge_mixer::MixerOptions::default(),
             )
             .unwrap(),
         );

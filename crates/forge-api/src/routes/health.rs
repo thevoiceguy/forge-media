@@ -81,7 +81,7 @@ mod tests {
         let state = Arc::new(AppState::new(
             forge_engine::SessionManager::new(Default::default(), None),
             Arc::new(crate::routes::prometheus::MetricsHandle::init()),
-            Arc::new(forge_conference_processor::ConferenceBridge::default()),
+            Arc::new(forge_conference::ConferenceBridge::default()),
             std::env::temp_dir().join("forge-test-recordings"),
             std::env::temp_dir().join("forge-test-prompts"),
             forge_core::config::default_ai_allowed_endpoints(),

@@ -86,6 +86,12 @@ ip_version = "dual_stack"
 # address = "192.168.1.100"
 # advertised_address = "203.0.113.100"  # Public IP for NAT scenarios
 
+# Mixer configuration
+[engine.mixer]
+# Maximum frames to buffer per participant before dropping oldest audio
+# frame_size * max_buffer_frames controls max memory per participant.
+max_buffer_frames = 50
+
 # ============================================================================
 # XDP/eBPF Acceleration Configuration
 # ============================================================================

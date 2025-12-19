@@ -40,6 +40,10 @@ tos = 184
 # IP version: "V4Only", "V6Only", or "DualStack"
 ip_version = "DualStack"
 
+[engine.mixer]
+# Maximum frames to buffer per participant before dropping oldest audio
+max_buffer_frames = 50
+
 [engine.xdp]
 # Enable XDP/eBPF for sub-10µs RTP packet forwarding
 # Requires Linux kernel >= 5.4 and 'xdp' feature compiled

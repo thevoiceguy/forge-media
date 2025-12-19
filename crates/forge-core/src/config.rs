@@ -62,6 +62,10 @@ pub struct EngineConfig {
     /// High Availability configuration
     #[serde(default)]
     pub ha: Option<HAConfig>,
+
+    /// Audio mixer configuration
+    #[serde(default)]
+    pub mixer: MixerConfig,
 }
 
 impl Default for EngineConfig {
@@ -75,6 +79,7 @@ impl Default for EngineConfig {
             xdp: XdpConfig::default(),
             ai_persistence: AIPersistenceConfig::default(),
             ha: None,
+            mixer: MixerConfig::default(),
         }
     }
 }
@@ -92,6 +97,26 @@ fn default_tos() -> u8 {
 
 fn default_session_timeout_secs() -> u64 {
     300
+}
+
+/// Mixer configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MixerConfig {
+    /// Maximum buffered frames per participant before dropping oldest data
+    #[serde(default = "default_mixer_max_buffer_frames")]
+    pub max_buffer_frames: usize,
+}
+
+impl Default for MixerConfig {
+    fn default() -> Self {
+        Self {
+            max_buffer_frames: default_mixer_max_buffer_frames(),
+        }
+    }
+}
+
+pub fn default_mixer_max_buffer_frames() -> usize {
+    50
 }
 
 /// Port range configuration

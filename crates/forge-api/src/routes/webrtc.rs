@@ -422,7 +422,7 @@ mod tests {
         };
         let session_manager = SessionManager::new(session_manager_config, None);
         let metrics_handle = Arc::new(crate::routes::prometheus::MetricsHandle::init());
-        let conference_bridge = Arc::new(forge_conference_processor::ConferenceBridge::default());
+        let conference_bridge = Arc::new(forge_conference::ConferenceBridge::default());
         Arc::new(AppState::new(
             session_manager,
             metrics_handle,

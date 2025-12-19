@@ -14,7 +14,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use forge_api::routes;
 use forge_api::routes::sessions::AppState;
-use forge_conference_processor::ConferenceBridge;
+use forge_conference::ConferenceBridge;
 use forge_engine::{SessionManager, SessionManagerConfig};
 use forge_core::AudioFormat;
 use serde_json::{json, Value};
@@ -32,19 +32,25 @@ fn create_test_app() -> Router {
     let metrics_handle = Arc::new(forge_api::routes::prometheus::MetricsHandle::init());
 
     let conference_bridge = Arc::new(
-        ConferenceBridge::new(AudioFormat::pcm_mono(), 480)
-            .expect("Failed to create conference bridge"),
+        ConferenceBridge::new(
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .expect("Failed to create conference bridge"),
     );
 
     let temp_dir = std::env::temp_dir().join(format!("forge-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).expect("Failed to create temp dir");
 
+    let ai_allowed = forge_core::config::default_ai_allowed_endpoints();
     let state = Arc::new(AppState::new(
         session_manager,
         metrics_handle,
         conference_bridge,
         temp_dir.clone(),
         temp_dir,
+        ai_allowed,
         event_bus,
     ));
 

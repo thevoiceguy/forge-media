@@ -89,7 +89,7 @@ pub struct SessionListResponse {
 pub struct AppState {
     pub session_manager: Arc<SessionManager>,
     pub metrics_handle: Arc<super::prometheus::MetricsHandle>,
-    pub conference_bridge: Arc<forge_conference_processor::ConferenceBridge>,
+    pub conference_bridge: Arc<forge_conference::ConferenceBridge>,
     pub storage_manager: Arc<tokio::sync::Mutex<forge_storage::StorageManager>>,
     pub recording_base_dir: std::path::PathBuf,
     pub prompts_base_dir: std::path::PathBuf,
@@ -107,7 +107,7 @@ impl AppState {
     pub fn new(
         session_manager: Arc<SessionManager>,
         metrics_handle: Arc<super::prometheus::MetricsHandle>,
-        conference_bridge: Arc<forge_conference_processor::ConferenceBridge>,
+        conference_bridge: Arc<forge_conference::ConferenceBridge>,
         recording_base_dir: std::path::PathBuf,
         prompts_base_dir: std::path::PathBuf,
         ai_allowed_endpoints: Vec<String>,
@@ -589,7 +589,7 @@ mod tests {
         };
         let session_manager = SessionManager::new(session_manager_config, None);
         let metrics_handle = Arc::new(crate::routes::prometheus::MetricsHandle::init());
-        let conference_bridge = Arc::new(forge_conference_processor::ConferenceBridge::default());
+        let conference_bridge = Arc::new(forge_conference::ConferenceBridge::default());
         Arc::new(AppState::new(
             session_manager,
             metrics_handle,

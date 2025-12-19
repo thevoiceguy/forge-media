@@ -12,11 +12,12 @@ forge-engine = { path = "../forge-engine" }
 forge-rtp = { path = "../forge-rtp" }
 forge-sdp = { path = "../forge-sdp" }
 forge-storage = { path = "../forge-storage" }
-forge-conference-processor = { path = "../forge-conference-processor" }
+forge-conference = { path = "../forge-conference" }
 forge-siprec = { path = "../forge-siprec" }
 forge-webrtc = { path = "../forge-webrtc" }
 forge-ice = { path = "../forge-ice" }
 forge-ai-stream = { path = "../forge-ai-stream" }
+forge-mixer = { path = "../forge-mixer" }
 forge-ha = { path = "../forge-ha", optional = true }
 
 # Async runtime

@@ -12,7 +12,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use forge_conference_processor::{AudioMode, ConferenceAIConfig, ConferenceAIManager};
+use forge_conference::{AudioMode, ConferenceAIConfig, ConferenceAIManager};
 use forge_core::{CallId, SecureString};
 use forge_engine::ai_integration::{AISessionConfig, AISessionState};
 use serde::{Deserialize, Serialize};
@@ -179,7 +179,7 @@ async fn attach_ai(
         state: format!(
             "{:?}",
             room.ai_state()
-                .unwrap_or(forge_conference_processor::ConferenceAIState::Connecting)
+                .unwrap_or(forge_conference::ConferenceAIState::Connecting)
         ),
         ai_session_state: format!(
             "{:?}",
@@ -224,7 +224,7 @@ async fn get_ai_status(
 
     let ai_state = room
         .ai_state()
-        .unwrap_or(forge_conference_processor::ConferenceAIState::Terminated);
+        .unwrap_or(forge_conference::ConferenceAIState::Terminated);
 
     let call_id = CallId::from(format!("conference-{}", room_id));
     let config = state
@@ -275,7 +275,7 @@ async fn list_conference_ai(
                 if let Some(config) = state.ai_session_manager.get_config(&call_id) {
                     let ai_state = room
                         .ai_state()
-                        .unwrap_or(forge_conference_processor::ConferenceAIState::Terminated);
+                        .unwrap_or(forge_conference::ConferenceAIState::Terminated);
                     let ai_session_state = state
                         .ai_session_manager
                         .get_state(&call_id)

@@ -9,6 +9,7 @@ use axum_server::tls_rustls::{bind_rustls, RustlsConfig};
 use forge_core::EventBus;
 use forge_engine::{SessionManager, SessionManagerConfig};
 use forge_rtp::PortPoolConfig;
+use forge_mixer::MixerOptions;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +46,7 @@ pub struct ApiServerConfig {
     pub xdp_interface: String,
     pub xdp_mode: String,
     pub ai_allowed_endpoints: Vec<String>,
+    pub mixer_max_buffer_frames: usize,
     /// High availability configuration (optional, requires 'ha' feature)
     #[cfg(feature = "ha")]
     pub ha_config: Option<forge_core::config::HAConfig>,
@@ -77,6 +79,7 @@ impl Default for ApiServerConfig {
             xdp_interface: "lo".to_string(),
             xdp_mode: "generic".to_string(),
             ai_allowed_endpoints: forge_core::config::default_ai_allowed_endpoints(),
+            mixer_max_buffer_frames: forge_core::config::default_mixer_max_buffer_frames(),
             #[cfg(feature = "ha")]
             ha_config: None, // HA disabled by default
         }
@@ -176,10 +179,17 @@ impl ApiServer {
         };
 
         // Create conference bridge for media processing
+        let mixer_options = MixerOptions {
+            max_buffer_frames: config.mixer_max_buffer_frames,
+            recording_base_dir: Some(config.recording_base_dir.clone()),
+            recording_root_jail: Some(config.recording_root_jail.clone()),
+        };
+
         let conference_bridge = Arc::new(
-            forge_conference_processor::ConferenceBridge::new(
+            forge_conference::ConferenceBridge::new(
                 forge_core::AudioFormat::pcm_mono(),
                 480, // 10ms frame at 48kHz
+                mixer_options.clone(),
             )
             .expect("Failed to create conference bridge"),
         );

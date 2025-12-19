@@ -57,6 +57,19 @@ pub struct Transcoder {
     pcm_buffer: Vec<i16>,
 }
 
+/// Result from a framed transcode operation
+pub struct TranscodeFrames {
+    /// Encoded output frames
+    pub frames: Vec<Vec<u8>>,
+    /// Total samples per channel represented by the output frames
+    pub samples_per_channel: usize,
+    /// Frame size in samples per channel, if fixed
+    pub frame_samples: Option<usize>,
+}
+
+const MAX_INPUT_BYTES: usize = 1024 * 1024;
+const MAX_BUFFER_SAMPLES: usize = 48_000 * 10;
+
 impl Transcoder {
     /// Create a new transcoder
     ///
@@ -114,6 +127,12 @@ impl Transcoder {
     /// # Returns
     /// Encoded audio data in destination format
     pub fn transcode(&mut self, input: &[u8]) -> Result<Vec<u8>> {
+        if input.len() > MAX_INPUT_BYTES {
+            return Err(TranscoderError::InvalidFormat(
+                "Input payload exceeds maximum allowed size".to_string(),
+            ));
+        }
+
         // Step 1: Decode to PCM (or use input directly if source is PCM)
         let pcm = if let Some(ref mut codec) = self.src_codec {
             codec.decode(input)?
@@ -138,6 +157,74 @@ impl Transcoder {
         };
 
         Ok(output)
+    }
+
+    /// Transcode audio data into codec frames, buffering as needed
+    pub fn transcode_frames(&mut self, input: &[u8]) -> Result<TranscodeFrames> {
+        if input.len() > MAX_INPUT_BYTES {
+            return Err(TranscoderError::InvalidFormat(
+                "Input payload exceeds maximum allowed size".to_string(),
+            ));
+        }
+
+        let pcm = if let Some(ref mut codec) = self.src_codec {
+            codec.decode(input)?
+        } else {
+            self.bytes_to_pcm(input)?
+        };
+
+        let resampled = if let Some(ref mut resampler) = self.resampler {
+            resampler.resample(&pcm)?
+        } else {
+            pcm
+        };
+
+        let channels = self.dst_format.channels as usize;
+        self.pcm_buffer.extend_from_slice(&resampled);
+        let max_buffer = MAX_BUFFER_SAMPLES * channels;
+        if self.pcm_buffer.len() > max_buffer {
+            return Err(TranscoderError::InvalidFormat(
+                "PCM buffer exceeds maximum allowed size".to_string(),
+            ));
+        }
+
+        let frame_samples = self.dst_frame_size();
+        let mut frames = Vec::new();
+        let mut samples_per_channel = 0;
+
+        if let Some(frame_samples) = frame_samples {
+            let frame_len = frame_samples * channels;
+            let mut offset = 0;
+            while self.pcm_buffer.len() >= offset + frame_len {
+                let chunk = &self.pcm_buffer[offset..offset + frame_len];
+                let output = if let Some(ref mut codec) = self.dst_codec {
+                    codec.encode(chunk)?
+                } else {
+                    self.pcm_to_bytes(chunk)
+                };
+                frames.push(output);
+                samples_per_channel += frame_samples;
+                offset += frame_len;
+            }
+            if offset > 0 {
+                self.pcm_buffer.drain(0..offset);
+            }
+        } else {
+            let pcm = std::mem::take(&mut self.pcm_buffer);
+            let output = if let Some(ref mut codec) = self.dst_codec {
+                codec.encode(&pcm)?
+            } else {
+                self.pcm_to_bytes(&pcm)
+            };
+            samples_per_channel = pcm.len() / channels;
+            frames.push(output);
+        }
+
+        Ok(TranscodeFrames {
+            frames,
+            samples_per_channel,
+            frame_samples,
+        })
     }
 
     /// Transcode a batch of audio frames

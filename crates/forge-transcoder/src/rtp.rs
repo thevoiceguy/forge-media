@@ -35,6 +35,8 @@ impl PayloadTypeMap {
             pt if pt == self.pcmu => Some(AudioCodecType::PCMU),
             pt if pt == self.pcma => Some(AudioCodecType::PCMA),
             pt if pt == self.opus => Some(AudioCodecType::Opus),
+            9 => Some(AudioCodecType::G722),
+            18 => Some(AudioCodecType::G729),
             _ => None,
         }
     }
@@ -120,7 +122,46 @@ impl RtpTranscoder {
     /// Vector of transcoded payloads. May be empty if buffering is needed,
     /// or contain multiple payloads if frame size adaptation produces multiple frames.
     pub fn transcode_rtp_payload(&mut self, payload: &[u8]) -> Result<Vec<Vec<u8>>> {
-        self.transcoder.transcode(payload).map(|data| vec![data])
+        let result = self.transcoder.transcode_frames(payload)?;
+        for frame in result.frames {
+            self.output_buffer.push_back(frame);
+        }
+        Ok(self.output_buffer.drain(..).collect())
+    }
+
+    /// Transcode an RTP payload and return output payloads with timestamps
+    pub fn transcode_rtp_payload_with_timestamp(
+        &mut self,
+        payload: &[u8],
+        input_ts: u32,
+    ) -> Result<Vec<(u32, Vec<u8>)>> {
+        let src_rate = self.transcoder.src_format().sample_rate as u64;
+        let dst_rate = self.transcoder.dst_format().sample_rate as u64;
+        let scaled_ts = ((input_ts as u64) * dst_rate / src_rate) as u32;
+
+        if self
+            .last_input_ts
+            .map(|last| last != input_ts)
+            .unwrap_or(true)
+        {
+            self.output_ts_offset = scaled_ts;
+        }
+        self.last_input_ts = Some(input_ts);
+
+        let result = self.transcoder.transcode_frames(payload)?;
+        let frame_samples = result
+            .frame_samples
+            .unwrap_or(result.samples_per_channel);
+
+        let mut outputs = Vec::new();
+        let mut current_ts = self.output_ts_offset;
+        for frame in result.frames {
+            outputs.push((current_ts, frame));
+            current_ts = current_ts.wrapping_add(frame_samples as u32);
+        }
+
+        self.output_ts_offset = current_ts;
+        Ok(outputs)
     }
 
     /// Get source codec type
@@ -162,6 +203,8 @@ mod tests {
         assert_eq!(pt_map.to_codec(0), Some(AudioCodecType::PCMU));
         assert_eq!(pt_map.to_codec(8), Some(AudioCodecType::PCMA));
         assert_eq!(pt_map.to_codec(111), Some(AudioCodecType::Opus));
+        assert_eq!(pt_map.to_codec(9), Some(AudioCodecType::G722));
+        assert_eq!(pt_map.to_codec(18), Some(AudioCodecType::G729));
         assert_eq!(pt_map.to_codec(99), None);
     }
 
@@ -171,6 +214,8 @@ mod tests {
         assert_eq!(pt_map.from_codec(AudioCodecType::PCMU), Some(0));
         assert_eq!(pt_map.from_codec(AudioCodecType::PCMA), Some(8));
         assert_eq!(pt_map.from_codec(AudioCodecType::Opus), Some(111));
+        assert_eq!(pt_map.from_codec(AudioCodecType::G722), Some(9));
+        assert_eq!(pt_map.from_codec(AudioCodecType::G729), Some(18));
         assert_eq!(pt_map.from_codec(AudioCodecType::PCM), None);
     }
 

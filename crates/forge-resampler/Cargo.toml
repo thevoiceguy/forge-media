@@ -1,6 +1,6 @@
 [package]
 name = "forge-resampler"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -10,4 +10,7 @@ repository.workspace = true
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
-rubato = { workspace = true }
+
+[features]
+default = ["fir"]
+fir = []

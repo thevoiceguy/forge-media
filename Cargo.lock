@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mixer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1359,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "forge-recorder"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "audiopus",
  "bytes",
@@ -1376,9 +1376,8 @@ dependencies = [
 
 [[package]]
 name = "forge-resampler"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
- "rubato",
  "thiserror 1.0.69",
  "tracing",
 ]

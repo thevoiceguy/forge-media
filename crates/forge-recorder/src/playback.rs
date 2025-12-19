@@ -3,6 +3,8 @@
 use crate::{RecorderError, Result};
 #[cfg(feature = "opus")]
 use audiopus::coder::Decoder as OpusDecoder;
+#[cfg(feature = "opus")]
+use audiopus::{Channels, SampleRate};
 use hound::WavReader;
 use std::io::BufReader;
 use std::path::Path;
@@ -122,6 +124,8 @@ enum PlaybackReader {
 struct OpusPlayback {
     decoder: OpusDecoder,
     packets: ogg::reading::PacketReader<BufReader<std::fs::File>>,
+    preskip_remaining: usize,
+    pending: Vec<i16>,
 }
 
 #[cfg(feature = "opus")]
@@ -130,38 +134,174 @@ impl OpusPlayback {
         let file = std::fs::File::open(path)?;
         let mut packets = ogg::reading::PacketReader::new(BufReader::new(file));
 
-        // Skip OpusHead and OpusTags packets
-        let _ = packets.read_packet();
+        // Parse OpusHead
+        let head_packet = packets
+            .read_packet()?
+            .ok_or_else(|| RecorderError::InvalidFormat("Missing OpusHead packet".into()))?;
+        let (sample_rate, channels, preskip) = parse_opus_head(&head_packet.data)?;
+
+        // Skip OpusTags
         let _ = packets.read_packet();
 
-        let decoder = OpusDecoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono)
-            .map_err(|e| {
-                RecorderError::Encoding(format!("Failed to create Opus decoder: {:?}", e))
-            })?;
+        let decoder = OpusDecoder::new(sample_rate, channels).map_err(|e| {
+            RecorderError::Encoding(format!("Failed to create Opus decoder: {:?}", e))
+        })?;
 
-        Ok(Self { decoder, packets })
+        Ok(Self {
+            decoder,
+            packets,
+            preskip_remaining: preskip as usize,
+            pending: Vec::new(),
+        })
     }
 
-    fn next_samples(&mut self, _max: usize) -> Result<Option<Vec<i16>>> {
-        match self.packets.read_packet()? {
-            Some(packet) => {
-                tracing::trace!("Decoding Opus packet: {} bytes", packet.data.len());
-                let mut buf = vec![0i16; 1920]; // 40ms at 48kHz mono (48000 * 0.04)
-                let len = self
-                    .decoder
-                    .decode(Some(&packet.data), &mut buf, false)
-                    .map_err(|e| {
-                        tracing::error!("Opus decode error: {:?}", e);
-                        RecorderError::Encoding(format!("Opus decode failed: {:?}", e))
-                    })?;
-                buf.truncate(len);
-                tracing::trace!("Decoded {} samples from Opus packet", len);
-                Ok(Some(buf))
-            }
-            None => {
-                tracing::trace!("No more Opus packets available");
-                Ok(None)
+    fn next_samples(&mut self, max: usize) -> Result<Option<Vec<i16>>> {
+        if max == 0 {
+            return Ok(Some(Vec::new()));
+        }
+
+        let mut out = Vec::with_capacity(max);
+
+        // Drain any pending decoded samples first
+        if !self.pending.is_empty() {
+            let take = max.min(self.pending.len());
+            out.extend_from_slice(&self.pending[..take]);
+            self.pending.drain(..take);
+            if out.len() == max {
+                return Ok(Some(out));
             }
         }
+
+        while out.len() < max {
+            match self.packets.read_packet()? {
+                Some(packet) => {
+                    tracing::trace!("Decoding Opus packet: {} bytes", packet.data.len());
+                    // Max Opus packet is 120ms -> 5760 samples per channel at 48kHz.
+                    let mut buf = vec![0i16; 5760 * 2];
+                    let len = self
+                        .decoder
+                        .decode(Some(&packet.data), &mut buf, false)
+                        .map_err(|e| {
+                            tracing::error!("Opus decode error: {:?}", e);
+                            RecorderError::Encoding(format!("Opus decode failed: {:?}", e))
+                        })?;
+                    buf.truncate(len);
+
+                    // Apply preskip from header
+                    if self.preskip_remaining > 0 {
+                        let skip = self.preskip_remaining.min(buf.len());
+                        buf.drain(..skip);
+                        self.preskip_remaining -= skip;
+                    }
+
+                    if buf.is_empty() {
+                        continue;
+                    }
+
+                    let remaining_capacity = max - out.len();
+                    if buf.len() <= remaining_capacity {
+                        tracing::trace!("Decoded {} samples from Opus packet", buf.len());
+                        out.extend_from_slice(&buf);
+                    } else {
+                        out.extend_from_slice(&buf[..remaining_capacity]);
+                        self.pending.extend_from_slice(&buf[remaining_capacity..]);
+                        tracing::trace!(
+                            "Decoded {} samples, delivering {} and buffering {}",
+                            buf.len(),
+                            remaining_capacity,
+                            buf.len() - remaining_capacity
+                        );
+                    }
+                }
+                None => break,
+            }
+        }
+
+        if out.is_empty() {
+            tracing::trace!("No more Opus packets available");
+            Ok(None)
+        } else {
+            Ok(Some(out))
+        }
+    }
+}
+
+#[cfg(feature = "opus")]
+fn parse_opus_head(data: &[u8]) -> Result<(SampleRate, Channels, u16)> {
+    if data.len() < 19 || &data[..8] != b"OpusHead" {
+        return Err(RecorderError::InvalidFormat(
+            "Invalid OpusHead packet".into(),
+        ));
+    }
+
+    let channels = data[9];
+    let preskip = u16::from_le_bytes([data[10], data[11]]);
+    let input_sample_rate = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
+    let channel_mapping = data[18];
+
+    let sample_rate = match input_sample_rate {
+        8000 => SampleRate::Hz8000,
+        12000 => SampleRate::Hz12000,
+        16000 => SampleRate::Hz16000,
+        24000 => SampleRate::Hz24000,
+        48000 | 0 => SampleRate::Hz48000,
+        other => {
+            tracing::warn!("Unsupported Opus sample rate {} in header, using 48kHz", other);
+            SampleRate::Hz48000
+        }
+    };
+
+    let channels = match (channels, channel_mapping) {
+        (1, 0) => Channels::Mono,
+        (2, 0) => Channels::Stereo,
+        _ => {
+            return Err(RecorderError::UnsupportedCodec(format!(
+                "Unsupported Opus channel layout (channels={}, mapping={})",
+                channels, channel_mapping
+            )))
+        }
+    };
+
+    Ok((sample_rate, channels, preskip))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AudioFormat, AudioRecorder};
+    use tempfile::TempDir;
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn test_opus_playback_respects_max_samples() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.opus");
+
+        // Build a small Opus recording to read back
+        {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let format = AudioFormat::opus_mono();
+                let recorder = AudioRecorder::new(&file_path, format).await.unwrap();
+                recorder.start().unwrap();
+                let samples = vec![5i16; 960 * 4]; // 4 frames
+                recorder.write_samples(&samples).unwrap();
+                recorder.stop().unwrap();
+            });
+        }
+
+        let mut playback = PlaybackSource::open(&file_path).unwrap();
+
+        let first = playback.next_samples(1000).unwrap().unwrap();
+        assert!(first.len() <= 1000);
+
+        let second = playback.next_samples(1000).unwrap().unwrap();
+        assert!(second.len() <= 1000);
+
+        let third = playback.next_samples(1000).unwrap().unwrap();
+        assert!(third.len() <= 1000);
+
+        let end = playback.next_samples(1000).unwrap();
+        assert!(end.is_none());
     }
 }

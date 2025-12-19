@@ -11,6 +11,9 @@ pub use forge_core::{AudioCodec, AudioFormat};
 pub use playback::PlaybackSource;
 pub use recorder::AudioRecorder;
 
+#[cfg(feature = "opus")]
+pub use recorder::OpusMetadata;
+
 /// Recorder error types
 #[derive(Error, Debug)]
 pub enum RecorderError {

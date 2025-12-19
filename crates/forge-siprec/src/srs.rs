@@ -118,11 +118,6 @@ impl ActiveRecording {
         metadata: RecordingSession,
         recording_path: PathBuf,
     ) -> Result<Self> {
-        // Create parent directories
-        if let Some(parent) = recording_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-
         // Open file for writing
         let file_handle = OpenOptions::new()
             .create(true)
@@ -233,7 +228,12 @@ impl SessionRecordingServer {
         }
 
         // Generate recording file path
-        let recording_path = self.generate_recording_path(&session_id);
+        let recording_path = self.generate_recording_path(&session_id)?;
+        if self.config.auto_create_dirs {
+            if let Some(parent) = recording_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
 
         // Create active recording
         let recording =
@@ -348,14 +348,24 @@ impl SessionRecordingServer {
     }
 
     /// Generate recording file path
-    fn generate_recording_path(&self, session_id: &str) -> PathBuf {
-        let filename = format!("{}.rtp", session_id);
-        self.config.storage_path.join(filename)
+    fn generate_recording_path(&self, session_id: &str) -> Result<PathBuf> {
+        let safe_session_id = self.safe_session_id(session_id)?;
+        let filename = format!("{}.rtp", safe_session_id);
+        Ok(self.config.storage_path.join(filename))
     }
 
     /// Store metadata to disk
     async fn store_metadata(&self, session_id: &str, metadata: &RecordingSession) -> Result<()> {
-        let metadata_path = self.config.storage_path.join(format!("{}.xml", session_id));
+        let safe_session_id = self.safe_session_id(session_id)?;
+        let metadata_path = self
+            .config
+            .storage_path
+            .join(format!("{}.xml", safe_session_id));
+        if self.config.auto_create_dirs {
+            if let Some(parent) = metadata_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
 
         let xml = metadata
             .to_xml()
@@ -368,7 +378,11 @@ impl SessionRecordingServer {
 
     /// Load metadata from disk
     pub async fn load_metadata(&self, session_id: &str) -> Result<RecordingSession> {
-        let metadata_path = self.config.storage_path.join(format!("{}.xml", session_id));
+        let safe_session_id = self.safe_session_id(session_id)?;
+        let metadata_path = self
+            .config
+            .storage_path
+            .join(format!("{}.xml", safe_session_id));
 
         let xml = tokio::fs::read_to_string(&metadata_path).await?;
 
@@ -378,6 +392,22 @@ impl SessionRecordingServer {
     /// Get the dialog manager
     pub fn dialog_manager(&self) -> &DialogManager {
         &self.dialog_manager
+    }
+
+    fn safe_session_id<'a>(&self, session_id: &'a str) -> Result<&'a str> {
+        if session_id.is_empty()
+            || session_id == "."
+            || session_id == ".."
+            || session_id.contains('/')
+            || session_id.contains('\\')
+            || session_id.contains('\0')
+        {
+            return Err(SrsError::Storage(format!(
+                "Invalid session id: {}",
+                session_id
+            )));
+        }
+        Ok(session_id)
     }
 }
 

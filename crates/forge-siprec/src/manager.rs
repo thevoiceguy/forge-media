@@ -138,7 +138,7 @@ impl SiprecManager {
                         evt = rx.recv() => {
                             match evt {
                                 Ok(ForgeEvent::SessionActive { call_id, .. }) => {
-                                    let _ = start_session(&sessions, &call_id, &output_dir, format.clone()).await;
+                                    let _ = start_session(&sessions, &call_id, &output_dir, format).await;
                                 }
                                 Ok(ForgeEvent::SessionTerminated { call_id, .. }) => {
                                     let _ = stop_session(&sessions, &call_id);

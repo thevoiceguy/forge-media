@@ -144,6 +144,10 @@ impl SipDialog {
         if !self.is_confirmed() {
             return Err("Cannot send BYE for unconfirmed dialog".to_string());
         }
+        let remote_tag = self
+            .remote_tag
+            .clone()
+            .ok_or_else(|| "Cannot send BYE without remote tag".to_string())?;
 
         let cseq = self.next_cseq();
         Ok(SipRequest::new_bye(
@@ -152,6 +156,8 @@ impl SipDialog {
             &self.call_id,
             cseq,
             self.local_contact,
+            self.local_tag.clone(),
+            Some(remote_tag),
         ))
     }
 }
@@ -253,7 +259,9 @@ pub struct SipRequest {
     method: SipMethod,
     request_uri: String,
     from: String,
+    from_tag: String,
     to: String,
+    to_tag: Option<String>,
     call_id: String,
     cseq: u32,
     contact: String,
@@ -274,6 +282,7 @@ impl SipRequest {
         from_uri: impl Into<String>,
         to_uri: impl Into<String>,
         local_addr: SocketAddr,
+        local_tag: impl Into<String>,
     ) -> Self {
         let from = from_uri.into();
         let to = to_uri.into();
@@ -284,7 +293,9 @@ impl SipRequest {
             method: SipMethod::Invite,
             request_uri: to.clone(),
             from: from.clone(),
+            from_tag: local_tag.into(),
             to: to.clone(),
+            to_tag: None,
             call_id,
             cseq: 1,
             contact,
@@ -308,6 +319,8 @@ impl SipRequest {
         call_id: impl Into<String>,
         cseq: u32,
         local_addr: SocketAddr,
+        from_tag: impl Into<String>,
+        to_tag: Option<String>,
     ) -> Self {
         let from = from_uri.into();
         let to = to_uri.into();
@@ -317,7 +330,9 @@ impl SipRequest {
             method: SipMethod::Bye,
             request_uri: to.clone(),
             from,
+            from_tag: from_tag.into(),
             to,
+            to_tag,
             call_id: call_id.into(),
             cseq,
             contact,
@@ -398,10 +413,17 @@ impl SipRequest {
         request.push_str("Max-Forwards: 70\r\n");
 
         // From header
-        request.push_str(&format!("From: <{}>;tag={}\r\n", self.from, generate_tag()));
+        request.push_str(&format!(
+            "From: <{}>;tag={}\r\n",
+            self.from, self.from_tag
+        ));
 
         // To header
-        request.push_str(&format!("To: <{}>\r\n", self.to));
+        if let Some(ref to_tag) = self.to_tag {
+            request.push_str(&format!("To: <{}>;tag={}\r\n", self.to, to_tag));
+        } else {
+            request.push_str(&format!("To: <{}>\r\n", self.to));
+        }
 
         // Call-ID
         request.push_str(&format!("Call-ID: {}\r\n", self.call_id));
@@ -502,12 +524,18 @@ impl SdpBuilder {
     }
 
     /// Add SRTP (secure RTP) support
-    pub fn enable_srtp(&mut self, stream_index: usize, crypto_suite: &str, key: &str) {
+    pub fn enable_srtp(
+        &mut self,
+        stream_index: usize,
+        tag: u32,
+        crypto_suite: &str,
+        key_material_b64: &str,
+    ) {
         if let Some(media) = self.media_streams.get_mut(stream_index) {
             media.protocol = "RTP/SAVP".to_string();
             media
                 .attributes
-                .push(format!("crypto:1 {} inline:{}", crypto_suite, key));
+                .push(format!("crypto:{} {} inline:{}", tag, crypto_suite, key_material_b64));
         }
     }
 
@@ -551,11 +579,6 @@ impl SdpBuilder {
     }
 }
 
-/// Generate a random SIP tag
-fn generate_tag() -> String {
-    format!("{:x}", rand::random::<u64>())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,6 +590,7 @@ mod tests {
             "sip:src@example.com",
             "sip:srs@recorder.example.com",
             local_addr,
+            "tag-local",
         );
 
         let sip_message = request.build();
@@ -603,6 +627,8 @@ mod tests {
             "test-call-id",
             2,
             local_addr,
+            "tag-local",
+            Some("tag-remote".to_string()),
         );
 
         let sip_message = request.build();
@@ -619,6 +645,7 @@ mod tests {
             "sip:src@example.com",
             "sip:srs@recorder.example.com",
             local_addr,
+            "tag-local",
         );
 
         let sdp = "v=0\r\no=- 123 1 IN IP4 192.168.1.100\r\n";

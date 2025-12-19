@@ -240,23 +240,19 @@ impl SessionRecordingClient {
                     // Add SRTP to SDP
                     let key_info = self.srtp_key_manager.get_key_by_stream(&stream_id).unwrap();
 
-                    // Extract the crypto suite and key for SDP
-                    sdp.enable_srtp(
-                        idx,
-                        &key_info.suite,
-                        &format!(
-                            "{}:{}",
-                            STANDARD.encode(&key_info.key_material.master_key),
-                            STANDARD.encode(&key_info.key_material.master_salt)
-                        ),
-                    );
+                    let mut key_material = Vec::new();
+                    key_material.extend_from_slice(&key_info.key_material.master_key);
+                    key_material.extend_from_slice(&key_info.key_material.master_salt);
+                    let key_material_b64 = STANDARD.encode(&key_material);
+
+                    sdp.enable_srtp(idx, key_info.tag, &key_info.suite, &key_material_b64);
                 }
             }
 
             // Add media stream to metadata
             let media_stream = MediaStream::audio(
                 &stream_id,
-                &stream.destination_address.ip().to_string(),
+                stream.destination_address.ip().to_string(),
                 stream.destination_address.port(),
             )
             .with_format(&stream.codec)
@@ -278,6 +274,7 @@ impl SessionRecordingClient {
                 &dialog.local_uri,
                 &dialog.remote_uri,
                 dialog.local_contact,
+                dialog.local_tag.clone(),
             )
         };
 
@@ -420,7 +417,7 @@ impl SessionRecordingClient {
     /// Stop a recording session
     pub async fn stop_recording(&self, session_id: &str) -> Result<()> {
         // Clone the session data we need before acquiring any locks
-        let (dialog, metadata, stream_ids, sip_call_id) = {
+        let (dialog, metadata, stream_ids) = {
             let session_state = self
                 .active_sessions
                 .get(session_id)
@@ -430,20 +427,12 @@ impl SessionRecordingClient {
                 session_state.dialog.clone(),
                 session_state.metadata.clone(),
                 session_state.stream_ids.clone(),
-                // Get SIP Call-ID synchronously to avoid nested lock
-                {
-                    // Use try_read to avoid blocking
-                    session_state
-                        .dialog
-                        .try_read()
-                        .map(|d| d.call_id.clone())
-                        .unwrap_or_else(|_| {
-                            // Fallback: generate a temporary call-id (shouldn't happen in practice)
-                            format!("temp-{}", session_id)
-                        })
-                },
             )
         }; // Drop the DashMap reference here
+        let sip_call_id = {
+            let dialog_lock = dialog.read().await;
+            dialog_lock.call_id.clone()
+        };
 
         // Update metadata with stop time
         {
@@ -472,7 +461,7 @@ impl SessionRecordingClient {
         self.dialog_manager
             .terminate_dialog(&sip_call_id)
             .await
-            .map_err(|e| SrcError::Sip(e))?;
+            .map_err(SrcError::Sip)?;
 
         // Remove session
         self.active_sessions.remove(session_id);

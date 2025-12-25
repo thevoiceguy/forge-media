@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "forge-transcoder"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "forge-codecs",
@@ -1502,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "forge-transcription"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "forge-core",
  "thiserror 1.0.69",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "forge-webrtc"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "dashmap",
  "forge-core",
@@ -1523,6 +1523,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

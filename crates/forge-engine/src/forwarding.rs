@@ -265,6 +265,18 @@ impl ForwardingEngine {
                     }
                 }
 
+                // Audio tap for call recording
+                if let Some(recorder) = session.recorder.read().await.as_ref() {
+                    // Write decoded PCM samples to recorder
+                    if let Err(e) = recorder.write_samples(&pcm_samples) {
+                        tracing::debug!(
+                            "Failed to write samples to recorder for session {}: {}",
+                            call_id.0,
+                            e
+                        );
+                    }
+                }
+
                 let mut detector = session.inband_detector().lock().await;
                 match detector.process_samples(&pcm_samples) {
                     Ok(events) => {

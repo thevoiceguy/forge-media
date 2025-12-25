@@ -204,6 +204,8 @@ pub struct MediaSession {
     xdp_active: Arc<AtomicBool>,
     /// AI session manager for AI integration (optional, uses interior mutability)
     ai_manager: Arc<RwLock<Option<Arc<crate::ai_integration::AISessionManager>>>>,
+    /// Audio recorder for call recording (optional)
+    pub(crate) recorder: Arc<RwLock<Option<forge_recorder::AudioRecorder>>>,
 }
 
 impl MediaSession {
@@ -307,6 +309,7 @@ impl MediaSession {
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
             ai_manager: Arc::new(RwLock::new(None)),
+            recorder: Arc::new(RwLock::new(None)),
         };
 
         // Publish session created event
@@ -459,6 +462,7 @@ impl MediaSession {
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
             ai_manager: Arc::new(RwLock::new(None)),
+            recorder: Arc::new(RwLock::new(None)),
         };
 
         // Publish session created event
@@ -653,6 +657,7 @@ impl MediaSession {
             xdp_manager,
             xdp_active: Arc::new(AtomicBool::new(false)),
             ai_manager: Arc::new(RwLock::new(None)),
+            recorder: Arc::new(RwLock::new(None)),
         };
 
         // Publish session created event
@@ -1171,6 +1176,87 @@ impl MediaSession {
     }
 
     // =====================================================================
+    // Call Recording Methods
+    // =====================================================================
+
+    /// Enable call recording
+    ///
+    /// Creates an AudioRecorder and starts recording RTP audio from both
+    /// participants to the specified file path. The recording format is
+    /// determined by the file extension (.wav or .opus).
+    ///
+    /// # Arguments
+    /// * `path` - Output file path for the recording
+    /// * `format` - Audio format configuration (codec, sample rate, channels)
+    ///
+    /// # Example
+    /// ```ignore
+    /// use forge_core::AudioFormat;
+    /// use std::path::Path;
+    ///
+    /// // Record in WAV format
+    /// session.enable_recording(
+    ///     Path::new("/tmp/call.wav"),
+    ///     AudioFormat::pcm_mono(8000)
+    /// ).await?;
+    /// ```
+    pub async fn enable_recording<P: AsRef<std::path::Path>>(
+        &self,
+        path: P,
+        format: forge_core::AudioFormat,
+    ) -> Result<()> {
+        let mut recorder_guard = self.recorder.write().await;
+
+        if recorder_guard.is_some() {
+            return Err(ForgeError::Internal("Recording already enabled".into()));
+        }
+
+        // Create recorder
+        let recorder = forge_recorder::AudioRecorder::new(path, format)
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to create recorder: {}", e)))?;
+
+        // Start recording
+        recorder
+            .start()
+            .map_err(|e| ForgeError::Internal(format!("Failed to start recording: {}", e)))?;
+
+        tracing::info!(
+            call_id = %self.call_id.0,
+            "Call recording started"
+        );
+
+        *recorder_guard = Some(recorder);
+        Ok(())
+    }
+
+    /// Disable call recording
+    ///
+    /// Stops the active recording and finalizes the output file.
+    /// This is automatically called when the session is dropped.
+    pub async fn disable_recording(&self) -> Result<()> {
+        let mut recorder_guard = self.recorder.write().await;
+
+        if let Some(recorder) = recorder_guard.take() {
+            recorder
+                .stop()
+                .map_err(|e| ForgeError::Internal(format!("Failed to stop recording: {}", e)))?;
+
+            tracing::info!(
+                call_id = %self.call_id.0,
+                "Call recording stopped"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Check if recording is currently enabled
+    pub async fn is_recording(&self) -> bool {
+        self.recorder.read().await.is_some()
+    }
+
+    // =====================================================================
     // High Availability (HA) Methods
     // =====================================================================
 
@@ -1433,6 +1519,7 @@ impl MediaSession {
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(state.xdp_active)),
             ai_manager: Arc::new(RwLock::new(None)),
+            recorder: Arc::new(RwLock::new(None)),
         };
 
         tracing::info!(

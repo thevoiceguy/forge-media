@@ -13,6 +13,7 @@ forge-dtmf = { path = "../forge-dtmf" }
 forge-codecs = { path = "../forge-codecs" }
 forge-transcoder = { path = "../forge-transcoder" }
 forge-ai-stream = { path = "../forge-ai-stream" }
+forge-recorder = { path = "../forge-recorder" }
 forge-ha = { path = "../forge-ha", optional = true }
 
 # XDP support (Linux only, optional)

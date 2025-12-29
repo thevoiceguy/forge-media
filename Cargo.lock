@@ -1115,7 +1115,7 @@ dependencies = [
  "reqwest 0.11.27",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-tungstenite 0.21.0",
  "tracing",
@@ -1150,7 +1150,7 @@ dependencies = [
  "reqwest 0.12.24",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
@@ -1167,7 +1167,7 @@ dependencies = [
  "audiopus",
  "bcg729-sys",
  "lazy_static",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tracing",
 ]
 
@@ -1186,7 +1186,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "toml",
  "tracing",
@@ -1199,7 +1199,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
  "uuid",
@@ -1212,7 +1212,7 @@ version = "0.2.1"
 dependencies = [
  "chrono",
  "forge-core",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
 ]
@@ -1231,6 +1231,7 @@ dependencies = [
  "forge-dtmf",
  "forge-ha",
  "forge-kernel",
+ "forge-recorder",
  "forge-rtp",
  "forge-transcoder",
  "metrics 0.21.1",
@@ -1239,7 +1240,7 @@ dependencies = [
  "redis",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
  "uuid",
@@ -1258,7 +1259,7 @@ dependencies = [
  "redis",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
  "uuid",
@@ -1278,7 +1279,7 @@ dependencies = [
  "serde",
  "sha1",
  "socket2 0.5.10",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
 ]
@@ -1290,7 +1291,7 @@ dependencies = [
  "forge-core",
  "rubato",
  "symphonia",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
 ]
@@ -1303,7 +1304,7 @@ dependencies = [
  "aya-build",
  "aya-log",
  "bytes",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
 ]
@@ -1351,7 +1352,7 @@ dependencies = [
  "forge-core",
  "forge-recorder",
  "parking_lot",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
  "uuid",
@@ -1368,7 +1369,7 @@ dependencies = [
  "ogg",
  "parking_lot",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
  "uuid",
@@ -1378,7 +1379,7 @@ dependencies = [
 name = "forge-resampler"
 version = "0.1.1"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tracing",
 ]
 
@@ -1403,7 +1404,7 @@ dependencies = [
  "sha2",
  "socket2 0.5.10",
  "subtle",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
 ]
@@ -1417,7 +1418,7 @@ dependencies = [
  "forge-ice",
  "sip-sdp",
  "smol_str",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1436,7 +1437,7 @@ dependencies = [
  "sip-sdp",
  "sip-transport",
  "sip-uas",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1456,7 +1457,7 @@ dependencies = [
  "quick-xml",
  "rand 0.8.5",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-util",
  "tracing",
@@ -1470,7 +1471,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
 ]
@@ -1496,7 +1497,7 @@ dependencies = [
  "forge-codecs",
  "forge-core",
  "forge-resampler",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tracing",
 ]
 
@@ -1505,7 +1506,7 @@ name = "forge-transcription"
 version = "0.2.0"
 dependencies = [
  "forge-core",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
 ]
@@ -1520,7 +1521,7 @@ dependencies = [
  "forge-rtp",
  "forge-sdp",
  "serde",
- "thiserror 1.0.69",
+ "thiserror 2.0.17",
  "tokio",
  "tracing",
  "uuid",

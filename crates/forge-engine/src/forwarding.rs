@@ -194,17 +194,15 @@ impl ForwardingEngine {
             return;
         }
 
-        // Check for inband DTMF in audio codecs
+        // Decode audio for recording and optional DTMF detection
         let payload_type = packet.header.payload_type();
         let opus_pt = session.dtmf_config().opus_payload_type;
         let is_opus_payload = opus_pt.map(|pt| payload_type == pt).unwrap_or(false);
 
-        // G.711 (payload types 0=PCMU, 8=PCMA) or Opus (configurable, typically 111)
-        if ((payload_type == 0 || payload_type == 8) || is_opus_payload)
-            && session.dtmf_config().enable_inband
-        {
-            // Decode audio to PCM samples for DTMF detection
-            let pcm_samples: Vec<i16> = if payload_type == 0 {
+        // Decode G.711 (payload types 0=PCMU, 8=PCMA) or Opus to PCM
+        // This is needed for both recording AND inband DTMF detection
+        let pcm_samples: Vec<i16> = if payload_type == 0 || payload_type == 8 || is_opus_payload {
+            if payload_type == 0 {
                 // PCMU (µ-law)
                 packet
                     .payload
@@ -231,51 +229,55 @@ impl ForwardingEngine {
                                 call_id.0,
                                 e
                             );
-                            // Skip DTMF detection, continue with normal forwarding
                             Vec::new()
                         }
                     }
                 }
                 #[cfg(not(feature = "opus"))]
                 {
-                    tracing::trace!("Opus DTMF detection disabled: opus feature not enabled");
-                    // Skip DTMF detection, continue with normal forwarding
+                    tracing::trace!("Opus decoding disabled: opus feature not enabled");
                     Vec::new()
                 }
             } else {
-                // Unknown codec - skip DTMF detection
+                // Shouldn't reach here, but handle gracefully
                 Vec::new()
-            };
+            }
+        } else {
+            // Not an audio codec we can decode
+            Vec::new()
+        };
 
-            // Process with inband DTMF detector (only if we have samples)
-            if !pcm_samples.is_empty() {
-                counter!("forge_dtmf_inband_packets_processed_total", 1);
-
-                // Audio tap for AI integration
-                if let Some(ai_manager) = session.ai_manager().await {
-                    if ai_manager.has_ai(call_id) {
-                        // Send audio samples to AI
-                        if let Err(e) = ai_manager.send_audio(call_id, &pcm_samples).await {
-                            tracing::debug!(
-                                "Failed to send audio to AI for session {}: {}",
-                                call_id.0,
-                                e
-                            );
-                        }
-                    }
+        // Process decoded samples (if any)
+        if !pcm_samples.is_empty() {
+            // Audio tap for call recording (ALWAYS record if recorder is active)
+            if let Some(recorder) = session.recorder.read().await.as_ref() {
+                // Write decoded PCM samples to recorder
+                if let Err(e) = recorder.write_samples(&pcm_samples) {
+                    tracing::debug!(
+                        "Failed to write samples to recorder for session {}: {}",
+                        call_id.0,
+                        e
+                    );
                 }
+            }
 
-                // Audio tap for call recording
-                if let Some(recorder) = session.recorder.read().await.as_ref() {
-                    // Write decoded PCM samples to recorder
-                    if let Err(e) = recorder.write_samples(&pcm_samples) {
+            // Audio tap for AI integration
+            if let Some(ai_manager) = session.ai_manager().await {
+                if ai_manager.has_ai(call_id) {
+                    // Send audio samples to AI
+                    if let Err(e) = ai_manager.send_audio(call_id, &pcm_samples).await {
                         tracing::debug!(
-                            "Failed to write samples to recorder for session {}: {}",
+                            "Failed to send audio to AI for session {}: {}",
                             call_id.0,
                             e
                         );
                     }
                 }
+            }
+
+            // Inband DTMF detection (only if enabled)
+            if session.dtmf_config().enable_inband {
+                counter!("forge_dtmf_inband_packets_processed_total", 1);
 
                 let mut detector = session.inband_detector().lock().await;
                 match detector.process_samples(&pcm_samples) {
@@ -314,7 +316,7 @@ impl ForwardingEngine {
                     }
                 }
             }
-            // Note: Continue with normal forwarding (inband detection is passive)
+            // Note: Continue with normal forwarding (recording and DTMF are passive)
         }
 
         // Determine which participant sent this packet

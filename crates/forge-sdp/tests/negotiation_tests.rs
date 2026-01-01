@@ -52,8 +52,8 @@ fn test_basic_pcmu_pcma_negotiation() {
     assert_eq!(answer.media[0].media_type, MediaType::Audio);
 
     // Verify negotiated codecs (should have both PCMU and PCMA)
-    assert!(answer.media[0].formats.contains(&0)); // PCMU
-    assert!(answer.media[0].formats.contains(&8)); // PCMA
+    assert!(answer.media[0].formats.contains(&"0".into())); // PCMU
+    assert!(answer.media[0].formats.contains(&"8".into())); // PCMA
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn test_opus_negotiation() {
     let answer = SessionDescription::negotiate_answer(&offer, &local_caps, "10.0.0.1").unwrap();
 
     // Verify Opus was negotiated
-    assert!(answer.media[0].formats.contains(&111));
+    assert!(answer.media[0].formats.contains(&"111".into()));
 
     // Verify Opus rtpmap
     let opus = answer.media[0].rtpmaps.get(&111).unwrap();
@@ -108,9 +108,9 @@ fn test_multi_codec_negotiation() {
     let answer = SessionDescription::negotiate_answer(&offer, &local_caps, "10.0.0.1").unwrap();
 
     // All codecs should be present
-    assert!(answer.media[0].formats.contains(&0));
-    assert!(answer.media[0].formats.contains(&8));
-    assert!(answer.media[0].formats.contains(&111));
+    assert!(answer.media[0].formats.contains(&"0".into()));
+    assert!(answer.media[0].formats.contains(&"8".into()));
+    assert!(answer.media[0].formats.contains(&"111".into()));
 }
 
 // ============================================================================
@@ -373,8 +373,8 @@ fn test_parse_valid_sdp() {
     assert_eq!(sdp.media.len(), 1);
     assert_eq!(sdp.media[0].media_type, MediaType::Audio);
     assert_eq!(sdp.media[0].port, 5000);
-    assert!(sdp.media[0].formats.contains(&0));
-    assert!(sdp.media[0].formats.contains(&8));
+    assert!(sdp.media[0].formats.contains(&"0".into()));
+    assert!(sdp.media[0].formats.contains(&"8".into()));
 }
 
 #[test]
@@ -444,9 +444,9 @@ fn test_profile_round_trip() {
     // Verify
     assert_eq!(parsed.origin.unicast_address.as_str(), "10.0.0.1");
     assert_eq!(parsed.media[0].port, 5000);
-    assert!(parsed.media[0].formats.contains(&0)); // PCMU
-    assert!(parsed.media[0].formats.contains(&8)); // PCMA
-    assert!(parsed.media[0].formats.contains(&111)); // Opus
+    assert!(parsed.media[0].formats.contains(&"0".into())); // PCMU
+    assert!(parsed.media[0].formats.contains(&"8".into())); // PCMA
+    assert!(parsed.media[0].formats.contains(&"111".into())); // Opus
 }
 
 // ============================================================================
@@ -557,9 +557,9 @@ fn test_typical_sip_phone_offer() {
 
     // Verify answer
     assert_eq!(answer.media.len(), 1);
-    assert!(answer.media[0].formats.contains(&0)); // PCMU
-    assert!(answer.media[0].formats.contains(&8)); // PCMA
-    assert!(answer.media[0].formats.contains(&101)); // telephone-event
+    assert!(answer.media[0].formats.contains(&"0".into())); // PCMU
+    assert!(answer.media[0].formats.contains(&"8".into())); // PCMA
+    assert!(answer.media[0].formats.contains(&"101".into())); // telephone-event
 }
 
 #[test]
@@ -586,7 +586,7 @@ fn test_webrtc_style_offer() {
     let answer = SessionDescription::negotiate_answer(&offer, &local_caps, "10.0.0.1").unwrap();
 
     // Should negotiate Opus
-    assert!(answer.media[0].formats.contains(&111));
+    assert!(answer.media[0].formats.contains(&"111".into()));
 }
 
 #[test]
@@ -616,6 +616,6 @@ fn test_asterisk_style_offer() {
     let answer = SessionDescription::negotiate_answer(&offer, &local_caps, "10.0.0.1").unwrap();
 
     // Should have PCMU and PCMA, maybe not G.729
-    assert!(answer.media[0].formats.contains(&0));
-    assert!(answer.media[0].formats.contains(&8));
+    assert!(answer.media[0].formats.contains(&"0".into()));
+    assert!(answer.media[0].formats.contains(&"8".into()));
 }

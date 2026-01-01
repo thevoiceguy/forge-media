@@ -203,7 +203,7 @@ impl SdpProfile {
         let session_id = chrono::Utc::now().timestamp().to_string();
         let mut media = MediaDescription::audio(audio_port);
 
-        media.formats.push(111);
+        media.formats.push(SmolStr::from("111"));
         media.rtpmaps.insert(
             111,
             crate::RtpMap {
@@ -218,7 +218,7 @@ impl SdpProfile {
             value: SmolStr::new("111 opus/48000/2"),
         });
 
-        media.formats.push(101);
+        media.formats.push(SmolStr::from("101"));
         media.rtpmaps.insert(
             101,
             crate::RtpMap {
@@ -244,11 +244,11 @@ impl SdpProfile {
             .push(Attribute::Property(SmolStr::new("sendrecv")));
 
         SessionDescriptionBuilder::new()
-            .origin("forge", &session_id, local_addr)
-            .session_name("Opus Audio Session")
-            .connection(local_addr)
+            .origin("forge", &session_id, local_addr).unwrap()
+            .session_name("Opus Audio Session").unwrap()
+            .connection(local_addr).unwrap()
             .time(0, 0)
-            .media(media)
+            .media(media).unwrap()
             .build()
     }
 
@@ -264,7 +264,7 @@ impl SdpProfile {
         media.protocol = Protocol::UdpTlsRtpSavpf;
 
         // Add Opus codec
-        media.formats.push(111);
+        media.formats.push(SmolStr::from("111"));
         media.rtpmaps.insert(
             111,
             crate::RtpMap {
@@ -284,7 +284,7 @@ impl SdpProfile {
         });
 
         // Add telephone-event (DTMF)
-        media.formats.push(101);
+        media.formats.push(SmolStr::from("101"));
         media.rtpmaps.insert(
             101,
             crate::RtpMap {
@@ -315,11 +315,11 @@ impl SdpProfile {
             .push(Attribute::Property(SmolStr::new("sendrecv")));
 
         SessionDescriptionBuilder::new()
-            .origin("forge", &session_id, local_addr)
-            .session_name("WebRTC Audio Session")
-            .connection(local_addr)
+            .origin("forge", &session_id, local_addr).unwrap()
+            .session_name("WebRTC Audio Session").unwrap()
+            .connection(local_addr).unwrap()
             .time(0, 0)
-            .media(media)
+            .media(media).unwrap()
             .build()
     }
 
@@ -346,9 +346,9 @@ mod tests {
         assert_eq!(sdp.media[0].port, 5000);
 
         // Should have PCMU (0), PCMA (8), and telephone-event (101)
-        assert!(sdp.media[0].formats.contains(&0));
-        assert!(sdp.media[0].formats.contains(&8));
-        assert!(sdp.media[0].formats.contains(&101));
+        assert!(sdp.media[0].formats.contains(&"0".into()));
+        assert!(sdp.media[0].formats.contains(&"8".into()));
+        assert!(sdp.media[0].formats.contains(&"101".into()));
     }
 
     #[test]
@@ -362,10 +362,10 @@ mod tests {
         assert_eq!(sdp.media[0].port, 6000);
 
         // Should have Opus (111) and telephone-event (101)
-        assert!(!sdp.media[0].formats.contains(&0));
-        assert!(!sdp.media[0].formats.contains(&8));
-        assert!(sdp.media[0].formats.contains(&111));
-        assert!(sdp.media[0].formats.contains(&101));
+        assert!(!sdp.media[0].formats.contains(&"0".into()));
+        assert!(!sdp.media[0].formats.contains(&"8".into()));
+        assert!(sdp.media[0].formats.contains(&"111".into()));
+        assert!(sdp.media[0].formats.contains(&"101".into()));
 
         // Check Opus rtpmap
         let opus = sdp.media[0].rtpmaps.get(&111).unwrap();
@@ -381,10 +381,10 @@ mod tests {
         let sdp = profile.with_local_addr("10.0.0.1", 7000);
 
         // Should have PCMU (0), PCMA (8), Opus (111), and telephone-event (101)
-        assert!(sdp.media[0].formats.contains(&0));
-        assert!(sdp.media[0].formats.contains(&8));
-        assert!(sdp.media[0].formats.contains(&111));
-        assert!(sdp.media[0].formats.contains(&101));
+        assert!(sdp.media[0].formats.contains(&"0".into()));
+        assert!(sdp.media[0].formats.contains(&"8".into()));
+        assert!(sdp.media[0].formats.contains(&"111".into()));
+        assert!(sdp.media[0].formats.contains(&"101".into()));
 
         // Verify all rtpmaps are present
         assert!(sdp.media[0].rtpmaps.contains_key(&0));
@@ -443,8 +443,8 @@ mod tests {
         assert_eq!(sdp.media[0].protocol, crate::Protocol::UdpTlsRtpSavpf);
 
         // Should have Opus (111) and telephone-event (101)
-        assert!(sdp.media[0].formats.contains(&111));
-        assert!(sdp.media[0].formats.contains(&101));
+        assert!(sdp.media[0].formats.contains(&"111".into()));
+        assert!(sdp.media[0].formats.contains(&"101".into()));
 
         // Check Opus rtpmap
         let opus = sdp.media[0].rtpmaps.get(&111).unwrap();

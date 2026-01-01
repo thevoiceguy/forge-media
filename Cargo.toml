@@ -34,7 +34,9 @@ edition = "2021"
 rust-version = "1.75"
 authors = ["Ferrous Communications"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ferrous-comms/forge-media"
+repository = "https://github.com/thevoiceguy/forge-media"
+homepage = "https://github.com/thevoiceguy/forge-media"
+documentation = "https://docs.rs/forge-media"
 
 [workspace.dependencies]
 # Async runtime

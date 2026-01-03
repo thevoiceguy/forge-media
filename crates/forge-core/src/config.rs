@@ -2,10 +2,16 @@
 
 use crate::types::AudioFormat;
 use crate::types::IpVersionConfig;
+use crate::{error::ForgeError, Result};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
+
+const MAX_PORT_RANGE_SPAN: u16 = 30_000;
+const MAX_MIXER_BUFFER_FRAMES: usize = 4_096;
+const MAX_RATE_LIMIT_REQUESTS: usize = 100_000;
+const MAX_HA_TTL_SECS: u64 = 86_400;
 
 /// Main Forge configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +31,15 @@ impl Default for ForgeConfig {
             engine: EngineConfig::default(),
             api: ApiConfig::default(),
         }
+    }
+}
+
+impl ForgeConfig {
+    /// Validate configuration values for bounds and CR/LF injection risks.
+    pub fn validate(&self) -> Result<()> {
+        self.engine.validate()?;
+        self.api.validate()?;
+        Ok(())
     }
 }
 
@@ -84,6 +99,33 @@ impl Default for EngineConfig {
     }
 }
 
+impl EngineConfig {
+    pub fn validate(&self) -> Result<()> {
+        self.port_range.validate("engine.port_range")?;
+
+        if self.tos > 0xFF {
+            return invalid("engine.tos must be between 0 and 255");
+        }
+
+        if self.session_timeout_secs == 0 {
+            return invalid("engine.session_timeout_secs must be greater than zero");
+        }
+
+        for (idx, iface) in self.interfaces.iter().enumerate() {
+            iface.validate(idx)?;
+        }
+
+        self.xdp.validate()?;
+        self.ai_persistence.validate()?;
+        if let Some(ha) = &self.ha {
+            ha.validate()?;
+        }
+        self.mixer.validate()?;
+
+        Ok(())
+    }
+}
+
 fn default_port_range() -> PortRange {
     PortRange {
         start: 30000,
@@ -115,6 +157,15 @@ impl Default for MixerConfig {
     }
 }
 
+impl MixerConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_buffer_frames == 0 || self.max_buffer_frames > MAX_MIXER_BUFFER_FRAMES {
+            return invalid("engine.mixer.max_buffer_frames must be between 1 and 4096");
+        }
+        Ok(())
+    }
+}
+
 pub fn default_mixer_max_buffer_frames() -> usize {
     50
 }
@@ -138,6 +189,22 @@ impl PortRange {
             (self.end - self.start + 1) as usize
         }
     }
+
+    pub fn validate(&self, label: &str) -> Result<()> {
+        if self.start == 0 || self.end == 0 {
+            return invalid(format!("{label} must be greater than zero"));
+        }
+        if self.start > self.end {
+            return invalid(format!("{label} start cannot exceed end"));
+        }
+        if self.end - self.start > MAX_PORT_RANGE_SPAN {
+            return invalid(format!(
+                "{label} span is too large (max {} ports)",
+                MAX_PORT_RANGE_SPAN
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Network interface configuration
@@ -151,6 +218,23 @@ pub struct InterfaceConfig {
 
     /// Advertised address for NAT scenarios
     pub advertised_address: Option<IpAddr>,
+}
+
+impl InterfaceConfig {
+    pub fn validate(&self, idx: usize) -> Result<()> {
+        if self.name.is_empty() {
+            return invalid(format!("engine.interfaces[{idx}].name must not be empty"));
+        }
+        reject_crlf(&format!("engine.interfaces[{idx}].name"), &self.name)?;
+        if let Some(addr) = self.advertised_address {
+            if addr.is_unspecified() {
+                return invalid(format!(
+                    "engine.interfaces[{idx}].advertised_address must be a concrete address"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// XDP (eBPF) acceleration configuration
@@ -181,6 +265,16 @@ impl Default for XdpConfig {
             mode: XdpMode::Generic,
             fallback: true,
         }
+    }
+}
+
+impl XdpConfig {
+    pub fn validate(&self) -> Result<()> {
+        reject_crlf("engine.xdp.interface", &self.interface)?;
+        if self.enabled && self.interface.trim().is_empty() {
+            return invalid("engine.xdp.interface must be set when XDP is enabled");
+        }
+        Ok(())
     }
 }
 
@@ -256,6 +350,41 @@ impl Default for AIPersistenceConfig {
             health_check_interval_secs: default_health_check_interval_secs(),
             auto_reconnect: true,
         }
+    }
+}
+
+impl AIPersistenceConfig {
+    pub fn validate(&self) -> Result<()> {
+        reject_crlf(
+            "engine.ai_persistence.redis_key_prefix",
+            &self.redis_key_prefix,
+        )?;
+        if self.redis_ttl_secs == 0 {
+            return invalid("engine.ai_persistence.redis_ttl_secs must be greater than zero");
+        }
+        if self.max_reconnect_attempts == 0 {
+            return invalid(
+                "engine.ai_persistence.max_reconnect_attempts must be greater than zero",
+            );
+        }
+        if self.health_check_interval_secs == 0 {
+            return invalid(
+                "engine.ai_persistence.health_check_interval_secs must be greater than zero",
+            );
+        }
+        if matches!(self.backend, PersistenceBackendType::Redis) {
+            let url = self.redis_url.as_ref().ok_or_else(|| {
+                ForgeError::InvalidConfig(
+                    "engine.ai_persistence.redis_url is required when using Redis backend"
+                        .to_string(),
+                )
+            })?;
+            reject_crlf("engine.ai_persistence.redis_url", url)?;
+        }
+        if let Some(url) = &self.redis_url {
+            reject_crlf("engine.ai_persistence.redis_url", url)?;
+        }
+        Ok(())
     }
 }
 
@@ -388,6 +517,55 @@ impl Default for ApiConfig {
     }
 }
 
+impl ApiConfig {
+    pub fn validate(&self) -> Result<()> {
+        reject_crlf("api.http_bind", &self.http_bind)?;
+        if let Some(https) = &self.https_bind {
+            reject_crlf("api.https_bind", https)?;
+        }
+        if let Some(ws) = &self.ws_bind {
+            reject_crlf("api.ws_bind", ws)?;
+        }
+        for (i, origin) in self.cors_origins.iter().enumerate() {
+            reject_crlf(&format!("api.cors_origins[{i}]"), origin)?;
+        }
+        if !self.disable_auth && self.auth_tokens.is_empty() {
+            return invalid("api.auth_tokens must be provided unless disable_auth is true");
+        }
+        for (i, token) in self.auth_tokens.iter().enumerate() {
+            if token.trim().is_empty() {
+                return invalid(format!("api.auth_tokens[{i}] must not be empty"));
+            }
+            reject_crlf(&format!("api.auth_tokens[{i}]"), token)?;
+        }
+        if self.rate_limit_requests_per_window == 0
+            || self.rate_limit_requests_per_window > MAX_RATE_LIMIT_REQUESTS
+        {
+            return invalid(format!(
+                "api.rate_limit_requests_per_window must be between 1 and {MAX_RATE_LIMIT_REQUESTS}"
+            ));
+        }
+        if self.rate_limit_window_secs == 0 {
+            return invalid("api.rate_limit_window_secs must be greater than zero");
+        }
+        check_path_crlf("api.recording_base_dir", &self.recording_base_dir)?;
+        check_path_crlf("api.recording_root_jail", &self.recording_root_jail)?;
+        check_path_crlf("api.prompts_base_dir", &self.prompts_base_dir)?;
+        self.siprec.validate()?;
+
+        for (i, endpoint) in self.ai_allowed_endpoints.iter().enumerate() {
+            reject_crlf(&format!("api.ai_allowed_endpoints[{i}]"), endpoint)?;
+            let endpoint_lower = endpoint.to_lowercase();
+            if !(endpoint_lower.starts_with("https://") || endpoint_lower.starts_with("wss://")) {
+                return invalid(format!(
+                    "api.ai_allowed_endpoints[{i}] must start with https:// or wss://"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn default_http_bind() -> String {
     "127.0.0.1:8080".to_string()
 }
@@ -470,6 +648,14 @@ impl Default for SiprecConfig {
     }
 }
 
+impl SiprecConfig {
+    pub fn validate(&self) -> Result<()> {
+        check_path_crlf("api.siprec.output_dir", &self.output_dir)?;
+        validate_audio_format("api.siprec.format", &self.format)?;
+        Ok(())
+    }
+}
+
 fn default_siprec_output_dir() -> PathBuf {
     "/var/lib/forge/siprec".into()
 }
@@ -528,6 +714,20 @@ impl Default for HAConfig {
             cloud: None,
             onprem: None,
         }
+    }
+}
+
+impl HAConfig {
+    pub fn validate(&self) -> Result<()> {
+        self.port_range.validate("engine.ha.port_range")?;
+        self.redis.validate()?;
+        if let Some(cloud) = &self.cloud {
+            cloud.validate()?;
+        }
+        if let Some(onprem) = &self.onprem {
+            onprem.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -603,6 +803,30 @@ impl Default for RedisHAConfig {
     }
 }
 
+impl RedisHAConfig {
+    pub fn validate(&self) -> Result<()> {
+        reject_crlf("engine.ha.redis.url", &self.url)?;
+        reject_crlf("engine.ha.redis.key_prefix", &self.key_prefix)?;
+        if self.heartbeat_interval_secs == 0 {
+            return invalid("engine.ha.redis.heartbeat_interval_secs must be greater than zero");
+        }
+        if self.failover_timeout_secs <= self.heartbeat_interval_secs {
+            return invalid(
+                "engine.ha.redis.failover_timeout_secs must exceed heartbeat_interval_secs",
+            );
+        }
+        if self.session_ttl_secs == 0 || self.session_ttl_secs > MAX_HA_TTL_SECS {
+            return invalid("engine.ha.redis.session_ttl_secs must be between 1 and 86400 seconds");
+        }
+        if self.conference_ttl_secs == 0 || self.conference_ttl_secs > MAX_HA_TTL_SECS {
+            return invalid(
+                "engine.ha.redis.conference_ttl_secs must be between 1 and 86400 seconds",
+            );
+        }
+        Ok(())
+    }
+}
+
 fn default_ha_redis_key_prefix() -> String {
     "forge:ha:".to_string()
 }
@@ -649,6 +873,16 @@ impl Default for CloudHAConfig {
     }
 }
 
+impl CloudHAConfig {
+    pub fn validate(&self) -> Result<()> {
+        reject_crlf("engine.ha.cloud.health_check_path", &self.health_check_path)?;
+        if !self.health_check_path.starts_with('/') {
+            return invalid("engine.ha.cloud.health_check_path must start with '/'");
+        }
+        Ok(())
+    }
+}
+
 fn default_health_check_path() -> String {
     "/health".to_string()
 }
@@ -690,4 +924,76 @@ pub struct OnPremHAConfig {
 
     /// VRRP authentication password
     pub auth_password: String,
+}
+
+impl OnPremHAConfig {
+    pub fn validate(&self) -> Result<()> {
+        reject_crlf("engine.ha.onprem.vip", &self.vip)?;
+        reject_crlf("engine.ha.onprem.interface", &self.interface)?;
+        reject_crlf("engine.ha.onprem.auth_password", &self.auth_password)?;
+        if !(1..=255).contains(&self.virtual_router_id) {
+            return invalid("engine.ha.onprem.virtual_router_id must be between 1 and 255");
+        }
+        if !(1..=255).contains(&self.priority) {
+            return invalid("engine.ha.onprem.priority must be between 1 and 255");
+        }
+        Ok(())
+    }
+}
+
+fn reject_crlf(field: &str, value: &str) -> Result<()> {
+    if value.bytes().any(|b| matches!(b, b'\r' | b'\n')) {
+        Err(ForgeError::InvalidConfig(format!(
+            "{field} must not contain CR or LF characters"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn check_path_crlf(field: &str, path: &PathBuf) -> Result<()> {
+    let s = path.to_string_lossy();
+    reject_crlf(field, &s)
+}
+
+fn validate_audio_format(label: &str, format: &AudioFormat) -> Result<()> {
+    if format.sample_rate == 0 || format.sample_rate > 192_000 {
+        return invalid(format!(
+            "{label}.sample_rate must be between 1 and 192000 Hz"
+        ));
+    }
+    if format.channels == 0 || format.channels > 8 {
+        return invalid(format!("{label}.channels must be between 1 and 8"));
+    }
+    Ok(())
+}
+
+fn invalid(msg: impl Into<String>) -> Result<()> {
+    Err(ForgeError::InvalidConfig(msg.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_valid() {
+        let cfg = ForgeConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn detects_bad_values() {
+        let mut cfg = ForgeConfig::default();
+        cfg.engine.port_range.start = 5000;
+        cfg.engine.port_range.end = 100;
+        assert!(cfg.validate().is_err());
+
+        cfg.engine.port_range = PortRange {
+            start: 30000,
+            end: 30010,
+        };
+        cfg.api.auth_tokens = vec![];
+        assert!(cfg.validate().is_err());
+    }
 }

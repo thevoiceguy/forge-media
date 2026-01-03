@@ -3,7 +3,7 @@
 //! This binary runs Forge as a standalone media server.
 //! To use Forge as a library in your project, see the crate documentation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use forge_api::{server::ApiServerConfig, ApiServer};
 use forge_media::{ForgeConfig, ForgeEngine};
 use tracing::info;
@@ -104,10 +104,14 @@ fn load_config() -> Result<ForgeConfig> {
     for path in config_paths {
         if let Ok(contents) = std::fs::read_to_string(path) {
             info!("Loading configuration from: {}", path);
-            return Ok(toml::from_str(&contents)?);
+            let cfg: ForgeConfig = toml::from_str(&contents)?;
+            cfg.validate().context("invalid configuration values")?;
+            return Ok(cfg);
         }
     }
 
     info!("No configuration file found, using defaults");
-    Ok(ForgeConfig::default())
+    let cfg = ForgeConfig::default();
+    cfg.validate().context("invalid default configuration")?;
+    Ok(cfg)
 }

@@ -120,6 +120,8 @@ impl ForgeEngine {
     /// # }
     /// ```
     pub async fn new(config: ForgeConfig) -> Result<Self> {
+        config.validate()?;
+
         // Initialize event bus for broadcasting media events (sessions, SIPREC, etc.)
         let event_bus = std::sync::Arc::new(EventBus::new());
 

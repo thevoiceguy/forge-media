@@ -413,10 +413,7 @@ impl SipRequest {
         request.push_str("Max-Forwards: 70\r\n");
 
         // From header
-        request.push_str(&format!(
-            "From: <{}>;tag={}\r\n",
-            self.from, self.from_tag
-        ));
+        request.push_str(&format!("From: <{}>;tag={}\r\n", self.from, self.from_tag));
 
         // To header
         if let Some(ref to_tag) = self.to_tag {
@@ -533,9 +530,10 @@ impl SdpBuilder {
     ) {
         if let Some(media) = self.media_streams.get_mut(stream_index) {
             media.protocol = "RTP/SAVP".to_string();
-            media
-                .attributes
-                .push(format!("crypto:{} {} inline:{}", tag, crypto_suite, key_material_b64));
+            media.attributes.push(format!(
+                "crypto:{} {} inline:{}",
+                tag, crypto_suite, key_material_b64
+            ));
         }
     }
 

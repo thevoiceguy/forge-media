@@ -5,14 +5,14 @@ use crate::source::AudioSource;
 use forge_core::AudioFrame;
 use std::path::Path;
 use symphonia::core::audio::{AudioBuffer, AudioBufferRef, Signal};
-use symphonia::core::conv::FromSample;
-use symphonia::core::sample::Sample;
-use symphonia::core::units::{Time, TimeBase};
 use symphonia::core::codecs::{Decoder, DecoderOptions};
+use symphonia::core::conv::FromSample;
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::sample::Sample;
+use symphonia::core::units::{Time, TimeBase};
 use tracing::debug;
 
 /// Audio file source using Symphonia for decoding

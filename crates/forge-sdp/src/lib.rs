@@ -46,7 +46,7 @@ pub use sip_sdp::{
 };
 
 // Re-export ICE attribute helpers
-pub use ice::{IceCandidateParams, IceAttributesExt, MediaIceAttributesExt};
+pub use ice::{IceAttributesExt, IceCandidateParams, MediaIceAttributesExt};
 
 // Re-export DTLS attribute helpers
 pub use dtls::{DtlsAttributesExt, DtlsSetup, MediaDtlsAttributesExt};

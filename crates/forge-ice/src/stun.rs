@@ -962,10 +962,10 @@ mod tests {
             .iter()
             .any(|attr| matches!(attr, StunAttribute::Priority(2130706431))));
 
-        assert!(parsed.attributes.iter().any(|attr| matches!(
-            attr,
-            StunAttribute::IceControlling(0x123456789ABCDEF0)
-        )));
+        assert!(parsed
+            .attributes
+            .iter()
+            .any(|attr| matches!(attr, StunAttribute::IceControlling(0x123456789ABCDEF0))));
     }
 
     #[test]

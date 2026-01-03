@@ -2,10 +2,9 @@
 
 use crate::{Error, Result};
 use aya::{
-    maps::{HashMap as BpfHashMap},
+    maps::HashMap as BpfHashMap,
     programs::{xdp::XdpLinkId, Xdp, XdpFlags},
-    Pod,
-    Ebpf,
+    Ebpf, Pod,
 };
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -374,7 +373,6 @@ impl Drop for XdpManager {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

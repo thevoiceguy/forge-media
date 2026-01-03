@@ -158,11 +158,9 @@ impl RtpSocketPair {
             .map_err(|e| ForgeError::Network(format!("Failed to set non-blocking: {}", e)))?;
 
         // Bind the socket
-        socket
-            .bind(&addr.into())
-            .map_err(|e| {
-                ForgeError::Network(format!("Failed to bind socket to {}: {}", addr, e))
-            })?;
+        socket.bind(&addr.into()).map_err(|e| {
+            ForgeError::Network(format!("Failed to bind socket to {}: {}", addr, e))
+        })?;
 
         // Convert to tokio UdpSocket
         let std_socket: std::net::UdpSocket = socket.into();

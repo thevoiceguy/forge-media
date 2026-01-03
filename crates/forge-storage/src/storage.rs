@@ -397,9 +397,8 @@ impl StorageManager {
     }
 
     fn has_relative_components(&self, path: &Path) -> bool {
-        path.components().any(|component| {
-            matches!(component, Component::ParentDir | Component::CurDir)
-        })
+        path.components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
     }
 }
 

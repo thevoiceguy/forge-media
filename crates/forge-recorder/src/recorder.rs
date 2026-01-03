@@ -261,7 +261,8 @@ impl AudioRecorder {
                     })?;
 
                 // Frame size: 20ms of audio (sample_rate / 50)
-                let frame_size = (effective_sample_rate / 50) as usize * self.format.channels as usize;
+                let frame_size =
+                    (effective_sample_rate / 50) as usize * self.format.channels as usize;
 
                 // Create file for Ogg container
                 let file = std::fs::File::create(&self.path)?;
@@ -591,11 +592,11 @@ impl AudioRecorder {
         // Calculate preskip: Opus codec has 6.5ms algorithmic delay
         // This must be communicated to decoders to discard the correct amount
         let preskip: u16 = match sample_rate {
-            8000 => 52,    // 6.5ms @ 8kHz = 52 samples
-            12000 => 78,   // 6.5ms @ 12kHz = 78 samples
-            16000 => 104,  // 6.5ms @ 16kHz = 104 samples
-            24000 => 156,  // 6.5ms @ 24kHz = 156 samples
-            48000 => 312,  // 6.5ms @ 48kHz = 312 samples
+            8000 => 52,   // 6.5ms @ 8kHz = 52 samples
+            12000 => 78,  // 6.5ms @ 12kHz = 78 samples
+            16000 => 104, // 6.5ms @ 16kHz = 104 samples
+            24000 => 156, // 6.5ms @ 24kHz = 156 samples
+            48000 => 312, // 6.5ms @ 48kHz = 312 samples
             _ => {
                 warn!(
                     "Unknown sample rate {} for preskip calculation, using 312 (48kHz)",
@@ -626,9 +627,7 @@ impl AudioRecorder {
 
         // OpusTags (RFC 7845 Section 5.2) with optional user metadata
         let vendor = b"forge-recorder";
-        let user_comments = metadata
-            .map(|m| m.to_vorbis_comments())
-            .unwrap_or_default();
+        let user_comments = metadata.map(|m| m.to_vorbis_comments()).unwrap_or_default();
 
         // Calculate size: magic(8) + vendor_len(4) + vendor + comment_count(4) + comments
         let mut opus_tags_size = 8 + 4 + vendor.len() + 4;
@@ -674,73 +673,73 @@ impl Drop for AudioRecorder {
     }
 }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use tempfile::TempDir;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
 
-        #[tokio::test]
-        async fn test_recorder_lifecycle() {
-            let temp_dir = TempDir::new().unwrap();
-            let file_path = temp_dir.path().join("test.wav");
+    #[tokio::test]
+    async fn test_recorder_lifecycle() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.wav");
 
-            let format = AudioFormat::pcm_mono();
-            let recorder = AudioRecorder::new(&file_path, format).await.unwrap();
+        let format = AudioFormat::pcm_mono();
+        let recorder = AudioRecorder::new(&file_path, format).await.unwrap();
 
-            // Start recording
-            recorder.start().unwrap();
-            assert!(recorder.is_recording());
+        // Start recording
+        recorder.start().unwrap();
+        assert!(recorder.is_recording());
 
-            // Write some samples
-            let samples: Vec<i16> = (0..48000).map(|i| (i % 1000) as i16).collect();
-            recorder.write_samples(&samples).unwrap();
+        // Write some samples
+        let samples: Vec<i16> = (0..48000).map(|i| (i % 1000) as i16).collect();
+        recorder.write_samples(&samples).unwrap();
 
-            assert_eq!(recorder.samples_recorded(), 48000);
-            assert!((recorder.duration_secs() - 1.0).abs() < 0.01);
+        assert_eq!(recorder.samples_recorded(), 48000);
+        assert!((recorder.duration_secs() - 1.0).abs() < 0.01);
 
-            // Stop recording
-            recorder.stop().unwrap();
-            assert!(!recorder.is_recording());
+        // Stop recording
+        recorder.stop().unwrap();
+        assert!(!recorder.is_recording());
 
-            // Verify file exists
-            assert!(file_path.exists());
+        // Verify file exists
+        assert!(file_path.exists());
+    }
+
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn test_opus_headers_and_granule_progress() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.opus");
+
+        let format = AudioFormat::opus_mono();
+        let recorder = AudioRecorder::new(&file_path, format).await.unwrap();
+
+        recorder.start().unwrap();
+
+        // 3 frames of 20ms audio at 48kHz mono -> 2880 samples
+        let samples = vec![1i16; 960 * 3];
+        recorder.write_samples(&samples).unwrap();
+        recorder.stop().unwrap();
+
+        let file = std::fs::File::open(&file_path).unwrap();
+        let mut packets = ogg::PacketReader::new(std::io::BufReader::new(file));
+
+        let head = packets.read_packet().unwrap().unwrap();
+        assert!(head.data.starts_with(b"OpusHead"));
+
+        let tags = packets.read_packet().unwrap().unwrap();
+        assert!(tags.data.starts_with(b"OpusTags"));
+
+        let first_data = packets.read_packet().unwrap().unwrap();
+        assert!(first_data.absgp_page() > 0);
+        assert_eq!(head.stream_serial(), first_data.stream_serial());
+
+        let mut last = first_data;
+        while let Some(pkt) = packets.read_packet().unwrap() {
+            last = pkt;
         }
 
-        #[cfg(feature = "opus")]
-        #[tokio::test]
-        async fn test_opus_headers_and_granule_progress() {
-            let temp_dir = TempDir::new().unwrap();
-            let file_path = temp_dir.path().join("test.opus");
-
-            let format = AudioFormat::opus_mono();
-            let recorder = AudioRecorder::new(&file_path, format).await.unwrap();
-
-            recorder.start().unwrap();
-
-            // 3 frames of 20ms audio at 48kHz mono -> 2880 samples
-            let samples = vec![1i16; 960 * 3];
-            recorder.write_samples(&samples).unwrap();
-            recorder.stop().unwrap();
-
-            let file = std::fs::File::open(&file_path).unwrap();
-            let mut packets = ogg::PacketReader::new(std::io::BufReader::new(file));
-
-            let head = packets.read_packet().unwrap().unwrap();
-            assert!(head.data.starts_with(b"OpusHead"));
-
-            let tags = packets.read_packet().unwrap().unwrap();
-            assert!(tags.data.starts_with(b"OpusTags"));
-
-            let first_data = packets.read_packet().unwrap().unwrap();
-            assert!(first_data.absgp_page() > 0);
-            assert_eq!(head.stream_serial(), first_data.stream_serial());
-
-            let mut last = first_data;
-            while let Some(pkt) = packets.read_packet().unwrap() {
-                last = pkt;
-            }
-
-            assert!(last.last_in_stream());
-            assert!(last.absgp_page() >= 960);
-        }
+        assert!(last.last_in_stream());
+        assert!(last.absgp_page() >= 960);
+    }
 }

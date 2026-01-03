@@ -449,7 +449,8 @@ mod tests {
 
         // Test 2: Empty ufrag
         let mut agent = IceAgent::new(1, 50000, vec![]);
-        let result = agent.set_remote_credentials("".to_string(), "validpassword12345678901".to_string());
+        let result =
+            agent.set_remote_credentials("".to_string(), "validpassword12345678901".to_string());
         assert!(result.is_err());
 
         // Test 3: Empty password
@@ -459,7 +460,8 @@ mod tests {
 
         // Test 4: Ufrag too short (< 4 chars)
         let mut agent = IceAgent::new(1, 50000, vec![]);
-        let result = agent.set_remote_credentials("abc".to_string(), "validpassword12345678901".to_string());
+        let result =
+            agent.set_remote_credentials("abc".to_string(), "validpassword12345678901".to_string());
         assert!(result.is_err());
 
         // Test 5: Password too short (< 22 chars)

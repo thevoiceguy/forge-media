@@ -497,8 +497,7 @@ pub mod sdes_type {
 }
 
 /// RTCP Source Description (SDES) packet (RFC 3550 Section 6.5)
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SourceDescription {
     /// Chunks (one per SSRC)
     pub chunks: Vec<SdesChunk>,
@@ -625,7 +624,6 @@ impl SourceDescription {
         buf
     }
 }
-
 
 /// RTCP BYE packet (RFC 3550 Section 6.6)
 #[derive(Debug, Clone)]

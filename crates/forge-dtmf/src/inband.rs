@@ -294,8 +294,7 @@ impl GoertzelDetector {
                         current,
                         DtmfEventType::End,
                         DtmfMethod::Inband,
-                        self.frames_detected
-                            .saturating_mul(self.frame_duration_ms),
+                        self.frames_detected.saturating_mul(self.frame_duration_ms),
                     ))
                 } else {
                     None
@@ -342,8 +341,7 @@ impl GoertzelDetector {
                     digit,
                     DtmfEventType::End,
                     DtmfMethod::Inband,
-                    self.frames_detected
-                        .saturating_mul(self.frame_duration_ms),
+                    self.frames_detected.saturating_mul(self.frame_duration_ms),
                 );
                 self.frames_detected = 0;
                 self.start_emitted = false;

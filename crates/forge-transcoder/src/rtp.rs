@@ -149,9 +149,7 @@ impl RtpTranscoder {
         self.last_input_ts = Some(input_ts);
 
         let result = self.transcoder.transcode_frames(payload)?;
-        let frame_samples = result
-            .frame_samples
-            .unwrap_or(result.samples_per_channel);
+        let frame_samples = result.frame_samples.unwrap_or(result.samples_per_channel);
 
         let mut outputs = Vec::new();
         let mut current_ts = self.output_ts_offset;

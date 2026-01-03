@@ -406,7 +406,10 @@ fn default_auth_tokens() -> Vec<String> {
     }
 
     let token = uuid::Uuid::new_v4().to_string();
-    eprintln!("⚠️  WARNING: No FORGE_API_TOKEN set. Auto-generated token: {}", token);
+    eprintln!(
+        "⚠️  WARNING: No FORGE_API_TOKEN set. Auto-generated token: {}",
+        token
+    );
     eprintln!("   Set FORGE_API_TOKEN environment variable or add to config file.");
     eprintln!("   To disable auth explicitly, set 'disable_auth = true' in [api] config.");
     vec![token]

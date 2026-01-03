@@ -125,7 +125,11 @@ async fn test_sdp_ice_credentials() {
         .find(|line| line.starts_with("a=ice-ufrag:"))
         .expect("SDP should contain ice-ufrag");
     let ufrag = ufrag_line.strip_prefix("a=ice-ufrag:").unwrap();
-    assert!(ufrag.len() >= 4, "ICE ufrag must be at least 4 characters (RFC 8445), got {}", ufrag.len());
+    assert!(
+        ufrag.len() >= 4,
+        "ICE ufrag must be at least 4 characters (RFC 8445), got {}",
+        ufrag.len()
+    );
 
     // Extract ICE password (RFC 8445 requires at least 22 characters, 24 recommended)
     let pwd_line = offer
@@ -133,7 +137,11 @@ async fn test_sdp_ice_credentials() {
         .find(|line| line.starts_with("a=ice-pwd:"))
         .expect("SDP should contain ice-pwd");
     let pwd = pwd_line.strip_prefix("a=ice-pwd:").unwrap();
-    assert!(pwd.len() >= 22, "ICE password must be at least 22 characters (RFC 8445), got {}", pwd.len());
+    assert!(
+        pwd.len() >= 22,
+        "ICE password must be at least 22 characters (RFC 8445), got {}",
+        pwd.len()
+    );
 }
 
 /// Test SDP offer contains DTLS setup attribute

@@ -383,15 +383,8 @@ mod tests {
     fn test_add_ice_candidate() {
         let mut media = MediaDescription::audio(5000);
 
-        let params = IceCandidateParams::new(
-            "1",
-            1,
-            "UDP",
-            2130706431,
-            "192.168.1.100",
-            50000,
-            "host",
-        );
+        let params =
+            IceCandidateParams::new("1", 1, "UDP", 2130706431, "192.168.1.100", 50000, "host");
         media.add_ice_candidate(&params);
 
         let candidates = media.get_ice_candidates();
@@ -405,16 +398,9 @@ mod tests {
     fn test_add_srflx_candidate_with_related() {
         let mut media = MediaDescription::audio(5000);
 
-        let params = IceCandidateParams::new(
-            "2",
-            1,
-            "UDP",
-            1694498815,
-            "203.0.113.1",
-            51000,
-            "srflx",
-        )
-        .with_related("192.168.1.100", 50000);
+        let params =
+            IceCandidateParams::new("2", 1, "UDP", 1694498815, "203.0.113.1", 51000, "srflx")
+                .with_related("192.168.1.100", 50000);
 
         media.add_ice_candidate(&params);
 

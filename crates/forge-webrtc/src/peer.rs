@@ -299,7 +299,9 @@ impl PeerConnection {
         let mut ice_agent = self.ice_agent.lock().await;
         ice_agent
             .set_remote_credentials(remote_ufrag, remote_pwd)
-            .map_err(|e| WebRtcError::IceError(format!("Failed to set remote credentials: {}", e)))?;
+            .map_err(|e| {
+                WebRtcError::IceError(format!("Failed to set remote credentials: {}", e))
+            })?;
 
         // Add remote candidates to ICE agent
         for candidate in remote_candidates {
@@ -512,44 +514,33 @@ impl PeerConnection {
 
         // Initiate handshake (client sends ClientHello)
         let mut dtls = dtls_conn.lock().await;
-        let (complete, outgoing) = dtls
-            .handshake(None)
-            .map_err(|e| {
-                {
-                    let mut guard = state
-                        .lock()
-                        .expect("state mutex should not be poisoned");
-                    *guard = ConnectionState::Failed;
-                }
-                WebRtcError::DtlsError(format!("Failed to initiate handshake: {}", e))
-            })?;
+        let (complete, outgoing) = dtls.handshake(None).map_err(|e| {
+            {
+                let mut guard = state.lock().expect("state mutex should not be poisoned");
+                *guard = ConnectionState::Failed;
+            }
+            WebRtcError::DtlsError(format!("Failed to initiate handshake: {}", e))
+        })?;
 
         if !outgoing.is_empty() {
             debug!(
                 "Sending initial DTLS ClientHello ({} bytes)",
                 outgoing.len()
             );
-            socket
-                .send_to(&outgoing, remote_addr)
-                .await
-                .map_err(|e| {
-                    {
-                        let mut guard = state
-                            .lock()
-                            .expect("state mutex should not be poisoned");
-                        *guard = ConnectionState::Failed;
-                    }
-                    WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e))
-                })?;
+            socket.send_to(&outgoing, remote_addr).await.map_err(|e| {
+                {
+                    let mut guard = state.lock().expect("state mutex should not be poisoned");
+                    *guard = ConnectionState::Failed;
+                }
+                WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e))
+            })?;
         }
 
         if complete {
             info!("DTLS handshake completed immediately (unexpected for client)");
             drop(dtls);
             if let Err(err) = Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await {
-                let mut guard = state
-                    .lock()
-                    .expect("state mutex should not be poisoned");
+                let mut guard = state.lock().expect("state mutex should not be poisoned");
                 *guard = ConnectionState::Failed;
                 return Err(err);
             }
@@ -568,9 +559,7 @@ impl PeerConnection {
             if start_time.elapsed() > timeout_duration {
                 error!("DTLS handshake timeout for {}", connection_id);
                 {
-                    let mut guard = state
-                        .lock()
-                        .expect("state mutex should not be poisoned");
+                    let mut guard = state.lock().expect("state mutex should not be poisoned");
                     *guard = ConnectionState::Failed;
                 }
                 return Err(WebRtcError::DtlsError("Handshake timeout".to_string()));
@@ -595,17 +584,15 @@ impl PeerConnection {
                         info!("DTLS handshake completed");
                         drop(dtls);
                         {
-                            let mut guard = state
-                                .lock()
-                                .expect("state mutex should not be poisoned");
+                            let mut guard =
+                                state.lock().expect("state mutex should not be poisoned");
                             *guard = ConnectionState::Connected;
                         }
                         if let Err(err) =
                             Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await
                         {
-                            let mut guard = state
-                                .lock()
-                                .expect("state mutex should not be poisoned");
+                            let mut guard =
+                                state.lock().expect("state mutex should not be poisoned");
                             *guard = ConnectionState::Failed;
                             return Err(err);
                         }
@@ -641,9 +628,7 @@ impl PeerConnection {
             let mut dtls = dtls_conn.lock().await;
             let (complete, outgoing) = dtls.handshake(Some(&buf[..len])).map_err(|e| {
                 {
-                    let mut guard = state
-                        .lock()
-                        .expect("state mutex should not be poisoned");
+                    let mut guard = state.lock().expect("state mutex should not be poisoned");
                     *guard = ConnectionState::Failed;
                 }
                 WebRtcError::DtlsError(format!("Handshake processing failed: {}", e))
@@ -654,9 +639,7 @@ impl PeerConnection {
                 debug!("Sending DTLS response ({} bytes)", outgoing.len());
                 socket.send_to(&outgoing, remote_addr).await.map_err(|e| {
                     {
-                        let mut guard = state
-                            .lock()
-                            .expect("state mutex should not be poisoned");
+                        let mut guard = state.lock().expect("state mutex should not be poisoned");
                         *guard = ConnectionState::Failed;
                     }
                     WebRtcError::DtlsError(format!("Failed to send DTLS data: {}", e))
@@ -667,16 +650,11 @@ impl PeerConnection {
                 info!("DTLS handshake completed for {}", connection_id);
                 drop(dtls);
                 {
-                    let mut guard = state
-                        .lock()
-                        .expect("state mutex should not be poisoned");
+                    let mut guard = state.lock().expect("state mutex should not be poisoned");
                     *guard = ConnectionState::Connected;
                 }
-                if let Err(err) = Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await
-                {
-                    let mut guard = state
-                        .lock()
-                        .expect("state mutex should not be poisoned");
+                if let Err(err) = Self::extract_and_log_srtp_keys(dtls_conn, &connection_id).await {
+                    let mut guard = state.lock().expect("state mutex should not be poisoned");
                     *guard = ConnectionState::Failed;
                     return Err(err);
                 }

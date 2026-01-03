@@ -112,7 +112,10 @@ impl Resampler {
         let input_slice = if self.src_rate > self.dst_rate {
             // Apply simple low-pass FIR filter before downsampling to reduce aliasing.
             filtered_input = Some(self.low_pass_filter(input));
-            filtered_input.as_ref().expect("filtered_input set").as_slice()
+            filtered_input
+                .as_ref()
+                .expect("filtered_input set")
+                .as_slice()
         } else {
             input
         };

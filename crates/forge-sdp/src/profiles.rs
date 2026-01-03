@@ -244,11 +244,15 @@ impl SdpProfile {
             .push(Attribute::Property(SmolStr::new("sendrecv")));
 
         SessionDescriptionBuilder::new()
-            .origin("forge", &session_id, local_addr).unwrap()
-            .session_name("Opus Audio Session").unwrap()
-            .connection(local_addr).unwrap()
+            .origin("forge", &session_id, local_addr)
+            .unwrap()
+            .session_name("Opus Audio Session")
+            .unwrap()
+            .connection(local_addr)
+            .unwrap()
             .time(0, 0)
-            .media(media).unwrap()
+            .media(media)
+            .unwrap()
             .build()
     }
 
@@ -315,11 +319,15 @@ impl SdpProfile {
             .push(Attribute::Property(SmolStr::new("sendrecv")));
 
         SessionDescriptionBuilder::new()
-            .origin("forge", &session_id, local_addr).unwrap()
-            .session_name("WebRTC Audio Session").unwrap()
-            .connection(local_addr).unwrap()
+            .origin("forge", &session_id, local_addr)
+            .unwrap()
+            .session_name("WebRTC Audio Session")
+            .unwrap()
+            .connection(local_addr)
+            .unwrap()
             .time(0, 0)
-            .media(media).unwrap()
+            .media(media)
+            .unwrap()
             .build()
     }
 

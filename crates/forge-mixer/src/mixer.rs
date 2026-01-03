@@ -302,10 +302,7 @@ impl AudioMixer {
 
         let recording_jail_canon = if let Some(jail) = &options.recording_root_jail {
             let canon = std::fs::canonicalize(jail).map_err(|e| {
-                MixerError::InvalidFormat(format!(
-                    "Invalid recording root jail {:?}: {}",
-                    jail, e
-                ))
+                MixerError::InvalidFormat(format!("Invalid recording root jail {:?}: {}", jail, e))
             })?;
             Some(canon)
         } else {
@@ -614,18 +611,12 @@ impl AudioMixer {
             if ext != expected_ext {
                 warn!(
                     "Recording path {:?} extension {:?} does not match expected {:?}",
-                    path,
-                    ext,
-                    expected_ext
+                    path, ext, expected_ext
                 );
             }
         }
 
-        info!(
-            "Starting recording for participant {} to {:?}",
-            id,
-            path
-        );
+        info!("Starting recording for participant {} to {:?}", id, path);
         let target_path = self.validate_recording_path(path)?;
         let recorder = AudioRecorder::new(&target_path, format).await?;
         recorder.start()?;
@@ -1072,7 +1063,8 @@ mod tests {
         #[test]
         fn test_recording_path_traversal_blocked() {
             // Create test directories
-            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let test_dir =
+                std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
             let jail = test_dir.join("jail");
             let base = jail.join("recordings");
             fs::create_dir_all(&base).unwrap();
@@ -1097,7 +1089,8 @@ mod tests {
         #[tokio::test]
         async fn test_recording_symlink_escape_blocked() {
             // Create test directories
-            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let test_dir =
+                std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
             let jail = test_dir.join("jail");
             let base = jail.join("recordings");
             let evil_target = test_dir.join("evil");
@@ -1118,7 +1111,9 @@ mod tests {
             mixer.add_participant("alice", None).unwrap();
 
             // Attempt to record through symlink that escapes jail
-            let result = mixer.start_participant_recording("alice", symlink_path.join("recording.wav")).await;
+            let result = mixer
+                .start_participant_recording("alice", symlink_path.join("recording.wav"))
+                .await;
             assert!(result.is_err());
             assert!(result.unwrap_err().to_string().contains("escapes"));
 
@@ -1129,7 +1124,8 @@ mod tests {
         #[test]
         fn test_recording_absolute_path_within_jail() {
             // Create test directories
-            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let test_dir =
+                std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
             let jail = test_dir.join("jail");
             let base = jail.join("recordings");
             fs::create_dir_all(&base).unwrap();
@@ -1154,7 +1150,8 @@ mod tests {
         #[test]
         fn test_recording_absolute_path_escapes_jail() {
             // Create test directories
-            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let test_dir =
+                std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
             let jail = test_dir.join("jail");
             let base = jail.join("recordings");
             fs::create_dir_all(&base).unwrap();
@@ -1191,7 +1188,8 @@ mod tests {
         #[test]
         fn test_recording_base_escape_blocked() {
             // Create test directories
-            let test_dir = std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
+            let test_dir =
+                std::env::temp_dir().join(format!("mixer-test-{}", uuid::Uuid::new_v4()));
             let jail = test_dir.join("jail");
             let base = jail.join("recordings").join("session-1");
             let sibling = jail.join("recordings").join("session-2");

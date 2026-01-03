@@ -246,7 +246,10 @@ fn parse_opus_head(data: &[u8]) -> Result<(SampleRate, Channels, u16)> {
         24000 => SampleRate::Hz24000,
         48000 | 0 => SampleRate::Hz48000,
         other => {
-            tracing::warn!("Unsupported Opus sample rate {} in header, using 48kHz", other);
+            tracing::warn!(
+                "Unsupported Opus sample rate {} in header, using 48kHz",
+                other
+            );
             SampleRate::Hz48000
         }
     };

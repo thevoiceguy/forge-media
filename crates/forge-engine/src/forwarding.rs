@@ -1,6 +1,6 @@
 //! RTP packet forwarding engine
 
-use crate::session::{MediaSession, Participant, SessionState};
+use crate::session::{MediaSession, Participant, RecordingSide, SessionState};
 use forge_core::{ForgeError, Result};
 use forge_rtp::rtcp::RtcpPacket;
 use metrics::{counter, histogram};
@@ -247,18 +247,59 @@ impl ForwardingEngine {
             Vec::new()
         };
 
+        // Determine which participant sent this packet
+        let (sender, receiver) = {
+            let a = participant_a.read().await;
+            let b = participant_b.read().await;
+
+            if a.remote_addr == Some(source_addr) {
+                // Packet from A, forward to B
+                (Side::A, Side::B)
+            } else if b.remote_addr == Some(source_addr) {
+                // Packet from B, forward to A
+                (Side::B, Side::A)
+            } else {
+                // Unknown sender - learn the endpoint
+                tracing::debug!(
+                    "Learning remote RTP endpoint for session {}: {}",
+                    call_id.0,
+                    source_addr
+                );
+
+                // If participant A doesn't have an endpoint, assign it
+                if a.remote_addr.is_none() {
+                    drop(a);
+                    drop(b);
+                    participant_a.write().await.remote_addr = Some(source_addr);
+                    (Side::A, Side::B)
+                } else if b.remote_addr.is_none() {
+                    drop(a);
+                    drop(b);
+                    participant_b.write().await.remote_addr = Some(source_addr);
+                    (Side::B, Side::A)
+                } else {
+                    // Both endpoints known but packet from unknown source
+                    tracing::warn!(
+                        "Received RTP packet from unknown source {} for session {}",
+                        source_addr,
+                        call_id.0
+                    );
+                    return;
+                }
+            }
+        };
+
         // Process decoded samples (if any)
         if !pcm_samples.is_empty() {
             // Audio tap for call recording (ALWAYS record if recorder is active)
             if let Some(recorder) = session.recorder.read().await.as_ref() {
-                // Write decoded PCM samples to recorder
-                if let Err(e) = recorder.write_samples(&pcm_samples) {
-                    tracing::debug!(
-                        "Failed to write samples to recorder for session {}: {}",
-                        call_id.0,
-                        e
-                    );
-                }
+                let recording_side = match sender {
+                    Side::A => RecordingSide::A,
+                    Side::B => RecordingSide::B,
+                };
+                let mixer = session.recording_mixer();
+                let mut mixer_guard = mixer.lock().await;
+                mixer_guard.push(call_id, recording_side, &pcm_samples, recorder);
             }
 
             // Audio tap for AI integration
@@ -318,48 +359,6 @@ impl ForwardingEngine {
             }
             // Note: Continue with normal forwarding (recording and DTMF are passive)
         }
-
-        // Determine which participant sent this packet
-        let (sender, receiver) = {
-            let a = participant_a.read().await;
-            let b = participant_b.read().await;
-
-            if a.remote_addr == Some(source_addr) {
-                // Packet from A, forward to B
-                (Side::A, Side::B)
-            } else if b.remote_addr == Some(source_addr) {
-                // Packet from B, forward to A
-                (Side::B, Side::A)
-            } else {
-                // Unknown sender - learn the endpoint
-                tracing::debug!(
-                    "Learning remote RTP endpoint for session {}: {}",
-                    call_id.0,
-                    source_addr
-                );
-
-                // If participant A doesn't have an endpoint, assign it
-                if a.remote_addr.is_none() {
-                    drop(a);
-                    drop(b);
-                    participant_a.write().await.remote_addr = Some(source_addr);
-                    (Side::A, Side::B)
-                } else if b.remote_addr.is_none() {
-                    drop(a);
-                    drop(b);
-                    participant_b.write().await.remote_addr = Some(source_addr);
-                    (Side::B, Side::A)
-                } else {
-                    // Both endpoints known but packet from unknown source
-                    tracing::warn!(
-                        "Received RTP packet from unknown source {} for session {}",
-                        source_addr,
-                        call_id.0
-                    );
-                    return;
-                }
-            }
-        };
 
         // Check if both endpoints are now learned and activate XDP fast path
         #[cfg(all(target_os = "linux", feature = "xdp"))]

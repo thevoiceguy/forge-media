@@ -206,6 +206,8 @@ pub struct MediaSession {
     ai_manager: Arc<RwLock<Option<Arc<crate::ai_integration::AISessionManager>>>>,
     /// Audio recorder for call recording (optional)
     pub(crate) recorder: Arc<RwLock<Option<forge_recorder::AudioRecorder>>>,
+    /// Small mixer to combine both call legs before writing to the recorder
+    pub(crate) recording_mixer: Arc<Mutex<RecordingMixer>>,
 }
 
 impl MediaSession {
@@ -310,6 +312,7 @@ impl MediaSession {
             xdp_active: Arc::new(AtomicBool::new(false)),
             ai_manager: Arc::new(RwLock::new(None)),
             recorder: Arc::new(RwLock::new(None)),
+            recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
         };
 
         // Publish session created event
@@ -463,6 +466,7 @@ impl MediaSession {
             xdp_active: Arc::new(AtomicBool::new(false)),
             ai_manager: Arc::new(RwLock::new(None)),
             recorder: Arc::new(RwLock::new(None)),
+            recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
         };
 
         // Publish session created event
@@ -1175,6 +1179,11 @@ impl MediaSession {
         *self.ai_manager.write().await = Some(manager);
     }
 
+    /// Get the recorder mixer used for call recordings
+    pub fn recording_mixer(&self) -> Arc<Mutex<RecordingMixer>> {
+        Arc::clone(&self.recording_mixer)
+    }
+
     // =====================================================================
     // Call Recording Methods
     // =====================================================================
@@ -1211,6 +1220,9 @@ impl MediaSession {
             return Err(ForgeError::Internal("Recording already enabled".into()));
         }
 
+        // Reset mixer state so we don't carry buffered frames between recordings
+        self.recording_mixer.lock().await.reset();
+
         // Create recorder
         let recorder = forge_recorder::AudioRecorder::new(path, format)
             .await
@@ -1238,6 +1250,9 @@ impl MediaSession {
         let mut recorder_guard = self.recorder.write().await;
 
         if let Some(recorder) = recorder_guard.take() {
+            // Flush any buffered mixed frame before finalizing
+            self.recording_mixer.lock().await.flush(&recorder);
+
             recorder
                 .stop()
                 .map_err(|e| ForgeError::Internal(format!("Failed to stop recording: {}", e)))?;
@@ -1520,6 +1535,7 @@ impl MediaSession {
             xdp_active: Arc::new(AtomicBool::new(state.xdp_active)),
             ai_manager: Arc::new(RwLock::new(None)),
             recorder: Arc::new(RwLock::new(None)),
+            recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
         };
 
         tracing::info!(
@@ -1583,6 +1599,193 @@ impl Drop for MediaSession {
                 }
             });
         }
+    }
+}
+
+/// Direction for recording mixer bookkeeping.
+///
+/// Identifies which participant (A or B) in a two-party call sent a given audio frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordingSide {
+    /// Participant A (typically the caller)
+    A,
+    /// Participant B (typically the callee)
+    B,
+}
+
+/// Minimal mixer that pairs recent frames from each leg before writing to recordings.
+///
+/// # Purpose
+///
+/// In two-party calls, RTP packets arrive independently from each participant. To create
+/// a proper stereo recording where both sides can be heard together, we need to mix the
+/// audio streams. This mixer buffers one frame at a time and combines it with the next
+/// frame from the opposite side.
+///
+/// # Buffering Strategy
+///
+/// - When a frame arrives, if there's no buffered frame, store it
+/// - When a frame arrives and a frame from the **opposite** side is buffered, mix them
+/// - When a frame arrives and a frame from the **same** side is buffered, flush the old
+///   frame and buffer the new one
+/// - Frames older than 100ms are automatically flushed to prevent unbounded buffering
+///
+/// # Mixing Algorithm
+///
+/// Mixing uses amplitude-based detection to distinguish active speech from silence:
+/// - Samples with amplitude > 10 are considered "active"
+/// - When both sides are active, average the samples to prevent clipping
+/// - When only one side is active, pass through unchanged
+///
+/// This approach preserves silence while properly mixing overlapping speech.
+#[derive(Default)]
+pub(crate) struct RecordingMixer {
+    /// Buffered frame: (side, samples, timestamp)
+    pending: Option<(RecordingSide, Vec<i16>, Instant)>,
+}
+
+/// Maximum age for buffered frame before auto-flush (100ms)
+const STALE_FRAME_THRESHOLD: Duration = Duration::from_millis(100);
+
+/// Amplitude threshold for considering a sample "active" (helps distinguish silence from speech)
+const AMPLITUDE_THRESHOLD: i16 = 10;
+
+impl RecordingMixer {
+    /// Clear any buffered frame.
+    ///
+    /// Called when starting a new recording to ensure clean state.
+    pub fn reset(&mut self) {
+        self.pending = None;
+    }
+
+    /// Flush any buffered frame to the recorder.
+    ///
+    /// Called when stopping a recording to ensure the last frame is written.
+    /// Write errors are silently ignored since the recording is ending anyway.
+    pub fn flush(&mut self, recorder: &forge_recorder::AudioRecorder) {
+        if let Some((_, samples, _)) = self.pending.take() {
+            let _ = recorder.write_samples(&samples);
+        }
+    }
+
+    /// Process incoming audio samples, mixing with buffered frames when appropriate.
+    ///
+    /// # Behavior
+    ///
+    /// 1. **No buffered frame**: Store the incoming frame
+    /// 2. **Buffered frame from opposite side**: Mix them together and write
+    /// 3. **Buffered frame from same side**: Flush buffered frame, store new one
+    /// 4. **Stale buffered frame (>100ms)**: Flush it, then store new frame
+    ///
+    /// # Parameters
+    ///
+    /// - `call_id`: For logging context
+    /// - `side`: Which participant sent this frame
+    /// - `samples`: PCM audio samples (16-bit signed)
+    /// - `recorder`: The active audio recorder
+    ///
+    /// # Notes
+    ///
+    /// Write errors are logged at `warn` level since recording failures should be visible
+    /// but shouldn't interrupt call processing.
+    pub fn push(
+        &mut self,
+        call_id: &CallId,
+        side: RecordingSide,
+        samples: &[i16],
+        recorder: &forge_recorder::AudioRecorder,
+    ) {
+        if samples.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+
+        if let Some((pending_side, pending_samples, timestamp)) = self.pending.take() {
+            // Check if buffered frame is stale and auto-flush
+            let age = now.duration_since(timestamp);
+            if age > STALE_FRAME_THRESHOLD {
+                if let Err(e) = recorder.write_samples(&pending_samples) {
+                    tracing::warn!(
+                        call_id = %call_id.0,
+                        age_ms = age.as_millis(),
+                        "Failed to write stale frame to recorder: {}",
+                        e
+                    );
+                }
+                // Buffer the new frame since the old one was stale
+                self.pending = Some((side, samples.to_vec(), now));
+                return;
+            }
+
+            if pending_side != side {
+                let mixed = Self::mix_frames(&pending_samples, samples);
+                if let Err(e) = recorder.write_samples(&mixed) {
+                    tracing::warn!(
+                        call_id = %call_id.0,
+                        "Failed to write mixed samples to recorder: {}",
+                        e
+                    );
+                }
+            } else {
+                if let Err(e) = recorder.write_samples(&pending_samples) {
+                    tracing::warn!(
+                        call_id = %call_id.0,
+                        "Failed to write samples to recorder: {}",
+                        e
+                    );
+                }
+                self.pending = Some((side, samples.to_vec(), now));
+            }
+        } else {
+            self.pending = Some((side, samples.to_vec(), now));
+        }
+    }
+
+    /// Mix two audio frames together using amplitude-aware averaging.
+    ///
+    /// # Algorithm
+    ///
+    /// For each sample position:
+    /// - If both sides have active audio (amplitude > 10): average them
+    /// - If only one side is active: pass through unchanged
+    /// - If neither side is active: sum them (both near zero anyway)
+    ///
+    /// This prevents:
+    /// - Clipping when both parties speak simultaneously
+    /// - Attenuating valid silence or low-level audio
+    /// - Double loudness when only one party is speaking
+    ///
+    /// # Parameters
+    ///
+    /// - `a`: Samples from one side
+    /// - `b`: Samples from the other side
+    ///
+    /// # Returns
+    ///
+    /// Mixed samples with length equal to the longer input
+    fn mix_frames(a: &[i16], b: &[i16]) -> Vec<i16> {
+        let len = a.len().max(b.len());
+        let mut output = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let sa = *a.get(i).unwrap_or(&0);
+            let sb = *b.get(i).unwrap_or(&0);
+            let sum = sa as i32 + sb as i32;
+
+            // Use amplitude threshold to distinguish active audio from silence
+            // This prevents treating true silence as "not contributing"
+            let a_active = sa.abs() > AMPLITUDE_THRESHOLD;
+            let b_active = sb.abs() > AMPLITUDE_THRESHOLD;
+            let contributors = a_active as i32 + b_active as i32;
+
+            // Average only when both sides contribute active audio
+            let mixed = if contributors > 1 { sum / 2 } else { sum };
+
+            output.push(mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16);
+        }
+
+        output
     }
 }
 

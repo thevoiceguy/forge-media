@@ -330,6 +330,8 @@ impl PlaybackManager {
     ) -> Result<()> {
         use bytes::Bytes;
 
+        debug!("send_audio_frame called, frame samples: {}", frame.len());
+
         // Get playback state
         let (call_id, target, rtp_seq, rtp_timestamp, rtp_ssrc) = {
             let guard = internal.read().await;
@@ -342,16 +344,29 @@ impl PlaybackManager {
             )
         };
 
+        debug!(
+            call_id = %call_id,
+            target = ?target,
+            rtp_seq = rtp_seq,
+            rtp_timestamp = rtp_timestamp,
+            rtp_ssrc = rtp_ssrc,
+            "Got playback state"
+        );
+
         // Get session manager
         let session_manager = self
             .session_manager
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Session manager not set"))?;
 
+        debug!("Session manager is set");
+
         // Get session
         let session = session_manager
             .get_session(&call_id)
             .ok_or_else(|| anyhow::anyhow!("Session not found for call {}", call_id.0))?;
+
+        debug!(call_id = %call_id, "Got session");
 
         // Convert i16 PCM samples to u8 G.711 µ-law (payload type 0)
         // For simplicity, assume the audio source provides 8kHz mono PCM
@@ -395,17 +410,34 @@ impl PlaybackManager {
             None
         };
 
+        debug!(
+            addr_a = ?addr_a,
+            addr_b = ?addr_b,
+            packet_size = packet_bytes.len(),
+            "Prepared to send RTP packets"
+        );
+
         // Send RTP packets to target participant(s)
         if let Some(addr) = addr_a {
+            debug!("Sending RTP packet to participant A at {}", addr);
             if let Err(e) = sockets.send_rtp_to(&packet_bytes, addr).await {
                 error!("Failed to send RTP to participant A at {}: {}", addr, e);
+            } else {
+                debug!("Successfully sent RTP to participant A at {}", addr);
             }
+        } else {
+            debug!("No address for participant A, skipping send");
         }
 
         if let Some(addr) = addr_b {
+            debug!("Sending RTP packet to participant B at {}", addr);
             if let Err(e) = sockets.send_rtp_to(&packet_bytes, addr).await {
                 error!("Failed to send RTP to participant B at {}: {}", addr, e);
+            } else {
+                debug!("Successfully sent RTP to participant B at {}", addr);
             }
+        } else {
+            debug!("No address for participant B, skipping send");
         }
 
         // Update RTP state (increment seq and timestamp)
@@ -416,6 +448,7 @@ impl PlaybackManager {
             guard.rtp_timestamp = guard.rtp_timestamp.wrapping_add(frame.len() as u32);
         }
 
+        debug!("RTP packet sent successfully");
         Ok(())
     }
 }

@@ -1221,6 +1221,7 @@ dependencies = [
 name = "forge-engine"
 version = "0.3.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "chrono",
@@ -1230,6 +1231,7 @@ dependencies = [
  "forge-core",
  "forge-dtmf",
  "forge-ha",
+ "forge-injection",
  "forge-kernel",
  "forge-recorder",
  "forge-rtp",
@@ -1318,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "forge-media"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "criterion",
@@ -3487,7 +3489,7 @@ checksum = "d66dc143e6b11c1eddc06d5c423cfc97062865baf299914ab64caa38182078fe"
 
 [[package]]
 name = "sip-auth"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3507,20 +3509,18 @@ dependencies = [
 
 [[package]]
 name = "sip-core"
-version = "0.6.26"
+version = "0.1.0"
 dependencies = [
  "bytes",
- "httpdate",
  "percent-encoding",
  "proptest",
  "serde",
  "smol_str",
- "subtle",
 ]
 
 [[package]]
 name = "sip-dialog"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3536,7 +3536,7 @@ dependencies = [
 
 [[package]]
 name = "sip-observe"
-version = "0.2.1"
+version = "0.1.0"
 dependencies = [
  "once_cell",
  "tracing",
@@ -3544,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "sip-parse"
-version = "0.3.1"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "httpdate",
@@ -3559,7 +3559,7 @@ dependencies = [
 
 [[package]]
 name = "sip-ratelimit"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "dashmap",
  "parking_lot",
@@ -3569,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "sip-sdp"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "nom",
  "smol_str",
@@ -3577,7 +3577,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transaction"
-version = "0.4.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3596,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transport"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3615,7 +3615,7 @@ dependencies = [
 
 [[package]]
 name = "sip-uas"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",

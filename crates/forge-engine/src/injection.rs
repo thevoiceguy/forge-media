@@ -115,6 +115,12 @@ struct PlaybackInternal {
     active: AtomicBool,
     stop_rx: mpsc::UnboundedReceiver<()>,
     completion_tx: oneshot::Sender<PlaybackStatus>,
+    /// RTP sequence number (increments per packet)
+    rtp_seq: u16,
+    /// RTP timestamp (increments by samples per packet)
+    rtp_timestamp: u32,
+    /// RTP SSRC (randomly generated per playback)
+    rtp_ssrc: u32,
 }
 
 /// Manages active audio playbacks for sessions
@@ -123,6 +129,8 @@ pub struct PlaybackManager {
     playbacks: DashMap<CallId, Vec<PlaybackId>>,
     /// Playback state by ID
     playback_state: DashMap<PlaybackId, Arc<RwLock<PlaybackInternal>>>,
+    /// Reference to session manager for accessing RTP sockets
+    session_manager: Option<Arc<crate::manager::SessionManager>>,
 }
 
 impl PlaybackManager {
@@ -131,6 +139,16 @@ impl PlaybackManager {
         Self {
             playbacks: DashMap::new(),
             playback_state: DashMap::new(),
+            session_manager: None,
+        }
+    }
+
+    /// Create a new playback manager with session manager reference
+    pub fn new_with_session_manager(session_manager: Arc<crate::manager::SessionManager>) -> Self {
+        Self {
+            playbacks: DashMap::new(),
+            playback_state: DashMap::new(),
+            session_manager: Some(session_manager),
         }
     }
 
@@ -154,6 +172,11 @@ impl PlaybackManager {
             "Starting audio playback"
         );
 
+        // Generate random RTP parameters for this playback
+        let rtp_ssrc = rand::random::<u32>();
+        let rtp_seq = rand::random::<u16>();
+        let rtp_timestamp = rand::random::<u32>();
+
         let internal = PlaybackInternal {
             id,
             call_id: call_id.clone(),
@@ -163,6 +186,9 @@ impl PlaybackManager {
             active: AtomicBool::new(true),
             stop_rx,
             completion_tx,
+            rtp_seq,
+            rtp_timestamp,
+            rtp_ssrc,
         };
 
         let internal = Arc::new(RwLock::new(internal));
@@ -248,13 +274,17 @@ impl PlaybackManager {
 
             match frame_result {
                 Ok(frame) => {
-                    // TODO: Inject frame into RTP stream
-                    // This will be integrated with ForwardingEngine
                     debug!(
                         playback_id = %id,
                         samples = frame.len(),
                         "Read audio frame"
                     );
+
+                    // Send RTP packet(s) for this audio frame
+                    if let Err(e) = self.send_audio_frame(&internal, &frame).await {
+                        error!(playback_id = %id, error = %e, "Failed to send RTP packet");
+                        // Continue playback despite RTP errors
+                    }
 
                     // Simulate playback timing (20ms per frame)
                     tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
@@ -291,6 +321,120 @@ impl PlaybackManager {
 
         Ok(())
     }
+
+    /// Send an audio frame as RTP packet(s)
+    async fn send_audio_frame(
+        &self,
+        internal: &Arc<RwLock<PlaybackInternal>>,
+        frame: &[i16],
+    ) -> Result<()> {
+        use bytes::Bytes;
+
+        // Get playback state
+        let (call_id, target, rtp_seq, rtp_timestamp, rtp_ssrc) = {
+            let guard = internal.read().await;
+            (
+                guard.call_id.clone(),
+                guard.target,
+                guard.rtp_seq,
+                guard.rtp_timestamp,
+                guard.rtp_ssrc,
+            )
+        };
+
+        // Get session manager
+        let session_manager = self
+            .session_manager
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Session manager not set"))?;
+
+        // Get session
+        let session = session_manager
+            .get_session(&call_id)
+            .ok_or_else(|| anyhow::anyhow!("Session not found for call {}", call_id.0))?;
+
+        // Convert i16 PCM samples to u8 G.711 µ-law (payload type 0)
+        // For simplicity, assume the audio source provides 8kHz mono PCM
+        // In production, this should handle sample rate conversion and proper encoding
+        let payload = pcm_to_ulaw(frame);
+
+        // Create RTP packet
+        // Payload type 0 = PCMU (G.711 µ-law)
+        let packet = forge_rtp::rtp::RtpPacket::build(
+            0,            // payload_type: PCMU
+            rtp_seq,      // sequence number
+            rtp_timestamp, // timestamp
+            rtp_ssrc,     // SSRC
+            Bytes::from(payload),
+            false,        // marker: false for continuous audio
+        );
+
+        // Serialize to bytes
+        let packet_bytes = packet.to_bytes();
+
+        // Get RTP sockets from session
+        let sockets = session.sockets();
+
+        // Determine which participant(s) to send to based on target
+        let send_to_a = matches!(target, AudioTarget::ParticipantA | AudioTarget::Both);
+        let send_to_b = matches!(target, AudioTarget::ParticipantB | AudioTarget::Both);
+
+        // Get participant endpoints
+        let participant_a = session.participant_a();
+        let participant_b = session.participant_b();
+
+        let addr_a = if send_to_a {
+            participant_a.read().await.remote_addr
+        } else {
+            None
+        };
+
+        let addr_b = if send_to_b {
+            participant_b.read().await.remote_addr
+        } else {
+            None
+        };
+
+        // Send RTP packets to target participant(s)
+        if let Some(addr) = addr_a {
+            if let Err(e) = sockets.send_rtp_to(&packet_bytes, addr).await {
+                error!("Failed to send RTP to participant A at {}: {}", addr, e);
+            }
+        }
+
+        if let Some(addr) = addr_b {
+            if let Err(e) = sockets.send_rtp_to(&packet_bytes, addr).await {
+                error!("Failed to send RTP to participant B at {}: {}", addr, e);
+            }
+        }
+
+        // Update RTP state (increment seq and timestamp)
+        {
+            let mut guard = internal.write().await;
+            guard.rtp_seq = guard.rtp_seq.wrapping_add(1);
+            // Timestamp increments by number of samples (160 for 20ms at 8kHz)
+            guard.rtp_timestamp = guard.rtp_timestamp.wrapping_add(frame.len() as u32);
+        }
+
+        Ok(())
+    }
+}
+
+/// Convert PCM i16 samples to G.711 µ-law encoding
+fn pcm_to_ulaw(samples: &[i16]) -> Vec<u8> {
+    samples.iter().map(|&sample| {
+        // Simple µ-law encoding (simplified version)
+        // Full implementation would use proper µ-law tables
+        let sign = if sample < 0 { 0x80 } else { 0x00 };
+        let magnitude = sample.abs();
+        let exponent = if magnitude < 32 {
+            0
+        } else {
+            (15 - magnitude.leading_zeros()) as u8
+        };
+        let mantissa = ((magnitude >> (exponent + 3)) & 0x0F) as u8;
+        sign | (exponent << 4) | mantissa ^ 0xFF
+    }).collect()
 }
 
 impl Clone for PlaybackManager {
@@ -298,6 +442,7 @@ impl Clone for PlaybackManager {
         Self {
             playbacks: self.playbacks.clone(),
             playback_state: self.playback_state.clone(),
+            session_manager: self.session_manager.clone(),
         }
     }
 }

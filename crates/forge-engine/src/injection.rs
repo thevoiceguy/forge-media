@@ -269,7 +269,7 @@ impl PlaybackManager {
             // Read next frame from source
             let frame_result = {
                 let mut guard = internal.write().await;
-                guard.source.read_frame(960) // 20ms at 48kHz
+                guard.source.read_frame(160) // 20ms at 8kHz (standard for G.711)
             };
 
             match frame_result {
@@ -444,7 +444,8 @@ impl PlaybackManager {
         {
             let mut guard = internal.write().await;
             guard.rtp_seq = guard.rtp_seq.wrapping_add(1);
-            // Timestamp increments by number of samples (160 for 20ms at 8kHz)
+            // Timestamp increments by number of samples at the codec sample rate
+            // For G.711 at 8kHz: 160 samples for 20ms
             guard.rtp_timestamp = guard.rtp_timestamp.wrapping_add(frame.len() as u32);
         }
 

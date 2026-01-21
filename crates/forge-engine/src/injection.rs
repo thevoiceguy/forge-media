@@ -114,7 +114,7 @@ struct PlaybackInternal {
     mix_mode: MixMode,
     active: AtomicBool,
     stop_rx: mpsc::UnboundedReceiver<()>,
-    completion_tx: oneshot::Sender<PlaybackStatus>,
+    completion_tx: Option<oneshot::Sender<PlaybackStatus>>,
     /// RTP sequence number (increments per packet)
     rtp_seq: u16,
     /// RTP timestamp (increments by samples per packet)
@@ -185,7 +185,7 @@ impl PlaybackManager {
             mix_mode,
             active: AtomicBool::new(true),
             stop_rx,
-            completion_tx,
+            completion_tx: Some(completion_tx),
             rtp_seq,
             rtp_timestamp,
             rtp_ssrc,
@@ -307,16 +307,25 @@ impl PlaybackManager {
             }
         };
 
-        // Send completion status
+        // Extract completion_tx from internal state before cleanup
+        let completion_tx = {
+            let mut guard = internal.write().await;
+            guard.completion_tx.take()
+        };
+
         // Remove from active playbacks
         self.playback_state.remove(&id);
         if let Some(mut ids) = self.playbacks.get_mut(&call_id) {
             ids.retain(|&pid| pid != id);
         }
 
-        // Note: We can't send the completion status through completion_tx because it was moved
-        // into PlaybackInternal. The important thing is that the playback is cleaned up from
-        // playback_state and playbacks maps. Callers can detect completion by the handle being dropped.
+        // Send completion status to waiting handle
+        if let Some(tx) = completion_tx {
+            if let Err(_) = tx.send(status.clone()) {
+                debug!(playback_id = %id, "Failed to send completion status - receiver dropped");
+            }
+        }
+
         info!(playback_id = %id, status = ?status, "Playback task completed");
 
         Ok(())

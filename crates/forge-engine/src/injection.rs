@@ -455,19 +455,50 @@ impl PlaybackManager {
 }
 
 /// Convert PCM i16 samples to G.711 µ-law encoding
+///
+/// This implements the ITU-T G.711 µ-law compression algorithm.
+/// Reference: ITU-T Recommendation G.711 (1988)
 fn pcm_to_ulaw(samples: &[i16]) -> Vec<u8> {
+    const BIAS: i16 = 0x84; // 132 in decimal
+    const CLIP: i16 = 32635;
+
     samples.iter().map(|&sample| {
-        // Simple µ-law encoding (simplified version)
-        // Full implementation would use proper µ-law tables
+        // Get sign and magnitude
         let sign = if sample < 0 { 0x80 } else { 0x00 };
-        let magnitude = sample.abs();
-        let exponent = if magnitude < 32 {
+        let mut magnitude = sample.abs().min(CLIP) as i16;
+
+        // Add bias
+        magnitude = magnitude + BIAS;
+
+        // Find segment (exponent) by finding the position of the highest set bit
+        let exponent = if magnitude < 256 {
             0
+        } else if magnitude < 512 {
+            1
+        } else if magnitude < 1024 {
+            2
+        } else if magnitude < 2048 {
+            3
+        } else if magnitude < 4096 {
+            4
+        } else if magnitude < 8192 {
+            5
+        } else if magnitude < 16384 {
+            6
         } else {
-            (15 - magnitude.leading_zeros()) as u8
+            7
         };
-        let mantissa = ((magnitude >> (exponent + 3)) & 0x0F) as u8;
-        sign | (exponent << 4) | mantissa ^ 0xFF
+
+        // Extract mantissa (4 bits after the segment bit)
+        let mantissa = if exponent == 0 {
+            (magnitude >> 4) & 0x0F
+        } else {
+            (magnitude >> (exponent + 3)) & 0x0F
+        };
+
+        // Combine sign, exponent, and mantissa, then invert all bits
+        let encoded = sign | (exponent << 4) | (mantissa as u8);
+        encoded ^ 0xFF
     }).collect()
 }
 

@@ -73,7 +73,7 @@ use crate::connector::{
 use crate::events::{AIEvent, SessionConfig};
 use crate::{AIStreamError, AIStreamStats, Result};
 use async_trait::async_trait;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Deepgram STT model
 #[derive(Debug, Clone)]
@@ -185,6 +185,7 @@ impl DeepgramConnector {
     }
 
     /// Get WebSocket URL for Deepgram API
+    #[allow(dead_code)] // TODO: Implement WebSocket streaming for Deepgram
     fn get_ws_url(&self) -> String {
         self.config.endpoint.clone().unwrap_or_else(|| {
             // Build URL with query parameters

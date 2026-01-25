@@ -67,7 +67,7 @@ use crate::connector::{
 use crate::events::{AIEvent, SessionConfig};
 use crate::{AIStreamError, AIStreamStats, Result};
 use async_trait::async_trait;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// Anthropic Claude model
 #[derive(Debug, Clone)]
@@ -127,6 +127,7 @@ impl AnthropicConnector {
     }
 
     /// Get WebSocket URL for Anthropic API
+    #[allow(dead_code)] // TODO: Implement Anthropic Voice API
     fn get_ws_url(&self) -> String {
         self.config.endpoint.clone().unwrap_or_else(|| {
             // TODO: Replace with actual Anthropic Voice API endpoint when available

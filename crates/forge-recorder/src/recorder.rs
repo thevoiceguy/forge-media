@@ -10,8 +10,10 @@ use audiopus::{Application, Channels, SampleRate};
 use bytes::Bytes;
 use hound::{WavSpec, WavWriter};
 use parking_lot::Mutex;
+#[allow(unused_imports)]
 use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
+#[allow(unused_imports)]
 use std::hash::{Hash, Hasher};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -36,6 +38,7 @@ use tracing::{info, warn};
 ///     comment: Some("Monthly review meeting".into()),
 /// };
 /// ```
+#[allow(dead_code)] // TODO: Implement Opus recording support
 #[derive(Debug, Clone, Default)]
 pub struct OpusMetadata {
     /// Recording title
@@ -50,6 +53,7 @@ pub struct OpusMetadata {
     pub comment: Option<String>,
 }
 
+#[allow(dead_code)] // TODO: Implement Opus recording support
 impl OpusMetadata {
     /// Create empty metadata
     pub fn new() -> Self {

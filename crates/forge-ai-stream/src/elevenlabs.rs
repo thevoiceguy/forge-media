@@ -69,7 +69,7 @@ use crate::connector::{
 use crate::events::{AIEvent, SessionConfig};
 use crate::{AIStreamError, AIStreamStats, Result};
 use async_trait::async_trait;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 /// ElevenLabs TTS model
 #[derive(Debug, Clone)]
@@ -166,6 +166,7 @@ impl ElevenLabsConnector {
     }
 
     /// Get WebSocket URL for ElevenLabs API
+    #[allow(dead_code)] // TODO: Implement WebSocket streaming for ElevenLabs
     fn get_ws_url(&self) -> String {
         self.config
             .endpoint
@@ -174,6 +175,7 @@ impl ElevenLabsConnector {
     }
 
     /// Get agent ID from config or use default
+    #[allow(dead_code)] // TODO: Implement agent ID configuration
     fn get_agent_id(&self) -> String {
         // TODO: Support agent ID in config
         // ElevenLabs uses agent IDs to configure conversational behavior

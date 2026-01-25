@@ -26,14 +26,23 @@ use crate::{AudioFormat, CodecError, Result};
 // - Q31: 32-bit signed, range [-1.0, 0.99999999]
 //
 // All operations saturate on overflow per ITU specification.
+//
+// NOTE: These functions are not currently used because this implementation
+// uses the bcg729 library. They are preserved for potential pure Rust
+// implementation in the future.
 
 /// Fixed-point constants
+#[allow(dead_code)]
 const MAX_16: i16 = 0x7FFF; // 32767
+#[allow(dead_code)]
 const MIN_16: i16 = -0x8000; // -32768
+#[allow(dead_code)]
 const MAX_32: i32 = 0x7FFF_FFFF; // 2147483647
+#[allow(dead_code)]
 const MIN_32: i32 = -0x8000_0000; // -2147483648
 
 /// Saturated 16-bit addition (Q15 format)
+#[allow(dead_code)]
 #[inline]
 fn sat_add(a: i16, b: i16) -> i16 {
     let sum = a as i32 + b as i32;
@@ -41,6 +50,7 @@ fn sat_add(a: i16, b: i16) -> i16 {
 }
 
 /// Saturated 16-bit subtraction (Q15 format)
+#[allow(dead_code)]
 #[inline]
 fn sat_sub(a: i16, b: i16) -> i16 {
     let diff = a as i32 - b as i32;
@@ -49,6 +59,7 @@ fn sat_sub(a: i16, b: i16) -> i16 {
 
 /// Saturated 16-bit multiplication (Q15 × Q15 → Q15)
 /// Result = (a * b) >> 15, saturated
+#[allow(dead_code)]
 #[inline]
 fn sat_mult(a: i16, b: i16) -> i16 {
     let product = (a as i32 * b as i32) >> 15;
@@ -58,6 +69,7 @@ fn sat_mult(a: i16, b: i16) -> i16 {
 /// 32-bit multiply with left shift (Q15 × Q15 → Q31)
 /// L_mult(a, b) = (a * b) << 1, saturated to 32-bit
 /// Special case: L_mult(-32768, -32768) = MAX_32
+#[allow(dead_code)]
 #[inline]
 fn l_mult(a: i16, b: i16) -> i32 {
     if a == MIN_16 && b == MIN_16 {
@@ -69,18 +81,21 @@ fn l_mult(a: i16, b: i16) -> i32 {
 }
 
 /// Saturated 32-bit addition (Q31 format)
+#[allow(dead_code)]
 #[inline]
 fn l_add(a: i32, b: i32) -> i32 {
     a.saturating_add(b)
 }
 
 /// Saturated 32-bit subtraction (Q31 format)
+#[allow(dead_code)]
 #[inline]
 fn l_sub(a: i32, b: i32) -> i32 {
     a.saturating_sub(b)
 }
 
 /// Arithmetic left shift with saturation (16-bit)
+#[allow(dead_code)]
 #[inline]
 fn shl(val: i16, shift: i32) -> i16 {
     if shift <= 0 {
@@ -91,6 +106,7 @@ fn shl(val: i16, shift: i32) -> i16 {
 }
 
 /// Arithmetic right shift (16-bit)
+#[allow(dead_code)]
 #[inline]
 fn shr(val: i16, shift: i32) -> i16 {
     if shift <= 0 {
@@ -100,6 +116,7 @@ fn shr(val: i16, shift: i32) -> i16 {
 }
 
 /// Arithmetic left shift with saturation (32-bit)
+#[allow(dead_code)]
 #[inline]
 fn l_shl(val: i32, shift: i32) -> i32 {
     if shift <= 0 {
@@ -110,6 +127,7 @@ fn l_shl(val: i32, shift: i32) -> i32 {
 }
 
 /// Arithmetic right shift (32-bit)
+#[allow(dead_code)]
 #[inline]
 fn l_shr(val: i32, shift: i32) -> i32 {
     if shift <= 0 {
@@ -120,6 +138,7 @@ fn l_shr(val: i32, shift: i32) -> i32 {
 
 /// Absolute value with saturation (16-bit)
 /// Special case: abs(-32768) = 32767
+#[allow(dead_code)]
 #[inline]
 fn sat_abs(val: i16) -> i16 {
     if val == MIN_16 {
@@ -131,6 +150,7 @@ fn sat_abs(val: i16) -> i16 {
 
 /// Negate with saturation (16-bit)
 /// Special case: -(-32768) = 32767
+#[allow(dead_code)]
 #[inline]
 fn sat_negate(val: i16) -> i16 {
     if val == MIN_16 {

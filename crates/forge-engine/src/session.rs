@@ -4,7 +4,7 @@ use forge_core::{CallId, EventBus, ForgeError, ForgeEvent, ParticipantId, Result
 use forge_rtp::srtp::SrtpContext;
 use forge_rtp::{PortPair, PortPool, RtpSocketConfig, RtpSocketPair};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
@@ -193,6 +193,12 @@ pub struct MediaSession {
     srtp_a: Arc<Mutex<SrtpContext>>,
     /// SRTP context for participant B (inbound: unprotect B→us, outbound: protect us→B)
     srtp_b: Arc<Mutex<SrtpContext>>,
+    /// Whether to relay RFC 2833 telephone-event packets to the other leg
+    relay_rfc2833: AtomicBool,
+    /// Telephone-event payload type negotiated with participant A (default 101)
+    telephone_event_pt_a: AtomicU8,
+    /// Telephone-event payload type negotiated with participant B (default 101)
+    telephone_event_pt_b: AtomicU8,
     /// Forwarding task handles
     forwarding_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Optional offer/answer SDP associated with the session
@@ -309,6 +315,9 @@ impl MediaSession {
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
+            relay_rfc2833: AtomicBool::new(false),
+            telephone_event_pt_a: AtomicU8::new(101),
+            telephone_event_pt_b: AtomicU8::new(101),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -465,6 +474,9 @@ impl MediaSession {
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
+            relay_rfc2833: AtomicBool::new(false),
+            telephone_event_pt_a: AtomicU8::new(101),
+            telephone_event_pt_b: AtomicU8::new(101),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -665,6 +677,9 @@ impl MediaSession {
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
+            relay_rfc2833: AtomicBool::new(false),
+            telephone_event_pt_a: AtomicU8::new(101),
+            telephone_event_pt_b: AtomicU8::new(101),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -1188,6 +1203,36 @@ impl MediaSession {
     /// Get the SRTP context for participant B
     pub fn srtp_b(&self) -> &Arc<Mutex<SrtpContext>> {
         &self.srtp_b
+    }
+
+    /// Whether RFC 2833 relay is enabled for this session
+    pub fn relay_rfc2833(&self) -> bool {
+        self.relay_rfc2833.load(Ordering::Relaxed)
+    }
+
+    /// Enable or disable RFC 2833 relay
+    pub fn set_relay_rfc2833(&self, relay: bool) {
+        self.relay_rfc2833.store(relay, Ordering::Relaxed);
+    }
+
+    /// Telephone-event payload type negotiated with participant A
+    pub fn telephone_event_pt_a(&self) -> u8 {
+        self.telephone_event_pt_a.load(Ordering::Relaxed)
+    }
+
+    /// Set telephone-event payload type for participant A
+    pub fn set_telephone_event_pt_a(&self, pt: u8) {
+        self.telephone_event_pt_a.store(pt, Ordering::Relaxed);
+    }
+
+    /// Telephone-event payload type negotiated with participant B
+    pub fn telephone_event_pt_b(&self) -> u8 {
+        self.telephone_event_pt_b.load(Ordering::Relaxed)
+    }
+
+    /// Set telephone-event payload type for participant B
+    pub fn set_telephone_event_pt_b(&self, pt: u8) {
+        self.telephone_event_pt_b.store(pt, Ordering::Relaxed);
     }
 
     /// Get a copy of the AI session manager (if set)

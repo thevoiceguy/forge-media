@@ -203,8 +203,11 @@ impl ForwardingEngine {
     ) {
         let call_id = session.call_id();
 
-        // Check for RFC 2833 telephone-event packets (payload type 101)
-        if packet.header.payload_type() == 101 && session.dtmf_config().enable_rfc2833 {
+        // Check for RFC 2833 telephone-event packets (dynamic payload type per leg)
+        let te_pt_a = session.telephone_event_pt_a();
+        let te_pt_b = session.telephone_event_pt_b();
+        let pkt_pt = packet.header.payload_type();
+        if (pkt_pt == te_pt_a || pkt_pt == te_pt_b) && session.dtmf_config().enable_rfc2833 {
             tracing::debug!(
                 "Received RFC 2833 telephone-event packet for session {} from {}",
                 call_id.0,
@@ -253,10 +256,17 @@ impl ForwardingEngine {
                 }
             }
 
-            // Update activity but don't forward RFC 2833 packets
             session.update_activity().await;
             counter!("forge_dtmf_rfc2833_packets_total", 1);
-            return;
+
+            if !session.relay_rfc2833() {
+                // Detect-only mode: consume the packet, don't forward
+                return;
+            }
+            // Relay mode: fall through to normal forwarding path.
+            // The packet's PT won't match audio codecs, so pcm_samples will be
+            // empty — recording and inband detection are safely skipped.
+            counter!("forge_dtmf_rfc2833_relayed_total", 1);
         }
 
         // Decode audio for recording and optional DTMF detection

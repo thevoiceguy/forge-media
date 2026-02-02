@@ -242,6 +242,21 @@ impl RtpSocketPair {
         Ok((packet, addr))
     }
 
+    /// Receive raw RTP data without parsing.
+    /// Returns (raw_bytes, source_addr). Caller is responsible for SRTP
+    /// decryption before parsing.
+    pub async fn recv_rtp_raw(&self) -> Result<(Bytes, SocketAddr)> {
+        let mut buf = vec![0u8; self.config.recv_buffer_size];
+        let (len, addr) = self
+            .rtp_socket
+            .recv_from(&mut buf)
+            .await
+            .map_err(|e| ForgeError::Network(format!("Failed to receive RTP: {}", e)))?;
+        self.learn_remote_endpoint(addr).await;
+        buf.truncate(len);
+        Ok((Bytes::from(buf), addr))
+    }
+
     /// Send an RTP packet to the remote endpoint
     ///
     /// If no remote endpoint is set, this will return an error.

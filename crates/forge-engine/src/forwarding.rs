@@ -60,35 +60,100 @@ impl ForwardingEngine {
 
             // Wait for either RTP or RTCP packet
             tokio::select! {
-                // Handle RTP packets
-                result = sockets.recv_rtp() => {
+                // Handle RTP packets (raw receive for SRTP support)
+                result = sockets.recv_rtp_raw() => {
                     match result {
-                        Ok((packet, source_addr)) => {
-                            Self::handle_rtp_packet(
-                                &session,
-                                &sockets,
-                                &participant_a,
-                                &participant_b,
-                                packet,
-                                source_addr,
-                            )
-                            .await;
+                        Ok((raw_data, source_addr)) => {
+                            // Determine which leg sent this packet for SRTP unprotect
+                            let srtp_ctx = {
+                                let a = participant_a.read().await;
+                                let b = participant_b.read().await;
+                                if a.remote_addr == Some(source_addr) {
+                                    session.srtp_a().clone()
+                                } else if b.remote_addr == Some(source_addr) {
+                                    session.srtp_b().clone()
+                                } else {
+                                    // Unknown source — use srtp_a by default for first-packet learning
+                                    session.srtp_a().clone()
+                                }
+                            };
+
+                            // SRTP unprotect (passthrough if no keys set)
+                            let plain_data = {
+                                let mut ctx = srtp_ctx.lock().await;
+                                match ctx.unprotect_rtp(&raw_data) {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        tracing::warn!("SRTP unprotect failed for session {}: {}", call_id.0, e);
+                                        counter!("forge_srtp_unprotect_errors_total", 1);
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            // Parse plain RTP
+                            match forge_rtp::RtpPacket::parse(bytes::Bytes::from(plain_data)) {
+                                Ok(packet) => {
+                                    Self::handle_rtp_packet(
+                                        &session,
+                                        &sockets,
+                                        &participant_a,
+                                        &participant_b,
+                                        packet,
+                                        source_addr,
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("RTP parse after SRTP unprotect failed for session {}: {}", call_id.0, e);
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::error!("Error receiving RTP packet for session {}: {}", call_id.0, e);
                         }
                     }
                 }
-                // Handle RTCP packets
+                // Handle RTCP packets (with SRTP unprotect)
                 result = sockets.recv_rtcp() => {
                     match result {
-                        Ok((data, source_addr)) => {
+                        Ok((raw_data, source_addr)) => {
+                            // Determine which leg sent this RTCP
+                            let rtcp_srtp_ctx = {
+                                let a = participant_a.read().await;
+                                if let Some(rtp_addr) = a.remote_addr {
+                                    if rtp_addr.ip() == source_addr.ip()
+                                        && (rtp_addr.port() + 1 == source_addr.port()
+                                            || rtp_addr.port() == source_addr.port())
+                                    {
+                                        session.srtp_a().clone()
+                                    } else {
+                                        session.srtp_b().clone()
+                                    }
+                                } else {
+                                    session.srtp_a().clone()
+                                }
+                            };
+
+                            // SRTCP unprotect (passthrough if no keys)
+                            let plain_data = {
+                                let mut ctx = rtcp_srtp_ctx.lock().await;
+                                match ctx.unprotect_rtcp(&raw_data) {
+                                    Ok(data) => bytes::Bytes::from(data),
+                                    Err(e) => {
+                                        tracing::warn!("SRTCP unprotect failed for session {}: {}", call_id.0, e);
+                                        counter!("forge_srtcp_unprotect_errors_total", 1);
+                                        continue;
+                                    }
+                                }
+                            };
+
                             Self::handle_rtcp_packet(
                                 &session,
                                 &sockets,
                                 &participant_a,
                                 &participant_b,
-                                &data,
+                                &plain_data,
                                 source_addr,
                             )
                             .await;
@@ -417,9 +482,27 @@ impl ForwardingEngine {
         };
 
         if let Some(addr) = receiver_addr {
-            // Serialize and send packet
+            // Serialize packet
             let data = packet.to_bytes();
-            if let Err(e) = sockets.send_rtp_to(&data, addr).await {
+
+            // SRTP protect before sending (passthrough if no keys set)
+            let srtp_ctx = match receiver {
+                Side::A => session.srtp_a().clone(),
+                Side::B => session.srtp_b().clone(),
+            };
+            let send_data = {
+                let mut ctx = srtp_ctx.lock().await;
+                match ctx.protect_rtp(&data) {
+                    Ok(protected) => protected,
+                    Err(e) => {
+                        tracing::error!("SRTP protect failed for session {}: {}", call_id.0, e);
+                        counter!("forge_srtp_protect_errors_total", 1);
+                        return;
+                    }
+                }
+            };
+
+            if let Err(e) = sockets.send_rtp_to(&send_data, addr).await {
                 tracing::error!(
                     "Failed to forward RTP packet for session {}: {}",
                     call_id.0,
@@ -680,9 +763,39 @@ impl ForwardingEngine {
         // Update session activity
         session.update_activity().await;
 
-        // Forward RTCP packet
+        // SRTP protect RTCP before forwarding
         if let Some(addr) = receiver_addr {
-            if let Err(e) = sockets.send_rtcp_to(data, addr).await {
+            // Determine receiver side for SRTP context
+            let rtcp_srtp_ctx = {
+                let a = participant_a.read().await;
+                if let Some(rtp_addr) = a.remote_addr {
+                    if rtp_addr.ip() == source_addr.ip()
+                        && (rtp_addr.port() + 1 == source_addr.port()
+                            || rtp_addr.port() == source_addr.port())
+                    {
+                        // From A → forward to B
+                        session.srtp_b().clone()
+                    } else {
+                        session.srtp_a().clone()
+                    }
+                } else {
+                    session.srtp_b().clone()
+                }
+            };
+
+            let send_data = {
+                let mut ctx = rtcp_srtp_ctx.lock().await;
+                match ctx.protect_rtcp(data) {
+                    Ok(protected) => protected,
+                    Err(e) => {
+                        tracing::error!("SRTCP protect failed for session {}: {}", call_id.0, e);
+                        counter!("forge_srtcp_protect_errors_total", 1);
+                        return;
+                    }
+                }
+            };
+
+            if let Err(e) = sockets.send_rtcp_to(&send_data, addr).await {
                 tracing::error!(
                     "Failed to forward RTCP packet for session {}: {}",
                     call_id.0,

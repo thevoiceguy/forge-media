@@ -1,6 +1,7 @@
 //! Media session management for two-party calls
 
 use forge_core::{CallId, EventBus, ForgeError, ForgeEvent, ParticipantId, Result};
+use forge_rtp::srtp::SrtpContext;
 use forge_rtp::{PortPair, PortPool, RtpSocketConfig, RtpSocketPair};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -188,6 +189,10 @@ pub struct MediaSession {
     transcoder_a_to_b: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
     /// Transcoder for B → A direction (optional, created when needed)
     transcoder_b_to_a: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
+    /// SRTP context for participant A (inbound: unprotect A→us, outbound: protect us→A)
+    srtp_a: Arc<Mutex<SrtpContext>>,
+    /// SRTP context for participant B (inbound: unprotect B→us, outbound: protect us→B)
+    srtp_b: Arc<Mutex<SrtpContext>>,
     /// Forwarding task handles
     forwarding_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Optional offer/answer SDP associated with the session
@@ -302,6 +307,8 @@ impl MediaSession {
             })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
+            srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -456,6 +463,8 @@ impl MediaSession {
             })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
+            srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -654,6 +663,8 @@ impl MediaSession {
             })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
+            srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp,
             from_tag,
@@ -1169,6 +1180,16 @@ impl MediaSession {
         self.to_tag.as_deref()
     }
 
+    /// Get the SRTP context for participant A
+    pub fn srtp_a(&self) -> &Arc<Mutex<SrtpContext>> {
+        &self.srtp_a
+    }
+
+    /// Get the SRTP context for participant B
+    pub fn srtp_b(&self) -> &Arc<Mutex<SrtpContext>> {
+        &self.srtp_b
+    }
+
     /// Get a copy of the AI session manager (if set)
     pub async fn ai_manager(&self) -> Option<Arc<crate::ai_integration::AISessionManager>> {
         self.ai_manager.read().await.clone()
@@ -1525,6 +1546,8 @@ impl MediaSession {
             })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
+            srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp: state.sdp,
             from_tag: state.from_tag,

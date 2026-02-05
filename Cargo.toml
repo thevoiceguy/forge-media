@@ -84,7 +84,7 @@ subtle = "2.5"
 # Utilities
 uuid = { version = "1.6", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-bytes = "1.5"
+bytes = "1.11"
 bitflags = "2.4"
 smol_str = "0.3"
 async-trait = "0.1"

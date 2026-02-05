@@ -17,6 +17,9 @@ lazy_static = "1.4"
 # Opus codec (optional, requires cmake)
 audiopus = { version = "0.3.0-rc.0", optional = true }
 
+# G.722 codec (optional, wraps ezk-g722 based on SpanDSP/libg722)
+ezk-g722 = { version = "0.1", optional = true }
+
 # G.729 codec (optional, requires libbcg729)
 bcg729-sys = { path = "../bcg729-sys", optional = true }
 
@@ -26,7 +29,7 @@ tracing = { workspace = true }
 [features]
 default = []
 opus = ["audiopus"]
-g722 = []  # Pure Rust implementation, no external dependencies
+g722 = ["ezk-g722"]  # Uses ezk-g722 crate (based on SpanDSP/libg722)
 g729 = ["bcg729-sys"]  # FFI bindings to bcg729 library
 all-codecs = ["opus", "g722", "g729"]
 

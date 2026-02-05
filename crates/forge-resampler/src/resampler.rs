@@ -140,9 +140,10 @@ impl Resampler {
                     current
                 };
 
-                // Linear interpolation
+                // Linear interpolation with clamping to prevent overflow clicks
                 let interpolated = current as f64 + (next as f64 - current as f64) * frac;
-                let sample = interpolated.round() as i16;
+                let clamped = interpolated.round().clamp(i16::MIN as f64, i16::MAX as f64);
+                let sample = clamped as i16;
 
                 output.push(sample);
             }
@@ -208,7 +209,9 @@ impl Resampler {
                     let idx = (self.fir_pos + taps_len - k) % taps_len;
                     acc += tap * self.fir_state[base + idx];
                 }
-                filtered.push(acc.round() as i16);
+                // Clamp to prevent overflow clicks
+                let clamped = acc.round().clamp(i16::MIN as f64, i16::MAX as f64);
+                filtered.push(clamped as i16);
             }
             self.fir_pos = (self.fir_pos + 1) % taps_len;
         }

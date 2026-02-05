@@ -323,16 +323,43 @@ impl ForwardingEngine {
         };
 
         // Determine which participant sent this packet
+        // Note: We match by IP only (not IP:port) to handle non-symmetric RTP where
+        // phones send from different ports than they receive on (common with NAT)
         let (sender, receiver) = {
             let a = participant_a.read().await;
             let b = participant_b.read().await;
 
-            if a.remote_addr == Some(source_addr) {
-                // Packet from A, forward to B
+            // Check if source IP matches participant A's remote IP
+            let a_ip_match = a.remote_addr.map(|addr| addr.ip() == source_addr.ip()).unwrap_or(false);
+            // Check if source IP matches participant B's remote IP
+            let b_ip_match = b.remote_addr.map(|addr| addr.ip() == source_addr.ip()).unwrap_or(false);
+
+            if a_ip_match && !b_ip_match {
+                // Packet from A (IP matches A only), forward to B
                 (Side::A, Side::B)
-            } else if b.remote_addr == Some(source_addr) {
-                // Packet from B, forward to A
+            } else if b_ip_match && !a_ip_match {
+                // Packet from B (IP matches B only), forward to A
                 (Side::B, Side::A)
+            } else if a_ip_match && b_ip_match {
+                // Both IPs match (same IP for both legs, e.g., hairpin call)
+                // Fall back to exact port match, then first-packet learning
+                if a.remote_addr == Some(source_addr) {
+                    (Side::A, Side::B)
+                } else if b.remote_addr == Some(source_addr) {
+                    (Side::B, Side::A)
+                } else {
+                    // Same IP, different port - use port proximity heuristic
+                    let a_port = a.remote_addr.map(|addr| addr.port()).unwrap_or(0);
+                    let b_port = b.remote_addr.map(|addr| addr.port()).unwrap_or(0);
+                    let src_port = source_addr.port();
+                    let a_diff = (a_port as i32 - src_port as i32).abs();
+                    let b_diff = (b_port as i32 - src_port as i32).abs();
+                    if a_diff <= b_diff {
+                        (Side::A, Side::B)
+                    } else {
+                        (Side::B, Side::A)
+                    }
+                }
             } else {
                 // Unknown sender - learn the endpoint
                 tracing::debug!(
@@ -606,9 +633,36 @@ impl ForwardingEngine {
             // Start timing transcoding operation
             let transcode_start = std::time::Instant::now();
 
+            let input_len = packet.payload.len();
             match tc.transcode_rtp_payload(&packet.payload) {
                 Ok(transcoded_payloads) => {
-                    if let Some(transcoded_payload) = transcoded_payloads.first() {
+                    if !transcoded_payloads.is_empty() {
+                        // Concatenate all transcoded frames into single payload.
+                        // This handles cases where resampling produces multiple output frames
+                        // (e.g., PCMU at 8kHz → G.722 at 16kHz, where 20ms PCMU becomes
+                        // 320 samples that get split into two 160-sample G.722 frames).
+                        let num_frames = transcoded_payloads.len();
+                        let frame_sizes: Vec<usize> = transcoded_payloads.iter().map(|f| f.len()).collect();
+                        let combined_payload: Vec<u8> = if num_frames == 1 {
+                            transcoded_payloads.into_iter().next().unwrap()
+                        } else {
+                            let total_len: usize = frame_sizes.iter().sum();
+                            let mut combined = Vec::with_capacity(total_len);
+                            for frame in &transcoded_payloads {
+                                combined.extend_from_slice(frame);
+                            }
+                            tracing::info!(
+                                "Transcoding produced {} frames: {:?} (input {} bytes, output {} bytes)",
+                                num_frames,
+                                frame_sizes,
+                                input_len,
+                                total_len
+                            );
+                            combined
+                        };
+
+                        let output_len = combined_payload.len();
+
                         // Record successful transcoding duration
                         let transcode_duration = transcode_start.elapsed();
                         histogram!("forge_transcoding_duration_seconds", transcode_duration.as_secs_f64(),
@@ -616,7 +670,7 @@ impl ForwardingEngine {
                             "to_codec" => codec_name(dst_codec));
 
                         // Update packet with transcoded payload
-                        packet.payload = transcoded_payload.clone().into();
+                        packet.payload = combined_payload.into();
 
                         // Update payload type in header (preserve marker bit)
                         packet.header.marker_payload_type =
@@ -628,7 +682,7 @@ impl ForwardingEngine {
                             "to_codec" => codec_name(dst_codec));
                         counter!(
                             "forge_transcoding_bytes_total",
-                            transcoded_payload.len() as u64,
+                            output_len as u64,
                             "from_codec" => codec_name(src_codec),
                             "to_codec" => codec_name(dst_codec)
                         );
@@ -638,7 +692,7 @@ impl ForwardingEngine {
                             codec_name(src_codec),
                             codec_name(dst_codec),
                             packet.payload.len(),
-                            transcoded_payload.len(),
+                            output_len,
                             transcode_duration
                         );
                     }

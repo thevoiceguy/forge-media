@@ -142,11 +142,23 @@ impl Transcoder {
         };
 
         // Step 2: Resample if needed
+        let pcm_len = pcm.len();
         let resampled = if let Some(ref mut resampler) = self.resampler {
             resampler.resample(&pcm)?
         } else {
             pcm
         };
+
+        // Log first/last few samples to detect discontinuities
+        if !resampled.is_empty() {
+            let first = resampled.first().copied().unwrap_or(0);
+            let last = resampled.last().copied().unwrap_or(0);
+            let max_abs = resampled.iter().map(|s| s.abs()).max().unwrap_or(0);
+            tracing::trace!(
+                "Transcode: {} bytes -> {} decoded -> {} resampled (first={}, last={}, max={})",
+                input.len(), pcm_len, resampled.len(), first, last, max_abs
+            );
+        }
 
         // Step 3: Encode to destination format (or convert to bytes if dest is PCM)
         let output = if let Some(ref mut codec) = self.dst_codec {

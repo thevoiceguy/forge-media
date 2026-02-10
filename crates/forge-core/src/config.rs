@@ -103,10 +103,6 @@ impl EngineConfig {
     pub fn validate(&self) -> Result<()> {
         self.port_range.validate("engine.port_range")?;
 
-        if self.tos > 0xFF {
-            return invalid("engine.tos must be between 0 and 255");
-        }
-
         if self.session_timeout_secs == 0 {
             return invalid("engine.session_timeout_secs must be greater than zero");
         }

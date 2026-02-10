@@ -111,7 +111,7 @@ pub struct AISession {
     /// Current state
     state: Arc<Mutex<AISessionState>>,
     /// Audio sample rate
-    sample_rate: u32,
+    _sample_rate: u32,
     /// Channel for sending audio to AI
     audio_tx: mpsc::UnboundedSender<Vec<i16>>,
     /// Channel for receiving audio responses from AI
@@ -179,7 +179,7 @@ impl AISession {
             call_id: call_id.clone(),
             connector: Arc::clone(&connector),
             state: Arc::clone(&state),
-            sample_rate: config.sample_rate,
+            _sample_rate: config.sample_rate,
             audio_tx,
             audio_response_rx: Arc::new(Mutex::new(audio_response_rx)),
             event_task: None,

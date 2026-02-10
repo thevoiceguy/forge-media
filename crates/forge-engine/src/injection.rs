@@ -222,7 +222,7 @@ impl PlaybackManager {
     pub async fn stop_playback(&self, id: PlaybackId) -> Result<()> {
         if let Some(state) = self.playback_state.get(&id) {
             let internal = state.value();
-            let mut guard = internal.write().await;
+            let guard = internal.write().await;
             guard.active.store(false, Ordering::Relaxed);
             debug!(playback_id = %id, "Stopped playback");
         }

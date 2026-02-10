@@ -1246,7 +1246,7 @@ impl MediaSession {
     }
 
     /// Get the recorder mixer used for call recordings
-    pub fn recording_mixer(&self) -> Arc<Mutex<RecordingMixer>> {
+    pub(crate) fn recording_mixer(&self) -> Arc<Mutex<RecordingMixer>> {
         Arc::clone(&self.recording_mixer)
     }
 

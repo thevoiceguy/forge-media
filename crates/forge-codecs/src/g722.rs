@@ -68,7 +68,7 @@ pub struct G722Encoder {
     /// Inner ezk-g722 encoder
     inner: EzkEncoder,
     /// Bit rate mode
-    mode: G722BitRate,
+    _mode: G722BitRate,
 }
 
 /// G.722 decoder state
@@ -76,7 +76,7 @@ pub struct G722Decoder {
     /// Inner ezk-g722 decoder
     inner: EzkDecoder,
     /// Bit rate mode
-    mode: G722BitRate,
+    _mode: G722BitRate,
 }
 
 impl G722Encoder {
@@ -85,7 +85,7 @@ impl G722Encoder {
         // Parameters: rate, eight_k (false = 16kHz input), packed (false = standard)
         Self {
             inner: EzkEncoder::new(mode.to_ezk_rate(), false, false),
-            mode,
+            _mode: mode,
         }
     }
 
@@ -131,7 +131,7 @@ impl G722Decoder {
         // Parameters: rate, packed (false = standard), eight_k (false = 16kHz output)
         Self {
             inner: EzkDecoder::new(mode.to_ezk_rate(), false, false),
-            mode,
+            _mode: mode,
         }
     }
 

@@ -430,8 +430,8 @@ impl ConferenceRoom {
                         "Auto-starting recording for room {} ({} participants reached threshold of {})",
                         self.id, participant_count, cfg.min_recording_participants
                     );
-                    // TODO: Start recording automatically
-                    // This will be implemented when we add the recording API
+                    // Auto-record is handled by the server layer (fcp-conference-server)
+                    // since start_recording() is async but add_participant() is sync
                 }
             }
         }

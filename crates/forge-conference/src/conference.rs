@@ -284,6 +284,69 @@ impl ConferenceRoom {
         Ok(())
     }
 
+    /// Admit a specific waiting participant into the mixer without requiring a host.
+    ///
+    /// This is an admin operation that bypasses the wait-for-moderator requirement
+    /// for the specified participant.
+    pub fn admit_waiting_participant(&self, participant_id: &str) -> Result<()> {
+        if !self.waiting_participants.contains_key(participant_id) {
+            return Err(ConferenceError::Internal(format!(
+                "Participant {} is not in the waiting list for room {}",
+                participant_id, self.id
+            )));
+        }
+
+        if let Err(e) = self.mixer.add_participant(participant_id, None) {
+            return Err(ConferenceError::Internal(format!(
+                "Failed to add waiting participant {} to mixer: {}",
+                participant_id, e
+            )));
+        }
+
+        self.waiting_participants.remove(participant_id);
+        info!(
+            "Admin-admitted participant {} into room {}",
+            participant_id, self.id
+        );
+        counter!("forge_conference_participants_joined_total", 1, "room_id" => self.id.clone());
+        gauge!("forge_conference_participants_active", self.mixer.participant_count() as f64, "room_id" => self.id.clone());
+
+        Ok(())
+    }
+
+    /// Admit all waiting participants into the mixer without requiring a host.
+    pub fn admit_all_waiting(&self) -> usize {
+        let waiting: Vec<String> = self
+            .waiting_participants
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        let mut admitted = 0;
+        for participant_id in waiting {
+            if let Err(e) = self.mixer.add_participant(&participant_id, None) {
+                warn!(
+                    "Failed to admit waiting participant {} to room {}: {}",
+                    participant_id, self.id, e
+                );
+            } else {
+                self.waiting_participants.remove(&participant_id);
+                admitted += 1;
+                counter!("forge_conference_participants_joined_total", 1, "room_id" => self.id.clone());
+            }
+        }
+
+        if admitted > 0 {
+            gauge!("forge_conference_participants_active", self.mixer.participant_count() as f64, "room_id" => self.id.clone());
+            info!(
+                "Admin-admitted {} waiting participants into room {}",
+                admitted, self.id
+            );
+        }
+
+        admitted
+    }
+
     /// Check if the minimum user requirement is met
     pub fn meets_min_users_requirement(&self) -> bool {
         let config = self.room_config.read();

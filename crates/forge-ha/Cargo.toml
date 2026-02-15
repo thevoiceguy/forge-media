@@ -18,7 +18,7 @@ chrono = { workspace = true }
 redis = { version = "0.24", features = ["tokio-comp", "connection-manager", "aio"] }
 async-trait = { workspace = true }
 hostname = "0.3"
-prometheus = { version = "0.13", optional = true }
+prometheus = { version = "0.14", optional = true }
 lazy_static = { version = "1.4", optional = true }
 
 [features]

@@ -6,6 +6,27 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
+/// Constant-time string comparison to prevent timing side-channel attacks on PIN values.
+/// Always compares all bytes regardless of mismatch position.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        // Still do a dummy comparison to avoid leaking length info via timing,
+        // though length difference itself is observable.
+        let mut _acc = 0u8;
+        for &byte in a_bytes {
+            _acc |= byte;
+        }
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Result of PIN authentication attempt
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinAuthResult {
@@ -125,13 +146,18 @@ impl PinAuthenticator {
             };
         }
 
-        // Check host PIN first (takes priority)
-        if let Some(host_pin) = &self.config.host_pin {
-            if pin == host_pin {
-                tracker.reset();
-                debug!("Participant {} authenticated as host", participant_id);
-                return PinAuthResult::HostAuthenticated;
-            }
+        // Check both PINs using constant-time comparison to prevent timing attacks.
+        // Always evaluate both to avoid leaking which PIN type is configured.
+        let host_match = self.config.host_pin.as_ref()
+            .map_or(false, |host_pin| constant_time_eq(pin, host_pin));
+        let guest_match = self.config.guest_pin.as_ref()
+            .map_or(false, |guest_pin| constant_time_eq(pin, guest_pin));
+
+        // Host PIN takes priority
+        if host_match {
+            tracker.reset();
+            debug!("Participant {} authenticated as host", participant_id);
+            return PinAuthResult::HostAuthenticated;
         }
 
         // If guest PIN not required, allow join even if host PIN was wrong
@@ -139,13 +165,10 @@ impl PinAuthenticator {
             return PinAuthResult::NoPinRequired;
         }
 
-        // Check guest PIN
-        if let Some(guest_pin) = &self.config.guest_pin {
-            if pin == guest_pin {
-                tracker.reset();
-                debug!("Participant {} authenticated as guest", participant_id);
-                return PinAuthResult::GuestAuthenticated;
-            }
+        if guest_match {
+            tracker.reset();
+            debug!("Participant {} authenticated as guest", participant_id);
+            return PinAuthResult::GuestAuthenticated;
         }
 
         // PIN incorrect

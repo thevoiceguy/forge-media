@@ -1149,7 +1149,7 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e9290c43fb0b524a7191b3bc326bd4252bb1e080e27f4667641ad91bc845471"
 dependencies = [
- "bitflags 2.10.0",
+ "bitflags 2.11.0",
  "byte-slice-cast",
  "ezk",
 ]

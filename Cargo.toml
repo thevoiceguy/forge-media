@@ -57,7 +57,7 @@ toml = "0.8"
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Logging and Observability
 tracing = "0.1"

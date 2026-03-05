@@ -188,7 +188,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                 };
 
                                 if let Ok(json) = serde_json::to_string(&response) {
-                                    if let Err(e) = socket.send(Message::Text(json)).await {
+                                    if let Err(e) = socket.send(Message::Text(json.into())).await {
                                         error!("Failed to send response to client {}: {}", client_id, e);
                                         break;
                                     }
@@ -200,7 +200,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                                     message: format!("Invalid subscription request: {}", e),
                                 };
                                 if let Ok(json) = serde_json::to_string(&error_response) {
-                                    let _ = socket.send(Message::Text(json)).await;
+                                    let _ = socket.send(Message::Text(json.into())).await;
                                 }
                             }
                         }
@@ -241,7 +241,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
                     let response = SubscriptionResponse::Event { event };
                     if let Ok(json) = serde_json::to_string(&response) {
-                        if let Err(e) = socket.send(Message::Text(json)).await {
+                        if let Err(e) = socket.send(Message::Text(json.into())).await {
                             error!("Failed to send event to client {}: {}", client_id, e);
                             break;
                         }

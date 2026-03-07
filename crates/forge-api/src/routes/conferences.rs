@@ -188,54 +188,54 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/conferences", get(list_rooms).post(create_room))
         .route(
-            "/v1/conferences/:room_id",
+            "/v1/conferences/{room_id}",
             get(get_room).delete(delete_room),
         )
-        .route("/v1/conferences/:room_id/configure", post(configure_room))
-        .route("/v1/conferences/:room_id/config", get(get_room_config))
+        .route("/v1/conferences/{room_id}/configure", post(configure_room))
+        .route("/v1/conferences/{room_id}/config", get(get_room_config))
         .route(
-            "/v1/conferences/:room_id/participants",
+            "/v1/conferences/{room_id}/participants",
             post(add_participant).get(list_participants_with_status),
         )
         .route(
-            "/v1/conferences/:room_id/participants/metadata",
+            "/v1/conferences/{room_id}/participants/metadata",
             get(get_all_participants_metadata),
         )
         .route(
-            "/v1/conferences/:room_id/participants/:participant_id",
+            "/v1/conferences/{room_id}/participants/{participant_id}",
             delete(remove_participant),
         )
         .route(
-            "/v1/conferences/:room_id/participants/:participant_id/metadata",
+            "/v1/conferences/{room_id}/participants/{participant_id}/metadata",
             get(get_participant_metadata),
         )
         .route(
-            "/v1/conferences/:room_id/participants/:participant_id/state",
+            "/v1/conferences/{room_id}/participants/{participant_id}/state",
             axum::routing::put(update_participant_state),
         )
         .route(
-            "/v1/conferences/:room_id/participants/:participant_id/promote",
+            "/v1/conferences/{room_id}/participants/{participant_id}/promote",
             post(promote_participant),
         )
         .route(
-            "/v1/conferences/:room_id/waiting",
+            "/v1/conferences/{room_id}/waiting",
             get(list_waiting_participants),
         )
         .route(
-            "/v1/conferences/:room_id/recording",
+            "/v1/conferences/{room_id}/recording",
             post(start_recording).delete(stop_recording),
         )
         .route(
-            "/v1/conferences/:room_id/participant-recording",
+            "/v1/conferences/{room_id}/participant-recording",
             post(start_participant_rec).delete(stop_participant_rec),
         )
         .route(
-            "/v1/conferences/:room_id/announcement",
+            "/v1/conferences/{room_id}/announcement",
             post(play_announcement),
         )
         .route("/v1/recordings", get(list_recordings))
         .route(
-            "/v1/recordings/:id",
+            "/v1/recordings/{id}",
             get(get_recording).delete(delete_recording),
         )
 }
@@ -309,7 +309,7 @@ async fn create_room(
 
 /// Get conference room information
 ///
-/// GET /v1/conferences/:room_id
+/// GET /v1/conferences/{room_id}
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn get_room(
     State(state): State<Arc<AppState>>,
@@ -334,7 +334,7 @@ async fn get_room(
 
 /// Delete a conference room
 ///
-/// DELETE /v1/conferences/:room_id
+/// DELETE /v1/conferences/{room_id}
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn delete_room(
     State(state): State<Arc<AppState>>,
@@ -352,7 +352,7 @@ async fn delete_room(
 
 /// Add a participant to a conference room
 ///
-/// POST /v1/conferences/:room_id/participants
+/// POST /v1/conferences/{room_id}/participants
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = ?request.participant_id))]
 async fn add_participant(
     State(state): State<Arc<AppState>>,
@@ -388,7 +388,7 @@ async fn add_participant(
 
 /// Play an announcement prompt into a conference room
 ///
-/// POST /v1/conferences/:room_id/announcement
+/// POST /v1/conferences/{room_id}/announcement
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, prompt = ?request.prompt))]
 async fn play_announcement(
     State(state): State<Arc<AppState>>,
@@ -422,7 +422,7 @@ async fn play_announcement(
 
 /// Remove a participant from a conference room
 ///
-/// DELETE /v1/conferences/:room_id/participants/:participant_id
+/// DELETE /v1/conferences/{room_id}/participants/{participant_id}
 #[tracing::instrument(skip(state), fields(room_id = %room_id, participant_id = %participant_id))]
 async fn remove_participant(
     State(state): State<Arc<AppState>>,
@@ -451,7 +451,7 @@ async fn remove_participant(
 
 /// Start recording a conference room
 ///
-/// POST /v1/conferences/:room_id/recording
+/// POST /v1/conferences/{room_id}/recording
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, output_path = ?request.output_path, codec = ?request.codec))]
 async fn start_recording(
     State(state): State<Arc<AppState>>,
@@ -528,7 +528,7 @@ async fn start_recording(
 
 /// Stop recording a conference room
 ///
-/// DELETE /v1/conferences/:room_id/recording
+/// DELETE /v1/conferences/{room_id}/recording
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn stop_recording(
     State(state): State<Arc<AppState>>,
@@ -570,7 +570,7 @@ async fn stop_recording(
 
 /// Start recording for a specific participant
 ///
-/// POST /v1/conferences/:room_id/participant-recording
+/// POST /v1/conferences/{room_id}/participant-recording
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = %request.participant_id))]
 async fn start_participant_rec(
     State(state): State<Arc<AppState>>,
@@ -640,7 +640,7 @@ async fn start_participant_rec(
 
 /// Stop recording for a specific participant
 ///
-/// DELETE /v1/conferences/:room_id/participant-recording
+/// DELETE /v1/conferences/{room_id}/participant-recording
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id))]
 async fn stop_participant_rec(
     State(state): State<Arc<AppState>>,
@@ -729,7 +729,7 @@ async fn list_recordings(
 
 /// Get recording information
 ///
-/// GET /v1/recordings/:id
+/// GET /v1/recordings/{id}
 #[tracing::instrument(skip(state), fields(recording_id = %recording_id))]
 async fn get_recording(
     State(state): State<Arc<AppState>>,
@@ -749,7 +749,7 @@ async fn get_recording(
 
 /// Delete a recording
 ///
-/// DELETE /v1/recordings/:id
+/// DELETE /v1/recordings/{id}
 #[tracing::instrument(skip(state), fields(recording_id = %recording_id))]
 async fn delete_recording(
     State(state): State<Arc<AppState>>,
@@ -858,7 +858,7 @@ fn resolve_prompt_path(base_dir: &FsPath, requested: &str) -> Result<PathBuf, St
 
 /// Get metadata for a specific participant
 ///
-/// GET /v1/conferences/:room_id/participants/:participant_id/metadata
+/// GET /v1/conferences/{room_id}/participants/{participant_id}/metadata
 #[tracing::instrument(skip(state), fields(room_id = %room_id, participant_id = %participant_id))]
 async fn get_participant_metadata(
     State(state): State<Arc<AppState>>,
@@ -916,7 +916,7 @@ async fn get_participant_metadata(
 
 /// Get metadata for all participants in a room
 ///
-/// GET /v1/conferences/:room_id/participants/metadata
+/// GET /v1/conferences/{room_id}/participants/metadata
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn get_all_participants_metadata(
     State(state): State<Arc<AppState>>,
@@ -972,7 +972,7 @@ async fn get_all_participants_metadata(
 
 /// Update participant state
 ///
-/// PUT /v1/conferences/:room_id/participants/:participant_id/state
+/// PUT /v1/conferences/{room_id}/participants/{participant_id}/state
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = %participant_id))]
 async fn update_participant_state(
     State(state): State<Arc<AppState>>,
@@ -1041,7 +1041,7 @@ async fn update_participant_state(
 
 /// Configure a room with room-specific settings
 ///
-/// POST /v1/conferences/:room_id/configure
+/// POST /v1/conferences/{room_id}/configure
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id))]
 async fn configure_room(
     State(state): State<Arc<AppState>>,
@@ -1097,7 +1097,7 @@ async fn configure_room(
 
 /// Get room configuration
 ///
-/// GET /v1/conferences/:room_id/config
+/// GET /v1/conferences/{room_id}/config
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn get_room_config(
     State(state): State<Arc<AppState>>,
@@ -1135,7 +1135,7 @@ async fn get_room_config(
 
 /// List participants with host status
 ///
-/// GET /v1/conferences/:room_id/participants
+/// GET /v1/conferences/{room_id}/participants
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn list_participants_with_status(
     State(state): State<Arc<AppState>>,
@@ -1174,7 +1174,7 @@ async fn list_participants_with_status(
 
 /// List waiting participants
 ///
-/// GET /v1/conferences/:room_id/waiting
+/// GET /v1/conferences/{room_id}/waiting
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn list_waiting_participants(
     State(state): State<Arc<AppState>>,
@@ -1212,7 +1212,7 @@ async fn list_waiting_participants(
 
 /// Promote a participant to host
 ///
-/// POST /v1/conferences/:room_id/participants/:participant_id/promote
+/// POST /v1/conferences/{room_id}/participants/{participant_id}/promote
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = %participant_id))]
 async fn promote_participant(
     State(state): State<Arc<AppState>>,

@@ -202,7 +202,7 @@ async fn create_connection(
 
 /// Get WebRTC connection information
 ///
-/// GET /v1/webrtc/connections/:id
+/// GET /v1/webrtc/connections/{id}
 #[tracing::instrument(skip(state), fields(connection_id = %connection_id))]
 async fn get_connection(
     State(state): State<Arc<AppState>>,
@@ -228,7 +228,7 @@ async fn get_connection(
 
 /// Delete a WebRTC connection
 ///
-/// DELETE /v1/webrtc/connections/:id
+/// DELETE /v1/webrtc/connections/{id}
 #[tracing::instrument(skip(state), fields(connection_id = %connection_id))]
 async fn delete_connection(
     State(state): State<Arc<AppState>>,
@@ -255,7 +255,7 @@ async fn delete_connection(
 
 /// Set remote SDP answer
 ///
-/// POST /v1/webrtc/connections/:id/answer
+/// POST /v1/webrtc/connections/{id}/answer
 #[tracing::instrument(skip(state, request), fields(connection_id = %connection_id))]
 async fn set_answer(
     State(state): State<Arc<AppState>>,
@@ -301,7 +301,7 @@ async fn set_answer(
 
 /// Add ICE candidate
 ///
-/// POST /v1/webrtc/connections/:id/ice-candidate
+/// POST /v1/webrtc/connections/{id}/ice-candidate
 #[tracing::instrument(skip(state, request), fields(connection_id = %connection_id))]
 async fn add_ice_candidate(
     State(state): State<Arc<AppState>>,
@@ -339,7 +339,7 @@ async fn add_ice_candidate(
 
 /// Get connection status
 ///
-/// GET /v1/webrtc/connections/:id/status
+/// GET /v1/webrtc/connections/{id}/status
 #[tracing::instrument(skip(state), fields(connection_id = %connection_id))]
 async fn get_status(
     State(state): State<Arc<AppState>>,
@@ -395,14 +395,14 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/webrtc/connections", post(create_connection))
         .route("/v1/webrtc/connections", get(list_connections))
-        .route("/v1/webrtc/connections/:id", get(get_connection))
-        .route("/v1/webrtc/connections/:id", delete(delete_connection))
-        .route("/v1/webrtc/connections/:id/answer", post(set_answer))
+        .route("/v1/webrtc/connections/{id}", get(get_connection))
+        .route("/v1/webrtc/connections/{id}", delete(delete_connection))
+        .route("/v1/webrtc/connections/{id}/answer", post(set_answer))
         .route(
-            "/v1/webrtc/connections/:id/ice-candidate",
+            "/v1/webrtc/connections/{id}/ice-candidate",
             post(add_ice_candidate),
         )
-        .route("/v1/webrtc/connections/:id/status", get(get_status))
+        .route("/v1/webrtc/connections/{id}/status", get(get_status))
 }
 
 #[cfg(test)]

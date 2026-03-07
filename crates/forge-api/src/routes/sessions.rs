@@ -410,7 +410,7 @@ async fn create_session(
 
 /// Get session information
 ///
-/// GET /v1/sessions/:id
+/// GET /v1/sessions/{id}
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn get_session(
     State(state): State<Arc<AppState>>,
@@ -460,7 +460,7 @@ async fn get_session(
 
 /// Delete a session
 ///
-/// DELETE /v1/sessions/:id
+/// DELETE /v1/sessions/{id}
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn delete_session(
     State(state): State<Arc<AppState>>,
@@ -521,7 +521,7 @@ async fn list_sessions(
 
 /// Start/activate a session (begin forwarding)
 ///
-/// POST /v1/sessions/:id/start
+/// POST /v1/sessions/{id}/start
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn start_session(
     State(state): State<Arc<AppState>>,
@@ -569,9 +569,9 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/sessions", post(create_session))
         .route("/v1/sessions", get(list_sessions))
-        .route("/v1/sessions/:id", get(get_session))
-        .route("/v1/sessions/:id", delete(delete_session))
-        .route("/v1/sessions/:id/start", post(start_session))
+        .route("/v1/sessions/{id}", get(get_session))
+        .route("/v1/sessions/{id}", delete(delete_session))
+        .route("/v1/sessions/{id}/start", post(start_session))
 }
 
 #[cfg(test)]

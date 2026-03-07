@@ -136,7 +136,7 @@ fn is_private_host(host: &Host<&str>) -> bool {
 
 /// Attach AI to a media session
 ///
-/// POST /v1/sessions/:id/ai
+/// POST /v1/sessions/{id}/ai
 #[tracing::instrument(skip(state, request), fields(call_id = %call_id))]
 async fn attach_ai(
     State(state): State<Arc<AppState>>,
@@ -217,7 +217,7 @@ async fn attach_ai(
 
 /// Get AI session status
 ///
-/// GET /v1/sessions/:id/ai
+/// GET /v1/sessions/{id}/ai
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn get_ai_status(
     State(state): State<Arc<AppState>>,
@@ -262,7 +262,7 @@ async fn get_ai_status(
 
 /// Detach AI from a media session
 ///
-/// DELETE /v1/sessions/:id/ai
+/// DELETE /v1/sessions/{id}/ai
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn detach_ai(
     State(state): State<Arc<AppState>>,
@@ -321,7 +321,7 @@ async fn list_ai_sessions(
 
 /// Send function call response to AI
 ///
-/// POST /v1/sessions/:id/ai/function-response
+/// POST /v1/sessions/{id}/ai/function-response
 #[tracing::instrument(skip(state, request), fields(call_id = %call_id))]
 async fn send_function_response(
     State(state): State<Arc<AppState>>,
@@ -352,12 +352,12 @@ async fn send_function_response(
 /// Create AI routes
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/sessions/:id/ai", post(attach_ai))
-        .route("/v1/sessions/:id/ai", get(get_ai_status))
-        .route("/v1/sessions/:id/ai", delete(detach_ai))
+        .route("/v1/sessions/{id}/ai", post(attach_ai))
+        .route("/v1/sessions/{id}/ai", get(get_ai_status))
+        .route("/v1/sessions/{id}/ai", delete(detach_ai))
         .route("/v1/sessions/ai", get(list_ai_sessions))
         .route(
-            "/v1/sessions/:id/ai/function-response",
+            "/v1/sessions/{id}/ai/function-response",
             post(send_function_response),
         )
 }

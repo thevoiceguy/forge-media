@@ -23,9 +23,9 @@ use validator::Validate;
 /// Create conference AI routes
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/conferences/:room_id/ai", post(attach_ai))
-        .route("/v1/conferences/:room_id/ai", get(get_ai_status))
-        .route("/v1/conferences/:room_id/ai", delete(detach_ai))
+        .route("/v1/conferences/{room_id}/ai", post(attach_ai))
+        .route("/v1/conferences/{room_id}/ai", get(get_ai_status))
+        .route("/v1/conferences/{room_id}/ai", delete(detach_ai))
         .route("/v1/conferences/ai", get(list_conference_ai))
 }
 
@@ -83,7 +83,7 @@ pub struct ConferenceAIListResponse {
 
 /// Attach AI to a conference room
 ///
-/// POST /v1/conferences/:room_id/ai
+/// POST /v1/conferences/{room_id}/ai
 async fn attach_ai(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
@@ -203,7 +203,7 @@ async fn attach_ai(
 
 /// Get AI status for a conference room
 ///
-/// GET /v1/conferences/:room_id/ai
+/// GET /v1/conferences/{room_id}/ai
 async fn get_ai_status(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
@@ -311,7 +311,7 @@ async fn list_conference_ai(
 
 /// Detach AI from a conference room
 ///
-/// DELETE /v1/conferences/:room_id/ai
+/// DELETE /v1/conferences/{room_id}/ai
 async fn detach_ai(
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,

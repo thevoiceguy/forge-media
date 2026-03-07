@@ -149,7 +149,7 @@ impl SessionDescriptionExt for SessionDescription {
         }
 
         // Get first format (primary negotiated codec)
-        let pt: u8 = audio.formats.first()?.parse().ok()?;
+        let pt: u8 = *audio.formats.first()?;
 
         // Get codec name from rtpmap
         let rtpmap = audio.rtpmaps.get(&pt)?;
@@ -217,8 +217,7 @@ pub mod helpers {
         media
             .formats
             .iter()
-            .filter_map(|fmt| {
-                let pt: u8 = fmt.parse().ok()?;
+            .filter_map(|&pt| {
                 media
                     .rtpmaps
                     .get(&pt)
@@ -229,7 +228,7 @@ pub mod helpers {
 
     /// Extract the primary (first) codec from a media description
     pub fn extract_primary_codec(media: &MediaDescription) -> Option<CodecInfo> {
-        let pt: u8 = media.formats.first()?.parse().ok()?;
+        let pt: u8 = *media.formats.first()?;
         let rtpmap = media.rtpmaps.get(&pt)?;
         Some(CodecInfo::from_rtpmap(pt, rtpmap))
     }

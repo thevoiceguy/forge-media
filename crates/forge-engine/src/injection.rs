@@ -297,6 +297,14 @@ impl PlaybackManager {
                     };
 
                     if is_finished {
+                        // Send silence frames to flush the receiver's jitter buffer.
+                        // Without these, the phone applies PLC (Packet Loss Concealment)
+                        // which fades out the last audio instead of stopping cleanly.
+                        let silence_frame = vec![0i16; 160]; // 20ms silence
+                        for _ in 0..3 {
+                            let _ = self.send_audio_frame(&internal, &silence_frame).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                        }
                         info!(playback_id = %id, "Playback completed");
                         break PlaybackStatus::Completed;
                     } else {

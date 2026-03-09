@@ -1930,13 +1930,13 @@ dependencies = [
 
 [[package]]
 name = "hostname"
-version = "0.3.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c731c3e10504cc8ed35cfe2f1db4c9274c3d35fa486e3b31df46f068ef3e867"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
 dependencies = [
+ "cfg-if",
  "libc",
- "match_cfg",
- "winapi",
+ "windows-link",
 ]
 
 [[package]]
@@ -2420,12 +2420,6 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
-
-[[package]]
-name = "match_cfg"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffbee8634e0d45d258acb448e7eaab3fce7a0a467395d4d9f228e3c1f01fb2e4"
 
 [[package]]
 name = "matchers"
@@ -3692,7 +3686,7 @@ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "sip-auth"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3712,20 +3706,18 @@ dependencies = [
 
 [[package]]
 name = "sip-core"
-version = "0.6.26"
+version = "0.1.0"
 dependencies = [
  "bytes",
- "httpdate",
  "percent-encoding",
  "proptest",
  "serde",
  "smol_str",
- "subtle",
 ]
 
 [[package]]
 name = "sip-dialog"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3741,7 +3733,7 @@ dependencies = [
 
 [[package]]
 name = "sip-observe"
-version = "0.2.1"
+version = "0.1.0"
 dependencies = [
  "once_cell",
  "tracing",
@@ -3749,7 +3741,7 @@ dependencies = [
 
 [[package]]
 name = "sip-parse"
-version = "0.3.1"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "httpdate",
@@ -3764,7 +3756,7 @@ dependencies = [
 
 [[package]]
 name = "sip-ratelimit"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "dashmap",
  "parking_lot",
@@ -3774,7 +3766,7 @@ dependencies = [
 
 [[package]]
 name = "sip-sdp"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "nom",
  "smol_str",
@@ -3782,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transaction"
-version = "0.4.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3801,7 +3793,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transport"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3820,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "sip-uas"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",

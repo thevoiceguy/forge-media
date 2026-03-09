@@ -137,9 +137,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.101"
+version = "1.0.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
+checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "arbitrary"
@@ -599,9 +599,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrono"
-version = "0.4.43"
+version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118"
+checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
  "js-sys",
@@ -650,9 +650,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.58"
+version = "4.5.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "63be97961acde393029492ce0be7a1af7e323e6bae9511ebfac33751be5e6806"
+checksum = "2797f34da339ce31042b27d23607e051786132987f595b02ba4f6a6dffb7030a"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -660,9 +660,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.58"
+version = "4.5.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f13174bda5dfd69d7e947827e5af4b0f2f94a4a3ee92912fba07a66150f21e2"
+checksum = "24a241312cea5059b13574bb9b3861cabf758b879c15190b37b6d6fd63ab6876"
 dependencies = [
  "anstream",
  "anstyle",
@@ -2380,9 +2380,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.182"
+version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
+checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
 name = "libfuzzer-sys"
@@ -3692,7 +3692,7 @@ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "sip-auth"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3712,20 +3712,18 @@ dependencies = [
 
 [[package]]
 name = "sip-core"
-version = "0.6.26"
+version = "0.1.0"
 dependencies = [
  "bytes",
- "httpdate",
  "percent-encoding",
  "proptest",
  "serde",
  "smol_str",
- "subtle",
 ]
 
 [[package]]
 name = "sip-dialog"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3741,7 +3739,7 @@ dependencies = [
 
 [[package]]
 name = "sip-observe"
-version = "0.2.1"
+version = "0.1.0"
 dependencies = [
  "once_cell",
  "tracing",
@@ -3749,7 +3747,7 @@ dependencies = [
 
 [[package]]
 name = "sip-parse"
-version = "0.3.1"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "httpdate",
@@ -3764,7 +3762,7 @@ dependencies = [
 
 [[package]]
 name = "sip-ratelimit"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "dashmap",
  "parking_lot",
@@ -3774,7 +3772,7 @@ dependencies = [
 
 [[package]]
 name = "sip-sdp"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "nom",
  "smol_str",
@@ -3782,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transaction"
-version = "0.4.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3801,7 +3799,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transport"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3820,7 +3818,7 @@ dependencies = [
 
 [[package]]
 name = "sip-uas"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3867,9 +3865,9 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smol_str"
-version = "0.3.5"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f7a918bd2a9951d18ee6e48f076843e8e73a9a5d22cf05bcd4b7a81bdd04e17"
+checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
 dependencies = [
  "borsh",
  "serde_core",

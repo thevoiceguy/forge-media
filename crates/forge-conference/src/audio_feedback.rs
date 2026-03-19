@@ -206,6 +206,7 @@ impl AudioFeedbackPlayer {
 }
 
 /// Pre-loaded conference sounds for efficient playback
+#[derive(Clone)]
 pub struct ConferenceSounds {
     pub join_sound: Option<Arc<Vec<i16>>>,
     pub exit_sound: Option<Arc<Vec<i16>>>,

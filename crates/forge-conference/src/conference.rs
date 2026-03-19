@@ -263,6 +263,11 @@ impl ConferenceRoom {
         self.room_config.read().clone()
     }
 
+    /// Get the pre-loaded conference sounds (if configured)
+    pub fn get_sounds(&self) -> Option<crate::audio_feedback::ConferenceSounds> {
+        self.conference_sounds.read().clone()
+    }
+
     /// Promote a participant to host
     pub fn promote_to_host(&self, participant_id: &str) -> Result<()> {
         // Check if participant exists in the room

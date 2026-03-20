@@ -128,8 +128,14 @@ pub struct GoertzelDetector {
 }
 
 impl GoertzelDetector {
-    /// Default energy threshold
-    pub const DEFAULT_ENERGY_THRESHOLD: f32 = 1000000.0;
+    /// Default energy threshold for normalized [-1.0, 1.0] samples.
+    ///
+    /// Goertzel magnitude² for a full-scale DTMF tone (160 samples at 8kHz)
+    /// is ~3000–6400 per component. After G.722 codec + resample the
+    /// effective amplitude can drop to 15-30% of full scale, producing
+    /// magnitude² around 30-100. A threshold of 20.0 reliably detects
+    /// post-codec DTMF while staying well above thermal/quantization noise.
+    pub const DEFAULT_ENERGY_THRESHOLD: f32 = 20.0;
 
     /// Default twist threshold (4dB)
     pub const DEFAULT_TWIST_THRESHOLD: f32 = 1.58;
@@ -604,5 +610,92 @@ mod tests {
             .unwrap();
         assert_eq!(event.event_type, DtmfEventType::Continue);
         assert_eq!(event.digit, DtmfDigit::Five);
+    }
+
+    /// Generate i16 PCM samples containing a DTMF tone pair at the given
+    /// amplitude (0.0–1.0) for the specified duration in frames.
+    fn generate_dtmf_tone(
+        low_freq: u32,
+        high_freq: u32,
+        sample_rate: u32,
+        frame_size: usize,
+        num_frames: usize,
+        amplitude: f32,
+    ) -> Vec<i16> {
+        let total_samples = frame_size * num_frames;
+        (0..total_samples)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                let low = (2.0 * PI * low_freq as f32 * t).sin();
+                let high = (2.0 * PI * high_freq as f32 * t).sin();
+                ((low + high) * 0.5 * amplitude * 32767.0) as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_process_samples_detects_dtmf_digit_5() {
+        // Digit 5 = 770 Hz + 1336 Hz
+        let mut detector = GoertzelDetector::new(8000, 160);
+
+        // Generate 200ms of tone (10 frames) at half amplitude
+        let samples = generate_dtmf_tone(770, 1336, 8000, 160, 10, 0.5);
+        let events = detector.process_samples(&samples).unwrap();
+
+        // Should have at least a Start event for digit 5
+        let start = events
+            .iter()
+            .find(|e| e.event_type == DtmfEventType::Start);
+        assert!(
+            start.is_some(),
+            "Expected Start event for digit 5, got: {:?}",
+            events
+        );
+        assert_eq!(start.unwrap().digit, DtmfDigit::Five);
+
+        // Feed silence to trigger End event
+        let silence = vec![0i16; 160 * 3];
+        let end_events = detector.process_samples(&silence).unwrap();
+        let end = end_events
+            .iter()
+            .find(|e| e.event_type == DtmfEventType::End);
+        assert!(
+            end.is_some(),
+            "Expected End event after silence, got: {:?}",
+            end_events
+        );
+        assert_eq!(end.unwrap().digit, DtmfDigit::Five);
+    }
+
+    #[test]
+    fn test_process_samples_detects_low_amplitude_dtmf() {
+        // Simulate post-codec DTMF at reduced amplitude (typical of G.722 decode+resample)
+        let mut detector = GoertzelDetector::new(8000, 160);
+
+        // 15% amplitude — realistic for DTMF after wideband codec round-trip
+        let samples = generate_dtmf_tone(941, 1477, 8000, 160, 10, 0.15);
+        let events = detector.process_samples(&samples).unwrap();
+
+        let start = events
+            .iter()
+            .find(|e| e.event_type == DtmfEventType::Start);
+        assert!(
+            start.is_some(),
+            "Expected Start event for # at 15% amplitude, got: {:?}",
+            events
+        );
+        assert_eq!(start.unwrap().digit, DtmfDigit::Hash);
+    }
+
+    #[test]
+    fn test_process_samples_rejects_silence() {
+        let mut detector = GoertzelDetector::new(8000, 160);
+        let silence = vec![0i16; 160 * 10];
+        let events = detector.process_samples(&silence).unwrap();
+        assert!(
+            events.is_empty(),
+            "Silence should produce no events, got: {:?}",
+            events
+        );
     }
 }

@@ -16,6 +16,7 @@ use forge_recorder::{AudioRecorder, PlaybackSource};
 use metrics::{counter, gauge, histogram};
 use parking_lot::RwLock;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -50,6 +51,8 @@ pub struct ConferenceRoom {
     is_locked: Arc<RwLock<bool>>,
     /// Set of host participant IDs
     hosts: Arc<DashMap<String, ()>>,
+    /// Wait-for-moderator flag (set independently of room_config for robustness)
+    wait_for_moderator: AtomicBool,
     /// Set of participants waiting for moderator (participant_id)
     waiting_participants: Arc<DashMap<String, ()>>,
     /// Audio feedback player for playing sounds
@@ -92,6 +95,7 @@ impl ConferenceRoom {
             call_id_map: Arc::new(DashMap::new()),
             is_locked: Arc::new(RwLock::new(false)),
             hosts: Arc::new(DashMap::new()),
+            wait_for_moderator: AtomicBool::new(false),
             waiting_participants: Arc::new(DashMap::new()),
             audio_feedback_player: Arc::new(RwLock::new(None)),
             conference_sounds: Arc::new(RwLock::new(None)),
@@ -121,6 +125,14 @@ impl ConferenceRoom {
         // Store configuration
         *self.pin_auth.write() = Some(pin_auth);
         *self.room_config.write() = Some(effective_config.clone());
+
+        // Set wait-for-moderator flag (independent of room_config for robustness)
+        self.wait_for_moderator
+            .store(effective_config.wait_for_moderator, Ordering::Release);
+        info!(
+            "Room {} wait_for_moderator = {}",
+            self.id, effective_config.wait_for_moderator
+        );
 
         // Set initial lock state
         *self.is_locked.write() = effective_config.security.default_locked;
@@ -243,6 +255,11 @@ impl ConferenceRoom {
     /// Get the number of hosts in the room
     pub fn host_count(&self) -> usize {
         self.hosts.len()
+    }
+
+    /// Check if wait-for-moderator is enabled
+    pub fn wait_for_moderator_enabled(&self) -> bool {
+        self.wait_for_moderator.load(Ordering::Acquire)
     }
 
     /// Get the number of participants waiting for moderator
@@ -400,7 +417,20 @@ impl ConferenceRoom {
             return Err(ConferenceError::ConferenceLocked);
         }
 
-        // Get effective configuration
+        // Check wait-for-moderator requirement FIRST using the atomic flag.
+        // This check is independent of the room_config RwLock to ensure it
+        // always fires even if configuration propagation has an issue.
+        let wfm = self.wait_for_moderator.load(Ordering::Acquire);
+        if wfm && !is_host && self.hosts.is_empty() {
+            info!(
+                "Participant {} waiting for moderator in room {} (is_host={}, hosts={})",
+                participant_id, self.id, is_host, self.hosts.len()
+            );
+            self.waiting_participants.insert(participant_id.clone(), ());
+            return Err(ConferenceError::WaitingForModerator);
+        }
+
+        // Get effective configuration for capacity checks
         let config = self.room_config.read();
         let config = config.as_ref();
 
@@ -418,10 +448,10 @@ impl ConferenceRoom {
                 }
             }
 
-            // Check wait-for-moderator requirement
+            // Secondary wait-for-moderator check from config (belt and suspenders)
             if cfg.wait_for_moderator && !is_host && self.hosts.is_empty() {
                 info!(
-                    "Participant {} waiting for moderator in room {}",
+                    "Participant {} waiting for moderator in room {} (config check)",
                     participant_id, self.id
                 );
                 self.waiting_participants.insert(participant_id.clone(), ());
@@ -555,31 +585,42 @@ impl ConferenceRoom {
 
     /// Move all active participants to waiting (when last host leaves)
     fn move_participants_to_waiting(&self) {
-        let config = self.room_config.read();
-        if let Some(cfg) = config.as_ref() {
-            if cfg.wait_for_moderator {
-                // Get list of participant IDs from mixer
-                let participants = self.mixer.participants();
-
-                for participant_id in participants {
-                    info!(
-                        "Moving participant {} to waiting (no moderator) in room {}",
-                        participant_id, self.id
-                    );
-
-                    // Remove from mixer
-                    if let Err(e) = self.mixer.remove_participant(&participant_id) {
-                        warn!(
-                            "Failed to remove participant {} from mixer: {}",
-                            participant_id, e
-                        );
-                        continue;
-                    }
-
-                    // Add to waiting
-                    self.waiting_participants.insert(participant_id, ());
+        // Check atomic flag first for robustness
+        if !self.wait_for_moderator.load(Ordering::Acquire) {
+            // Also check config as a fallback
+            let config = self.room_config.read();
+            if let Some(cfg) = config.as_ref() {
+                if !cfg.wait_for_moderator {
+                    return;
                 }
+            } else {
+                return;
             }
+        }
+
+        // Get list of participant IDs from mixer
+        let participants = self.mixer.participants();
+
+        for participant_id in participants {
+            if participant_id == AUDIO_FEEDBACK_PARTICIPANT_ID {
+                continue;
+            }
+            info!(
+                "Moving participant {} to waiting (no moderator) in room {}",
+                participant_id, self.id
+            );
+
+            // Remove from mixer
+            if let Err(e) = self.mixer.remove_participant(&participant_id) {
+                warn!(
+                    "Failed to remove participant {} from mixer: {}",
+                    participant_id, e
+                );
+                continue;
+            }
+
+            // Add to waiting
+            self.waiting_participants.insert(participant_id, ());
         }
     }
 
@@ -1662,5 +1703,124 @@ mod tests {
         // Mix excluding alice
         let mixed = room.mix_for_participant("alice").unwrap();
         assert!(mixed.is_some());
+    }
+
+    fn create_configured_room(wait_for_moderator: bool) -> ConferenceRoom {
+        let room = ConferenceRoom::new(
+            "test-wfm",
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
+
+        let mut room_config = crate::room_config::RoomConfig::new();
+        room_config.wait_for_moderator = Some(wait_for_moderator);
+        let global = crate::config::ConferenceConfig::default();
+        room.configure(room_config, &global).unwrap();
+        room
+    }
+
+    #[test]
+    fn test_wait_for_moderator_blocks_guests() {
+        let room = create_configured_room(true);
+
+        // Guest should be put in waiting
+        let result = room.add_participant("guest1", false);
+        assert!(
+            matches!(result, Err(ConferenceError::WaitingForModerator)),
+            "Guest should wait for moderator, got: {:?}",
+            result
+        );
+        assert_eq!(room.waiting_count(), 1);
+        assert_eq!(room.participant_count(), 0); // no one in mixer (no sounds configured)
+    }
+
+    #[test]
+    fn test_wait_for_moderator_blocks_second_guest() {
+        let room = create_configured_room(true);
+
+        // First guest waits
+        let _ = room.add_participant("guest1", false);
+        // Second guest also waits
+        let result = room.add_participant("guest2", false);
+        assert!(matches!(result, Err(ConferenceError::WaitingForModerator)));
+        assert_eq!(room.waiting_count(), 2);
+        assert_eq!(room.participant_count(), 0); // no one in mixer
+    }
+
+    #[test]
+    fn test_wait_for_moderator_host_joins_directly() {
+        let room = create_configured_room(true);
+
+        // Host should join directly, not wait
+        let result = room.add_participant("host1", true);
+        assert!(result.is_ok(), "Host should join directly: {:?}", result);
+        assert_eq!(room.host_count(), 1);
+        assert_eq!(room.waiting_count(), 0);
+        assert_eq!(room.participant_count(), 1); // host only (no sounds configured)
+    }
+
+    #[test]
+    fn test_wait_for_moderator_host_releases_waiting() {
+        let room = create_configured_room(true);
+
+        // Two guests wait
+        let _ = room.add_participant("guest1", false);
+        let _ = room.add_participant("guest2", false);
+        assert_eq!(room.waiting_count(), 2);
+
+        // Host joins → releases waiting participants
+        room.add_participant("host1", true).unwrap();
+        assert_eq!(room.waiting_count(), 0);
+        assert_eq!(room.participant_count(), 3); // host + 2 guests (no audio feedback)
+    }
+
+    #[test]
+    fn test_wait_for_moderator_disabled_allows_guests() {
+        let room = create_configured_room(false);
+
+        // With wait_for_moderator=false, guests join directly
+        let result = room.add_participant("guest1", false);
+        assert!(result.is_ok());
+        assert_eq!(room.waiting_count(), 0);
+        assert_eq!(room.participant_count(), 1); // guest only (no sounds configured)
+    }
+
+    #[test]
+    fn test_wait_for_moderator_guest_after_host() {
+        let room = create_configured_room(true);
+
+        // Host joins first
+        room.add_participant("host1", true).unwrap();
+
+        // Guest should join directly (host is present)
+        let result = room.add_participant("guest1", false);
+        assert!(result.is_ok(), "Guest should join when host is present: {:?}", result);
+        assert_eq!(room.waiting_count(), 0);
+    }
+
+    #[test]
+    fn test_wait_for_moderator_atomic_flag() {
+        let room = create_configured_room(true);
+        assert!(room.wait_for_moderator_enabled());
+
+        let room2 = create_configured_room(false);
+        assert!(!room2.wait_for_moderator_enabled());
+    }
+
+    #[test]
+    fn test_wait_for_moderator_unconfigured_room_allows_guests() {
+        // Room without configure() should allow guests (backwards compat)
+        let room = ConferenceRoom::new(
+            "unconfigured",
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
+
+        let result = room.add_participant("guest1", false);
+        assert!(result.is_ok(), "Unconfigured room should allow guests");
     }
 }

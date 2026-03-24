@@ -153,8 +153,16 @@ impl PinAuthenticator {
         let guest_match = self.config.guest_pin.as_ref()
             .map_or(false, |guest_pin| constant_time_eq(pin, guest_pin));
 
-        // Host PIN takes priority
-        if host_match {
+        // If host and guest PINs are identical, treat as guest authentication.
+        // The host PIN must be DISTINCT from the guest PIN to grant host access,
+        // otherwise wait-for-moderator is impossible since every caller becomes a host.
+        let pins_are_same = match (&self.config.host_pin, &self.config.guest_pin) {
+            (Some(h), Some(g)) => constant_time_eq(h, g),
+            _ => false,
+        };
+
+        // Host PIN grants host access only when it's different from the guest PIN
+        if host_match && !guest_match && !pins_are_same {
             tracker.reset();
             debug!("Participant {} authenticated as host", participant_id);
             return PinAuthResult::HostAuthenticated;

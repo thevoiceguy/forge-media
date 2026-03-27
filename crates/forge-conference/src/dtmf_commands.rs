@@ -103,6 +103,10 @@ pub struct HostCommands {
 
     /// End conference for all
     pub end_conference: String, // default: "*99"
+
+    /// Dial-out prefix: starts collecting an extension/number.
+    /// After entering the prefix the caller types digits then #.
+    pub dial_out: String, // default: "*5"
 }
 
 impl Default for HostCommands {
@@ -114,6 +118,7 @@ impl Default for HostCommands {
             lock: "*93".to_string(),
             unlock: "*94".to_string(),
             end_conference: "*99".to_string(),
+            dial_out: "*5".to_string(),
         }
     }
 }
@@ -136,8 +141,12 @@ pub enum DtmfCommand {
     UnlockConference,
     EndConference,
 
+    // Host: dial-out
+    DialOut(String), // destination extension/number
+
     // Special
-    EnterHostPin, // Waiting for PIN entry
+    EnterHostPin,    // Waiting for PIN entry
+    EnterDialOut,    // Waiting for extension digits
     InvalidCommand,
     Incomplete, // Need more digits
 }
@@ -160,6 +169,12 @@ struct SequenceState {
     is_host: bool,
     /// Is participant entering host PIN?
     entering_pin: bool,
+    /// Is participant entering a dial-out destination?
+    entering_dialout: bool,
+    /// Last digit received (for dedup)
+    last_digit: Option<char>,
+    /// When the last digit was received
+    last_digit_time: Instant,
 }
 
 impl SequenceState {
@@ -169,18 +184,29 @@ impl SequenceState {
             started_at: Instant::now(),
             is_host: false,
             entering_pin: false,
+            entering_dialout: false,
+            last_digit: None,
+            last_digit_time: Instant::now(),
         }
     }
 
-    fn add_digit(&mut self, digit: char) {
+    fn add_digit(&mut self, digit: char) -> bool {
+        // Dedup: ignore duplicate digit within 200ms (RFC 2833 retransmissions)
+        if self.last_digit == Some(digit) && self.last_digit_time.elapsed() < Duration::from_millis(200) {
+            return false; // duplicate, ignore
+        }
+        self.last_digit = Some(digit);
+        self.last_digit_time = Instant::now();
         self.digits.push(digit);
         self.started_at = Instant::now(); // Reset timeout
+        true
     }
 
     fn clear(&mut self) {
         self.digits.clear();
         self.started_at = Instant::now();
         self.entering_pin = false;
+        self.entering_dialout = false;
     }
 
     fn is_expired(&self, timeout: Duration) -> bool {
@@ -241,8 +267,10 @@ impl DtmfCommandHandler {
             sequence.clear();
         }
 
-        // Add digit to sequence
-        sequence.add_digit(digit);
+        // Add digit to sequence (dedup RFC 2833 retransmissions)
+        if !sequence.add_digit(digit) {
+            return None; // duplicate digit, ignore
+        }
 
         // Check if entering PIN (inline to avoid deadlock from nested lock)
         if sequence.entering_pin {
@@ -279,6 +307,30 @@ impl DtmfCommandHandler {
             }
         }
 
+        // Check if entering dial-out destination digits
+        if sequence.entering_dialout {
+            let digits = sequence.digits.clone();
+            if digit == '#' {
+                // # terminates the destination entry
+                let destination = digits.trim_end_matches('#').to_string();
+                sequence.clear();
+                if destination.is_empty() {
+                    warn!(
+                        "Empty dial-out destination from {} in room {}",
+                        participant_id, self.room_id
+                    );
+                    return Some((DtmfCommand::InvalidCommand, ParticipantRole::Host));
+                }
+                info!(
+                    "DTMF dial-out from {} in room {}: destination={}",
+                    participant_id, self.room_id, destination
+                );
+                return Some((DtmfCommand::DialOut(destination), ParticipantRole::Host));
+            }
+            // Still collecting digits — keep accumulating
+            return None;
+        }
+
         // Try to match command
         let role = if sequence.is_host {
             ParticipantRole::Host
@@ -299,6 +351,16 @@ impl DtmfCommandHandler {
                 sequence.digits.clear();
                 info!(
                     "Participant {} entering host PIN in room {}",
+                    participant_id, self.room_id
+                );
+                None
+            }
+            Some(DtmfCommand::EnterDialOut) => {
+                // Start dial-out digit collection mode
+                sequence.entering_dialout = true;
+                sequence.digits.clear();
+                info!(
+                    "Host {} entering dial-out destination in room {}",
                     participant_id, self.room_id
                 );
                 None
@@ -364,9 +426,10 @@ impl DtmfCommandHandler {
         let is_end_conference = digits == self.config.host_commands.end_conference;
         let is_kick = digits.starts_with(&self.config.host_commands.kick_prefix)
             && digits.len() > self.config.host_commands.kick_prefix.len();
+        let is_dial_out = digits == self.config.host_commands.dial_out;
 
         let is_host_command =
-            is_mute_all || is_unmute_all || is_lock || is_unlock || is_end_conference || is_kick;
+            is_mute_all || is_unmute_all || is_lock || is_unlock || is_end_conference || is_kick || is_dial_out;
 
         if is_host_command {
             if role == ParticipantRole::Host {
@@ -392,6 +455,10 @@ impl DtmfCommandHandler {
                         return Some(DtmfCommand::KickParticipant(participant_num));
                     }
                 }
+                if is_dial_out {
+                    // Enter dial-out digit collection mode
+                    return Some(DtmfCommand::EnterDialOut);
+                }
             } else if self.config.host_pin.is_some() {
                 // Non-authenticated participant trying to use host command - prompt for PIN
                 return Some(DtmfCommand::EnterHostPin);
@@ -416,6 +483,7 @@ impl DtmfCommandHandler {
             || cmds.unlock.starts_with(digits)
             || cmds.end_conference.starts_with(digits)
             || cmds.kick_prefix.starts_with(digits)
+            || cmds.dial_out.starts_with(digits)
     }
 
     /// Get the length of the longest host command
@@ -428,6 +496,7 @@ impl DtmfCommandHandler {
             cmds.unlock.len(),
             cmds.end_conference.len(),
             cmds.kick_prefix.len() + 2, // Account for kick prefix + at least 2 digits
+            cmds.dial_out.len(),
         ]
         .iter()
         .max()
@@ -456,6 +525,15 @@ impl DtmfCommandHandler {
         }
 
         false
+    }
+
+    /// Set a participant's host status (call when they join as host via PIN auth)
+    pub fn set_host(&self, participant_id: &str, is_host: bool) {
+        let mut sequences = self.sequences.write();
+        let sequence = sequences
+            .entry(participant_id.to_string())
+            .or_insert_with(SequenceState::new);
+        sequence.is_host = is_host;
     }
 
     /// Clear sequence for a participant (call when they leave)

@@ -263,6 +263,10 @@ impl RoomConfig {
                     .end_conference
                     .clone()
                     .unwrap_or_else(|| global_dtmf.host_commands.end_conference.clone()),
+                dial_out: bindings
+                    .dial_out
+                    .clone()
+                    .unwrap_or_else(|| global_dtmf.host_commands.dial_out.clone()),
             }
         } else {
             crate::dtmf_commands::HostCommands {
@@ -272,6 +276,7 @@ impl RoomConfig {
                 lock: global_dtmf.host_commands.lock.clone(),
                 unlock: global_dtmf.host_commands.unlock.clone(),
                 end_conference: global_dtmf.host_commands.end_conference.clone(),
+                dial_out: global_dtmf.host_commands.dial_out.clone(),
             }
         };
 
@@ -337,6 +342,7 @@ pub struct DtmfCommandBindings {
     pub lock: Option<String>,
     pub unlock: Option<String>,
     pub end_conference: Option<String>,
+    pub dial_out: Option<String>,
 }
 
 #[cfg(test)]

@@ -59,6 +59,8 @@ pub struct ConferenceRoom {
     audio_feedback_player: Arc<RwLock<Option<crate::audio_feedback::AudioFeedbackPlayer>>>,
     /// Pre-loaded conference sounds
     conference_sounds: Arc<RwLock<Option<crate::audio_feedback::ConferenceSounds>>>,
+    /// Pending dial-out requests from DTMF (destination strings)
+    dial_out_requests: Arc<parking_lot::Mutex<Vec<String>>>,
     /// Audio format
     format: AudioFormat,
     /// Frame size for mixing operations
@@ -99,6 +101,7 @@ impl ConferenceRoom {
             waiting_participants: Arc::new(DashMap::new()),
             audio_feedback_player: Arc::new(RwLock::new(None)),
             conference_sounds: Arc::new(RwLock::new(None)),
+            dial_out_requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
             format,
             _frame_size: frame_size,
         })
@@ -260,6 +263,16 @@ impl ConferenceRoom {
     /// Check if wait-for-moderator is enabled
     pub fn wait_for_moderator_enabled(&self) -> bool {
         self.wait_for_moderator.load(Ordering::Acquire)
+    }
+
+    /// Queue a dial-out request (called from DTMF handler in the audio bridge)
+    pub fn request_dial_out(&self, destination: &str) {
+        self.dial_out_requests.lock().push(destination.to_string());
+    }
+
+    /// Drain pending dial-out requests (called by the conference handler)
+    pub fn drain_dial_out_requests(&self) -> Vec<String> {
+        std::mem::take(&mut *self.dial_out_requests.lock())
     }
 
     /// Get the number of participants waiting for moderator
@@ -1322,6 +1335,21 @@ impl ConferenceRoom {
                     participant_id, self.id
                 );
                 // TODO: Play success tone
+            }
+
+            DtmfCommand::DialOut(ref destination) => {
+                info!(
+                    "Dial-out request from {} in room {}: {}",
+                    participant_id, self.id, destination
+                );
+                self.request_dial_out(destination);
+            }
+
+            DtmfCommand::EnterDialOut => {
+                debug!(
+                    "Entering dial-out mode for {} in room {}",
+                    participant_id, self.id
+                );
             }
 
             DtmfCommand::Incomplete => {

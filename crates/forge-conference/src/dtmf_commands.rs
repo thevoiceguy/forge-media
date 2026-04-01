@@ -191,8 +191,11 @@ impl SequenceState {
     }
 
     fn add_digit(&mut self, digit: char) -> bool {
-        // Dedup: ignore duplicate digit within 200ms (RFC 2833 retransmissions)
-        if self.last_digit == Some(digit) && self.last_digit_time.elapsed() < Duration::from_millis(200) {
+        // Dedup: ignore duplicate digit within 80ms (RFC 2833 retransmissions).
+        // Keep this short — 80ms catches retransmissions (which arrive within
+        // one DTMF event, typically 40-160ms) but allows deliberate repeated
+        // keypresses like ## (which are 200-500ms apart).
+        if self.last_digit == Some(digit) && self.last_digit_time.elapsed() < Duration::from_millis(80) {
             return false; // duplicate, ignore
         }
         self.last_digit = Some(digit);

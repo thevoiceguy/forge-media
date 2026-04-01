@@ -478,11 +478,57 @@ impl ConferenceRoom {
             self.release_waiting_participants();
         }
 
-        info!("Adding participant {} to room {}", participant_id, self.id);
-        self.mixer.add_participant(&participant_id, None)?;
+        self.add_participant_inner(&participant_id, true)
+    }
 
-        // Play join sound
-        self.play_join_sound();
+    /// Add a participant without playing the join sound.
+    /// Use this when you want to play a welcome message first,
+    /// then call `play_join_sound()` manually afterwards.
+    pub fn add_participant_quiet<S: Into<String>>(&self, participant_id: S, is_host: bool) -> Result<()> {
+        let participant_id = participant_id.into();
+
+        // Same checks as add_participant
+        if *self.is_locked.read() {
+            return Err(ConferenceError::ConferenceLocked);
+        }
+
+        let wfm = self.wait_for_moderator.load(Ordering::Acquire);
+        if wfm && !is_host && self.hosts.is_empty() {
+            self.waiting_participants.insert(participant_id.clone(), ());
+            return Err(ConferenceError::WaitingForModerator);
+        }
+
+        {
+            let config = self.room_config.read();
+            if let Some(cfg) = config.as_ref() {
+                if cfg.max_channels > 0 {
+                    let current_count =
+                        self.mixer.participant_count() + self.waiting_participants.len();
+                    if current_count >= cfg.max_channels {
+                        return Err(ConferenceError::ConferenceFull(cfg.max_channels));
+                    }
+                }
+            }
+        }
+
+        if is_host {
+            info!("Adding host {} to room {}", participant_id, self.id);
+            self.hosts.insert(participant_id.clone(), ());
+            self.release_waiting_participants();
+        }
+
+        self.add_participant_inner(&participant_id, false)
+    }
+
+    /// Internal: add to mixer, optionally play join sound, update metrics
+    fn add_participant_inner(&self, participant_id: &str, play_sound: bool) -> Result<()> {
+        info!("Adding participant {} to room {}", participant_id, self.id);
+        self.mixer.add_participant(participant_id, None)?;
+
+        // Play join sound only if requested
+        if play_sound {
+            self.play_join_sound();
+        }
 
         // Update metrics
         counter!("forge_conference_participants_joined_total", 1, "room_id" => self.id.clone());
@@ -1371,7 +1417,9 @@ impl ConferenceRoom {
     }
 
     /// Play the join sound
-    fn play_join_sound(&self) {
+    /// Play the join sound to all participants. Call this manually when using
+    /// `add_participant_quiet` to control the timing of the join notification.
+    pub fn play_join_sound(&self) {
         let sounds = self.conference_sounds.read();
         if let Some(sounds) = sounds.as_ref() {
             if let Some(samples) = sounds.join_sound.as_ref() {

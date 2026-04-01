@@ -119,6 +119,9 @@ impl ConferenceRoom {
     ) -> Result<()> {
         info!("Configuring room {} with custom settings", self.id);
 
+        // Check if this is the first configure (before we overwrite room_config)
+        let is_first_configure = self.room_config.read().is_none();
+
         // Merge room config with global defaults
         let effective_config = room_config.merge_with_global(global_config);
 
@@ -137,8 +140,11 @@ impl ConferenceRoom {
             self.id, effective_config.wait_for_moderator
         );
 
-        // Set initial lock state
-        *self.is_locked.write() = effective_config.security.default_locked;
+        // Set initial lock state ONLY on first configure (don't overwrite
+        // a runtime lock set via DTMF *93 or the API).
+        if is_first_configure {
+            *self.is_locked.write() = effective_config.security.default_locked;
+        }
 
         // Initialize audio feedback if any sounds are configured
         let has_sounds = effective_config.join_sound.is_some()

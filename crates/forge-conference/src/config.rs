@@ -358,7 +358,7 @@ impl Default for HostCommandsConfig {
             unmute_all: "*92".to_string(),
             lock: "*93".to_string(),
             unlock: "*94".to_string(),
-            end_conference: "*99".to_string(),
+            end_conference: "*00".to_string(),
             dial_out: "*5".to_string(),
         }
     }

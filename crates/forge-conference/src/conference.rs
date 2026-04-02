@@ -61,6 +61,8 @@ pub struct ConferenceRoom {
     conference_sounds: Arc<RwLock<Option<crate::audio_feedback::ConferenceSounds>>>,
     /// Pending dial-out requests from DTMF (destination strings)
     dial_out_requests: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// Flag: host requested end-conference (announcement already played)
+    end_conference_requested: AtomicBool,
     /// Audio format
     format: AudioFormat,
     /// Frame size for mixing operations
@@ -102,6 +104,7 @@ impl ConferenceRoom {
             audio_feedback_player: Arc::new(RwLock::new(None)),
             conference_sounds: Arc::new(RwLock::new(None)),
             dial_out_requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            end_conference_requested: AtomicBool::new(false),
             format,
             _frame_size: frame_size,
         })
@@ -269,6 +272,17 @@ impl ConferenceRoom {
     /// Check if wait-for-moderator is enabled
     pub fn wait_for_moderator_enabled(&self) -> bool {
         self.wait_for_moderator.load(Ordering::Acquire)
+    }
+
+    /// Signal that the host has ended the conference (announcement already played).
+    /// The conference handler should send BYE to all sessions.
+    pub fn request_end_conference(&self) {
+        self.end_conference_requested.store(true, Ordering::Release);
+    }
+
+    /// Check and clear the end-conference flag.
+    pub fn take_end_conference_request(&self) -> bool {
+        self.end_conference_requested.swap(false, Ordering::AcqRel)
     }
 
     /// Queue a dial-out request (called from DTMF handler in the audio bridge)
@@ -1408,7 +1422,8 @@ impl ConferenceRoom {
     ///
     /// # Arguments
     /// * `samples` - PCM audio samples to play
-    fn play_sound_to_all(&self, samples: &[i16]) {
+    /// Play audio samples to all participants via the audio feedback channel.
+    pub fn play_sound_to_all(&self, samples: &[i16]) {
         if samples.is_empty() {
             return;
         }

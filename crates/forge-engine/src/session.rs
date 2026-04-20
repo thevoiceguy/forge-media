@@ -113,6 +113,14 @@ pub struct Participant {
     pub codec_config: ParticipantCodecConfig,
     /// Statistics
     pub stats: ParticipantStats,
+    /// Optional allowlist of source IPs permitted to latch this participant's
+    /// remote endpoint via symmetric-RTP learning.
+    ///
+    /// `None` preserves the legacy behavior (any source may latch). When
+    /// populated — typically from the SDP `c=` line or an explicit operator
+    /// policy — the forwarding engine drops packets whose source IP is not in
+    /// the set, defeating off-path latching attacks (audit finding C3).
+    pub latch_allowed_ips: Option<std::collections::HashSet<std::net::IpAddr>>,
 }
 
 /// Statistics for a participant
@@ -256,6 +264,7 @@ impl MediaSession {
             payload_type: 0, // Default to PCMU (legacy field)
             codec_config: default_codec_config.clone(),
             stats: ParticipantStats::default(),
+            latch_allowed_ips: None,
         };
 
         let participant_b = Participant {
@@ -264,6 +273,7 @@ impl MediaSession {
             payload_type: 0, // Default to PCMU (legacy field)
             codec_config: default_codec_config,
             stats: ParticipantStats::default(),
+            latch_allowed_ips: None,
         };
 
         let now = Instant::now();
@@ -415,6 +425,7 @@ impl MediaSession {
             payload_type: codec_a.payload_type,
             codec_config: codec_a,
             stats: ParticipantStats::default(),
+            latch_allowed_ips: None,
         };
 
         let participant_b = Participant {
@@ -423,6 +434,7 @@ impl MediaSession {
             payload_type: codec_b.payload_type,
             codec_config: codec_b,
             stats: ParticipantStats::default(),
+            latch_allowed_ips: None,
         };
 
         let now = Instant::now();
@@ -618,6 +630,7 @@ impl MediaSession {
             payload_type: 0, // Default to PCMU (legacy field)
             codec_config: default_codec_config.clone(),
             stats: ParticipantStats::default(),
+            latch_allowed_ips: None,
         };
 
         let participant_b = Participant {
@@ -626,6 +639,7 @@ impl MediaSession {
             payload_type: 0, // Default to PCMU (legacy field)
             codec_config: default_codec_config,
             stats: ParticipantStats::default(),
+            latch_allowed_ips: None,
         };
 
         let now = Instant::now();

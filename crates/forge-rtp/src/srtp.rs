@@ -435,16 +435,28 @@ impl SrtpContext {
         let _timestamp = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
         let ssrc = u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]);
 
-        // Calculate header length (fixed 12 bytes + CSRCs + extension)
-        let mut header_len = 12 + (csrc_count as usize * 4);
+        // Calculate header length (fixed 12 bytes + CSRCs + extension).
+        // All arithmetic is checked to avoid integer overflow from attacker-controlled
+        // CC (0..=15) and extension length (0..=u16::MAX) fields.
+        let mut header_len = 12usize
+            .checked_add((csrc_count as usize).saturating_mul(4))
+            .ok_or_else(|| ForgeError::Srtp("RTP header length overflow".to_string()))?;
 
         if extension == 1 {
-            if packet.len() < header_len + 4 {
+            let after_csrc = header_len
+                .checked_add(4)
+                .ok_or_else(|| ForgeError::Srtp("RTP extension length overflow".to_string()))?;
+            if packet.len() < after_csrc {
                 return Err(ForgeError::Srtp("Invalid RTP header extension".to_string()));
             }
-            let ext_len =
+            let ext_len_words =
                 u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]) as usize;
-            header_len += 4 + (ext_len * 4);
+            let ext_bytes = ext_len_words
+                .checked_mul(4)
+                .ok_or_else(|| ForgeError::Srtp("RTP extension length overflow".to_string()))?;
+            header_len = after_csrc
+                .checked_add(ext_bytes)
+                .ok_or_else(|| ForgeError::Srtp("RTP extension length overflow".to_string()))?;
         }
 
         if packet.len() < header_len {
@@ -663,21 +675,38 @@ impl SrtpContext {
         let sequence = u16::from_be_bytes([packet[2], packet[3]]);
         let ssrc = u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]);
 
-        // Calculate header length
-        let mut header_len = 12 + (csrc_count as usize * 4);
+        // Calculate header length. All arithmetic is checked to prevent integer
+        // overflow from attacker-controlled CC (0..=15) and extension length
+        // (0..=u16::MAX) fields, which could otherwise bypass the subsequent
+        // `packet.len() < header_len + auth_tag_len` bounds check and enable an
+        // out-of-bounds read (see audit finding C1).
+        let mut header_len = 12usize
+            .checked_add((csrc_count as usize).saturating_mul(4))
+            .ok_or_else(|| ForgeError::Srtp("RTP header length overflow".to_string()))?;
 
         if extension == 1 {
-            if packet.len() < header_len + 4 {
+            let after_csrc = header_len
+                .checked_add(4)
+                .ok_or_else(|| ForgeError::Srtp("RTP extension length overflow".to_string()))?;
+            if packet.len() < after_csrc {
                 return Err(ForgeError::Srtp("Invalid RTP header extension".to_string()));
             }
-            let ext_len =
+            let ext_len_words =
                 u16::from_be_bytes([packet[header_len + 2], packet[header_len + 3]]) as usize;
-            header_len += 4 + (ext_len * 4);
+            let ext_bytes = ext_len_words
+                .checked_mul(4)
+                .ok_or_else(|| ForgeError::Srtp("RTP extension length overflow".to_string()))?;
+            header_len = after_csrc
+                .checked_add(ext_bytes)
+                .ok_or_else(|| ForgeError::Srtp("RTP extension length overflow".to_string()))?;
         }
 
         let auth_tag_len = key_material.profile.auth_tag_len();
 
-        if packet.len() < header_len + auth_tag_len {
+        let header_plus_tag = header_len
+            .checked_add(auth_tag_len)
+            .ok_or_else(|| ForgeError::Srtp("SRTP packet length overflow".to_string()))?;
+        if packet.len() < header_plus_tag {
             return Err(ForgeError::Srtp(
                 "SRTP packet too short for auth tag".to_string(),
             ));
@@ -1861,5 +1890,58 @@ mod tests {
         packet.extend_from_slice(&[0u8; 20]);
 
         packet
+    }
+
+    // C1 regression: a crafted RTP header with CC=15 and a huge extension
+    // length field must be rejected by both protect and unprotect rather than
+    // overflowing `header_len` arithmetic and bypassing the subsequent bounds
+    // check (which could enable an out-of-bounds read in the crypto stage).
+    #[test]
+    fn test_protect_rejects_malicious_extension_length() {
+        let mut ctx = SrtpContext::new();
+        ctx.set_local_key(SrtpKeyMaterial::new(
+            vec![0u8; 16],
+            vec![0u8; 14],
+            SrtpProfile::Aes128CmHmacSha1_80,
+        ).unwrap());
+
+        // V=2, P=0, X=1, CC=15 → first byte 0x9F
+        // PT=0, marker=0 → second byte 0x00
+        // Sequence, timestamp, SSRC (12 bytes total)
+        // 15 CSRCs (60 bytes)
+        // Extension header: profile (2B) + length_words=0xFFFF (2B)
+        // Claimed extension bytes: 0xFFFF * 4 = 262140 — far beyond packet length.
+        let mut pkt = vec![0x9F, 0x00];
+        pkt.extend_from_slice(&[0, 0]);          // seq
+        pkt.extend_from_slice(&[0, 0, 0, 0]);    // ts
+        pkt.extend_from_slice(&[0, 0, 0, 1]);    // ssrc
+        pkt.extend_from_slice(&[0u8; 60]);       // 15 CSRCs
+        pkt.extend_from_slice(&[0xBE, 0xDE, 0xFF, 0xFF]); // ext header w/ bogus length
+
+        let res = ctx.protect_rtp(&pkt);
+        assert!(res.is_err(), "protect_rtp must reject malicious extension");
+    }
+
+    #[test]
+    fn test_unprotect_rejects_malicious_extension_length() {
+        let mut ctx = SrtpContext::new();
+        ctx.set_remote_key(SrtpKeyMaterial::new(
+            vec![0u8; 16],
+            vec![0u8; 14],
+            SrtpProfile::Aes128CmHmacSha1_80,
+        ).unwrap());
+
+        // Same layout as above.
+        let mut pkt = vec![0x9F, 0x00];
+        pkt.extend_from_slice(&[0, 0]);
+        pkt.extend_from_slice(&[0, 0, 0, 0]);
+        pkt.extend_from_slice(&[0, 0, 0, 1]);
+        pkt.extend_from_slice(&[0u8; 60]);
+        pkt.extend_from_slice(&[0xBE, 0xDE, 0xFF, 0xFF]);
+        // Pad with a fake auth tag so any length-mis-handling would otherwise proceed.
+        pkt.extend_from_slice(&[0u8; 10]);
+
+        let res = ctx.unprotect_rtp(&pkt);
+        assert!(res.is_err(), "unprotect_rtp must reject malicious extension");
     }
 }

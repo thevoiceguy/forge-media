@@ -3,6 +3,7 @@
 use crate::{PortPair, RtpPacket};
 use bytes::Bytes;
 use forge_core::{ForgeError, Result};
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -51,6 +52,42 @@ pub struct RemoteEndpoint {
     pub rtcp_addr: Option<SocketAddr>,
 }
 
+/// Policy controlling which source IPs are allowed to latch the remote endpoint
+/// via symmetric-RTP learning.
+///
+/// Defense against the "latching attack": an off-path attacker who can guess
+/// (or scan) the allocated RTP port can race the legitimate peer's first
+/// packet and hijack the flow. For SRTP the auth tag protects the payload, but
+/// for plain RTP and prior to SRTP-context establishment, source-IP validation
+/// is the primary defense.
+#[derive(Debug, Clone, Default)]
+pub enum LatchPolicy {
+    /// Learn the remote endpoint from the first packet, regardless of source.
+    /// This is the historical behavior and remains the default for backward
+    /// compatibility with deployments that cannot predict the post-NAT source IP.
+    #[default]
+    Open,
+    /// Only latch onto packets whose source IP is in the allowed set. Populate
+    /// this set from signaling (e.g., SDP `c=` line) before media begins to
+    /// block off-path spoofers.
+    AllowedIps(HashSet<IpAddr>),
+    /// Do not learn at all — the remote endpoint must be set explicitly via
+    /// `set_remote_endpoint`. Use this once signaling has given a concrete peer
+    /// address and NAT traversal is not required.
+    Locked,
+}
+
+impl LatchPolicy {
+    /// Returns true if a packet from `addr` is allowed to update the remote endpoint.
+    pub fn allows(&self, addr: &SocketAddr) -> bool {
+        match self {
+            LatchPolicy::Open => true,
+            LatchPolicy::AllowedIps(ips) => ips.contains(&addr.ip()),
+            LatchPolicy::Locked => false,
+        }
+    }
+}
+
 /// A pair of UDP sockets for RTP and RTCP
 pub struct RtpSocketPair {
     /// RTP socket
@@ -61,6 +98,8 @@ pub struct RtpSocketPair {
     ports: PortPair,
     /// Remote endpoint (learned via symmetric RTP)
     remote_endpoint: Arc<RwLock<Option<RemoteEndpoint>>>,
+    /// Policy governing which source IPs may latch the remote endpoint.
+    latch_policy: Arc<RwLock<LatchPolicy>>,
     /// Configuration
     config: RtpSocketConfig,
 }
@@ -88,6 +127,7 @@ impl RtpSocketPair {
             rtcp_socket: Arc::new(rtcp_socket),
             ports,
             remote_endpoint: Arc::new(RwLock::new(None)),
+            latch_policy: Arc::new(RwLock::new(LatchPolicy::default())),
             config,
         })
     }
@@ -197,8 +237,42 @@ impl RtpSocketPair {
         *self.remote_endpoint.write().await = Some(endpoint);
     }
 
-    /// Learn remote endpoint from received packet (symmetric RTP)
+    /// Get the current latch policy.
+    pub async fn latch_policy(&self) -> LatchPolicy {
+        self.latch_policy.read().await.clone()
+    }
+
+    /// Install a new latch policy. Typically called by the signaling layer
+    /// once the remote's SDP is known, e.g.:
+    ///
+    /// ```ignore
+    /// let allowed = HashSet::from([peer_ip]);
+    /// sockets.set_latch_policy(LatchPolicy::AllowedIps(allowed)).await;
+    /// ```
+    pub async fn set_latch_policy(&self, policy: LatchPolicy) {
+        *self.latch_policy.write().await = policy;
+    }
+
+    /// Learn remote endpoint from received packet (symmetric RTP).
+    ///
+    /// Hardened against the latching attack (audit finding C3): a packet whose
+    /// source address is disallowed by the configured `LatchPolicy` is
+    /// silently ignored for the purposes of learning, though the caller may
+    /// still process the packet (with appropriate downstream checks).
     async fn learn_remote_endpoint(&self, addr: SocketAddr) {
+        // Policy check — reject disallowed sources before touching the endpoint.
+        let policy = self.latch_policy.read().await;
+        if !policy.allows(&addr) {
+            tracing::warn!(
+                target: "forge::rtp::latch",
+                source = %addr,
+                "rejected RTP latch attempt: source disallowed by latch policy"
+            );
+            metrics::counter!("forge_rtp_latch_rejected_total", 1);
+            return;
+        }
+        drop(policy);
+
         let mut remote = self.remote_endpoint.write().await;
 
         if let Some(ref mut endpoint) = *remote {
@@ -213,9 +287,11 @@ impl RtpSocketPair {
                 rtp_addr: addr,
                 rtcp_addr: None,
             });
-            tracing::debug!("Learned RTP endpoint: {}", addr);
+            tracing::debug!(target: "forge::rtp::latch", source = %addr, "learned RTP endpoint");
+            metrics::counter!("forge_rtp_latch_learned_total", 1);
         }
     }
+
 
     /// Receive an RTP packet
     ///
@@ -453,5 +529,88 @@ mod tests {
         let learned = socket1.remote_endpoint().await.unwrap();
         let addr2 = socket2.local_rtp_addr().unwrap();
         assert_eq!(learned.rtp_addr, addr2);
+    }
+
+    // C3 regression: LatchPolicy::AllowedIps must block a spoofer whose source
+    // IP is not on the allowlist, while allowing the legitimate peer.
+    #[tokio::test]
+    async fn test_latch_policy_rejects_disallowed_source() {
+        let config = RtpSocketConfig {
+            bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ..Default::default()
+        };
+        let sockets = RtpSocketPair::new(PortPair::new(10100).unwrap(), config)
+            .await
+            .unwrap();
+
+        // Only packets from 10.0.0.1 may latch.
+        let mut allowed = HashSet::new();
+        allowed.insert(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        sockets
+            .set_latch_policy(LatchPolicy::AllowedIps(allowed))
+            .await;
+
+        // Off-list source is silently ignored.
+        sockets
+            .learn_remote_endpoint("192.0.2.55:5004".parse().unwrap())
+            .await;
+        assert!(
+            sockets.remote_endpoint().await.is_none(),
+            "disallowed source must not latch"
+        );
+
+        // On-list source latches normally.
+        sockets
+            .learn_remote_endpoint("10.0.0.1:5004".parse().unwrap())
+            .await;
+        let learned = sockets.remote_endpoint().await.expect("allowed source latches");
+        assert_eq!(learned.rtp_addr.ip(), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    #[tokio::test]
+    async fn test_latch_policy_locked_never_learns() {
+        let config = RtpSocketConfig {
+            bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ..Default::default()
+        };
+        let sockets = RtpSocketPair::new(PortPair::new(10102).unwrap(), config)
+            .await
+            .unwrap();
+
+        sockets.set_latch_policy(LatchPolicy::Locked).await;
+
+        sockets
+            .learn_remote_endpoint("127.0.0.1:5004".parse().unwrap())
+            .await;
+        assert!(
+            sockets.remote_endpoint().await.is_none(),
+            "Locked policy must never latch from the wire"
+        );
+
+        // Explicit signaling-path set still works.
+        let explicit = RemoteEndpoint {
+            rtp_addr: "127.0.0.1:5004".parse().unwrap(),
+            rtcp_addr: None,
+        };
+        sockets.set_remote_endpoint(explicit.clone()).await;
+        assert_eq!(sockets.remote_endpoint().await, Some(explicit));
+    }
+
+    #[tokio::test]
+    async fn test_latch_policy_open_is_default() {
+        let config = RtpSocketConfig {
+            bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ..Default::default()
+        };
+        let sockets = RtpSocketPair::new(PortPair::new(10104).unwrap(), config)
+            .await
+            .unwrap();
+
+        // Default policy is Open → any source latches (backward compat).
+        assert!(matches!(sockets.latch_policy().await, LatchPolicy::Open));
+        sockets
+            .learn_remote_endpoint("203.0.113.7:5004".parse().unwrap())
+            .await;
+        assert!(sockets.remote_endpoint().await.is_some());
     }
 }

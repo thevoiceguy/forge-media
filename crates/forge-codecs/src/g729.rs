@@ -393,8 +393,15 @@ mod bcg729_wrapper {
                 )));
             }
 
+            // Maximum legal G.729 frame is 10 bytes (normal) or 2 (SID/VAD) or 0
+            // (untransmitted). We allocate the upper bound and clamp the reported
+            // length defensively: if bcg729Encoder ever reports `output_len > 10`
+            // it indicates a library bug or memory corruption, and we must not
+            // propagate that length to Vec::truncate as-is.
+            const G729_MAX_FRAME_BYTES: u8 = 10;
+
             unsafe {
-                let mut output = vec![0u8; 10]; // Maximum output size
+                let mut output = vec![0u8; G729_MAX_FRAME_BYTES as usize];
                 let mut output_len: u8 = 0;
 
                 bcg729Encoder(
@@ -403,6 +410,21 @@ mod bcg729_wrapper {
                     output.as_mut_ptr(),
                     &mut output_len as *mut u8,
                 );
+
+                // In debug builds, catch library misbehavior early; in release,
+                // clamp so we never return a buffer larger than allocated.
+                debug_assert!(
+                    output_len <= G729_MAX_FRAME_BYTES,
+                    "bcg729Encoder returned output_len={} (max {})",
+                    output_len,
+                    G729_MAX_FRAME_BYTES
+                );
+                if output_len > G729_MAX_FRAME_BYTES {
+                    return Err(CodecError::InvalidFormat(format!(
+                        "bcg729Encoder produced {} bytes (max {})",
+                        output_len, G729_MAX_FRAME_BYTES
+                    )));
+                }
 
                 output.truncate(output_len as usize);
                 Ok(output)

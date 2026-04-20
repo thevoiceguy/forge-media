@@ -1899,11 +1899,14 @@ mod tests {
     #[test]
     fn test_protect_rejects_malicious_extension_length() {
         let mut ctx = SrtpContext::new();
-        ctx.set_local_key(SrtpKeyMaterial::new(
-            vec![0u8; 16],
-            vec![0u8; 14],
-            SrtpProfile::Aes128CmHmacSha1_80,
-        ).unwrap());
+        ctx.set_local_key(
+            SrtpKeyMaterial::new(
+                vec![0u8; 16],
+                vec![0u8; 14],
+                SrtpProfile::Aes128CmHmacSha1_80,
+            )
+            .unwrap(),
+        );
 
         // V=2, P=0, X=1, CC=15 → first byte 0x9F
         // PT=0, marker=0 → second byte 0x00
@@ -1912,10 +1915,10 @@ mod tests {
         // Extension header: profile (2B) + length_words=0xFFFF (2B)
         // Claimed extension bytes: 0xFFFF * 4 = 262140 — far beyond packet length.
         let mut pkt = vec![0x9F, 0x00];
-        pkt.extend_from_slice(&[0, 0]);          // seq
-        pkt.extend_from_slice(&[0, 0, 0, 0]);    // ts
-        pkt.extend_from_slice(&[0, 0, 0, 1]);    // ssrc
-        pkt.extend_from_slice(&[0u8; 60]);       // 15 CSRCs
+        pkt.extend_from_slice(&[0, 0]); // seq
+        pkt.extend_from_slice(&[0, 0, 0, 0]); // ts
+        pkt.extend_from_slice(&[0, 0, 0, 1]); // ssrc
+        pkt.extend_from_slice(&[0u8; 60]); // 15 CSRCs
         pkt.extend_from_slice(&[0xBE, 0xDE, 0xFF, 0xFF]); // ext header w/ bogus length
 
         let res = ctx.protect_rtp(&pkt);
@@ -1925,11 +1928,14 @@ mod tests {
     #[test]
     fn test_unprotect_rejects_malicious_extension_length() {
         let mut ctx = SrtpContext::new();
-        ctx.set_remote_key(SrtpKeyMaterial::new(
-            vec![0u8; 16],
-            vec![0u8; 14],
-            SrtpProfile::Aes128CmHmacSha1_80,
-        ).unwrap());
+        ctx.set_remote_key(
+            SrtpKeyMaterial::new(
+                vec![0u8; 16],
+                vec![0u8; 14],
+                SrtpProfile::Aes128CmHmacSha1_80,
+            )
+            .unwrap(),
+        );
 
         // Same layout as above.
         let mut pkt = vec![0x9F, 0x00];
@@ -1942,6 +1948,9 @@ mod tests {
         pkt.extend_from_slice(&[0u8; 10]);
 
         let res = ctx.unprotect_rtp(&pkt);
-        assert!(res.is_err(), "unprotect_rtp must reject malicious extension");
+        assert!(
+            res.is_err(),
+            "unprotect_rtp must reject malicious extension"
+        );
     }
 }

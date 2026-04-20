@@ -292,7 +292,6 @@ impl RtpSocketPair {
         }
     }
 
-
     /// Receive an RTP packet
     ///
     /// This method will:
@@ -563,8 +562,14 @@ mod tests {
         sockets
             .learn_remote_endpoint("10.0.0.1:5004".parse().unwrap())
             .await;
-        let learned = sockets.remote_endpoint().await.expect("allowed source latches");
-        assert_eq!(learned.rtp_addr.ip(), IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let learned = sockets
+            .remote_endpoint()
+            .await
+            .expect("allowed source latches");
+        assert_eq!(
+            learned.rtp_addr.ip(),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        );
     }
 
     #[tokio::test]

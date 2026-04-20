@@ -330,9 +330,15 @@ impl ForwardingEngine {
             let b = participant_b.read().await;
 
             // Check if source IP matches participant A's remote IP
-            let a_ip_match = a.remote_addr.map(|addr| addr.ip() == source_addr.ip()).unwrap_or(false);
+            let a_ip_match = a
+                .remote_addr
+                .map(|addr| addr.ip() == source_addr.ip())
+                .unwrap_or(false);
             // Check if source IP matches participant B's remote IP
-            let b_ip_match = b.remote_addr.map(|addr| addr.ip() == source_addr.ip()).unwrap_or(false);
+            let b_ip_match = b
+                .remote_addr
+                .map(|addr| addr.ip() == source_addr.ip())
+                .unwrap_or(false);
 
             if a_ip_match && !b_ip_match {
                 // Packet from A (IP matches A only), forward to B
@@ -371,13 +377,11 @@ impl ForwardingEngine {
                 let source_ip = source_addr.ip();
 
                 let a_can_latch = a.remote_addr.is_none()
-                    && a
-                        .latch_allowed_ips
+                    && a.latch_allowed_ips
                         .as_ref()
                         .map_or(true, |allowed| allowed.contains(&source_ip));
                 let b_can_latch = b.remote_addr.is_none()
-                    && b
-                        .latch_allowed_ips
+                    && b.latch_allowed_ips
                         .as_ref()
                         .map_or(true, |allowed| allowed.contains(&source_ip));
 
@@ -668,7 +672,8 @@ impl ForwardingEngine {
                         // (e.g., PCMU at 8kHz → G.722 at 16kHz, where 20ms PCMU becomes
                         // 320 samples that get split into two 160-sample G.722 frames).
                         let num_frames = transcoded_payloads.len();
-                        let frame_sizes: Vec<usize> = transcoded_payloads.iter().map(|f| f.len()).collect();
+                        let frame_sizes: Vec<usize> =
+                            transcoded_payloads.iter().map(|f| f.len()).collect();
                         let combined_payload: Vec<u8> = if num_frames == 1 {
                             transcoded_payloads.into_iter().next().unwrap()
                         } else {

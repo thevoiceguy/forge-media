@@ -83,8 +83,24 @@ fn test_codec_prioritization_offerer_preference() {
 
 #[test]
 fn test_opus_negotiation() {
-    // Offer: Opus only
-    let offer = create_audio_offer("192.168.1.100", 5000, &[(111, "opus", 48000)]);
+    // Offer: Opus only. Channels must match audio_opus profile (opus/48000/2)
+    // because sip-sdp's dynamic-rtpmap matcher uses strict encoding_params equality.
+    let opus_media = sip_sdp::MediaDescription::audio(5000)
+        .add_format(111)
+        .unwrap()
+        .add_rtpmap(111, "opus", 48000, Some("2"))
+        .unwrap();
+    let offer = sip_sdp::builder::SessionDescriptionBuilder::new()
+        .origin("alice", "1", "192.168.1.100")
+        .unwrap()
+        .session_name("Test Offer")
+        .unwrap()
+        .connection("192.168.1.100")
+        .unwrap()
+        .time(0, 0)
+        .media(opus_media)
+        .unwrap()
+        .build();
 
     let profile = SdpProfile::audio_opus();
     let local_caps = profile.with_local_addr("10.0.0.1", 6000);

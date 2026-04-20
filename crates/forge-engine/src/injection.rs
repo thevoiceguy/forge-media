@@ -126,9 +126,9 @@ struct PlaybackInternal {
 /// Manages active audio playbacks for sessions
 pub struct PlaybackManager {
     /// Active playbacks by call ID
-    playbacks: DashMap<CallId, Vec<PlaybackId>>,
+    playbacks: Arc<DashMap<CallId, Vec<PlaybackId>>>,
     /// Playback state by ID
-    playback_state: DashMap<PlaybackId, Arc<RwLock<PlaybackInternal>>>,
+    playback_state: Arc<DashMap<PlaybackId, Arc<RwLock<PlaybackInternal>>>>,
     /// Reference to session manager for accessing RTP sockets
     session_manager: Option<Arc<crate::manager::SessionManager>>,
 }
@@ -137,8 +137,8 @@ impl PlaybackManager {
     /// Create a new playback manager
     pub fn new() -> Self {
         Self {
-            playbacks: DashMap::new(),
-            playback_state: DashMap::new(),
+            playbacks: Arc::new(DashMap::new()),
+            playback_state: Arc::new(DashMap::new()),
             session_manager: None,
         }
     }
@@ -146,8 +146,8 @@ impl PlaybackManager {
     /// Create a new playback manager with session manager reference
     pub fn new_with_session_manager(session_manager: Arc<crate::manager::SessionManager>) -> Self {
         Self {
-            playbacks: DashMap::new(),
-            playback_state: DashMap::new(),
+            playbacks: Arc::new(DashMap::new()),
+            playback_state: Arc::new(DashMap::new()),
             session_manager: Some(session_manager),
         }
     }
@@ -262,6 +262,10 @@ impl PlaybackManager {
                 let mut guard = internal.write().await;
                 if let Ok(()) = guard.stop_rx.try_recv() {
                     info!(playback_id = %id, "Playback stopped by request");
+                    break PlaybackStatus::Stopped;
+                }
+                if !guard.active.load(Ordering::Relaxed) {
+                    info!(playback_id = %id, "Playback stopped via manager");
                     break PlaybackStatus::Stopped;
                 }
             }
@@ -543,13 +547,13 @@ mod tests {
     #[tokio::test]
     async fn test_playback_lifecycle() {
         let manager = PlaybackManager::new();
-        let call_id = CallId::new();
+        let call_id = CallId::generate();
 
         // Create a simple tone source
         let source = Box::new(ToneGenerator::silence(8000));
 
         let handle = manager
-            .start_playback(call_id, source, AudioTarget::Both, MixMode::Replace)
+            .start_playback(call_id.clone(), source, AudioTarget::Both, MixMode::Replace)
             .await
             .unwrap();
 
@@ -566,19 +570,19 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_playbacks() {
         let manager = PlaybackManager::new();
-        let call_id = CallId::new();
+        let call_id = CallId::generate();
 
         // Start two playbacks
         let source1 = Box::new(ToneGenerator::silence(8000));
         let source2 = Box::new(ToneGenerator::silence(8000));
 
         let _handle1 = manager
-            .start_playback(call_id, source1, AudioTarget::ParticipantA, MixMode::Mix)
+            .start_playback(call_id.clone(), source1, AudioTarget::ParticipantA, MixMode::Mix)
             .await
             .unwrap();
 
         let _handle2 = manager
-            .start_playback(call_id, source2, AudioTarget::ParticipantB, MixMode::Mix)
+            .start_playback(call_id.clone(), source2, AudioTarget::ParticipantB, MixMode::Mix)
             .await
             .unwrap();
 

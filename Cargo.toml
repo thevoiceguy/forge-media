@@ -6,7 +6,6 @@ members = [
     "crates/forge-ice",
     "crates/forge-engine",
     "crates/forge-kernel",
-    "crates/forge-kernel-ebpf",
     "crates/forge-dtmf",
     "crates/forge-transcription",
     "crates/forge-injection",
@@ -26,6 +25,11 @@ members = [
     "crates/forge-mixer",
     "crates/forge-conference",
     "crates/forge-transcoder",
+]
+# forge-kernel-ebpf is a no_std eBPF crate built separately with nightly + bpfel-unknown-none.
+# See crates/forge-kernel/build.rs for instructions.
+exclude = [
+    "crates/forge-kernel-ebpf",
 ]
 
 [workspace.package]

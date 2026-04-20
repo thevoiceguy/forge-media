@@ -127,7 +127,7 @@ impl RtpSocketPair {
                 SocketAddr::V4(_) => {
                     // IPv4: Set IP_TOS
                     socket
-                        .set_tos(config.tos as u32)
+                        .set_tos_v4(config.tos as u32)
                         .map_err(|e| ForgeError::Network(format!("Failed to set IP_TOS: {}", e)))?;
                     tracing::debug!(
                         "Set IPv4 TOS to 0x{:02X} (DSCP=0x{:02X})",

@@ -354,9 +354,9 @@ mod tests {
         assert_eq!(sdp.media[0].port, 5000);
 
         // Should have PCMU (0), PCMA (8), and telephone-event (101)
-        assert!(sdp.media[0].formats.contains(&0));
-        assert!(sdp.media[0].formats.contains(&8));
-        assert!(sdp.media[0].formats.contains(&101));
+        assert!(sdp.media[0].formats.contains(&"0".into()));
+        assert!(sdp.media[0].formats.contains(&"8".into()));
+        assert!(sdp.media[0].formats.contains(&"101".into()));
     }
 
     #[test]
@@ -370,10 +370,10 @@ mod tests {
         assert_eq!(sdp.media[0].port, 6000);
 
         // Should have Opus (111) and telephone-event (101)
-        assert!(!sdp.media[0].formats.contains(&0));
-        assert!(!sdp.media[0].formats.contains(&8));
-        assert!(sdp.media[0].formats.contains(&111));
-        assert!(sdp.media[0].formats.contains(&101));
+        assert!(!sdp.media[0].formats.contains(&"0".into()));
+        assert!(!sdp.media[0].formats.contains(&"8".into()));
+        assert!(sdp.media[0].formats.contains(&"111".into()));
+        assert!(sdp.media[0].formats.contains(&"101".into()));
 
         // Check Opus rtpmap
         let opus = sdp.media[0].rtpmaps.get(&111).unwrap();
@@ -389,10 +389,10 @@ mod tests {
         let sdp = profile.with_local_addr("10.0.0.1", 7000);
 
         // Should have PCMU (0), PCMA (8), Opus (111), and telephone-event (101)
-        assert!(sdp.media[0].formats.contains(&0));
-        assert!(sdp.media[0].formats.contains(&8));
-        assert!(sdp.media[0].formats.contains(&111));
-        assert!(sdp.media[0].formats.contains(&101));
+        assert!(sdp.media[0].formats.contains(&"0".into()));
+        assert!(sdp.media[0].formats.contains(&"8".into()));
+        assert!(sdp.media[0].formats.contains(&"111".into()));
+        assert!(sdp.media[0].formats.contains(&"101".into()));
 
         // Verify all rtpmaps are present
         assert!(sdp.media[0].rtpmaps.contains_key(&0));
@@ -451,8 +451,8 @@ mod tests {
         assert_eq!(sdp.media[0].protocol, crate::Protocol::UdpTlsRtpSavpf);
 
         // Should have Opus (111) and telephone-event (101)
-        assert!(sdp.media[0].formats.contains(&111));
-        assert!(sdp.media[0].formats.contains(&101));
+        assert!(sdp.media[0].formats.contains(&"111".into()));
+        assert!(sdp.media[0].formats.contains(&"101".into()));
 
         // Check Opus rtpmap
         let opus = sdp.media[0].rtpmaps.get(&111).unwrap();

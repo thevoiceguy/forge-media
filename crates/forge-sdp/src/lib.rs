@@ -149,7 +149,7 @@ impl SessionDescriptionExt for SessionDescription {
         }
 
         // Get first format (primary negotiated codec)
-        let pt: u8 = *audio.formats.first()?;
+        let pt: u8 = audio.formats.first()?.parse().ok()?;
 
         // Get codec name from rtpmap
         let rtpmap = audio.rtpmaps.get(&pt)?;
@@ -217,7 +217,8 @@ pub mod helpers {
         media
             .formats
             .iter()
-            .filter_map(|&pt| {
+            .filter_map(|fmt| {
+                let pt: u8 = fmt.parse().ok()?;
                 media
                     .rtpmaps
                     .get(&pt)
@@ -228,7 +229,7 @@ pub mod helpers {
 
     /// Extract the primary (first) codec from a media description
     pub fn extract_primary_codec(media: &MediaDescription) -> Option<CodecInfo> {
-        let pt: u8 = *media.formats.first()?;
+        let pt: u8 = media.formats.first()?.parse().ok()?;
         let rtpmap = media.rtpmaps.get(&pt)?;
         Some(CodecInfo::from_rtpmap(pt, rtpmap))
     }
@@ -340,16 +341,21 @@ mod tests {
 
     #[test]
     fn test_get_audio_codec_rejected_media() {
+        let media = sip_sdp::MediaDescription::audio(0)
+            .add_format(0)
+            .unwrap()
+            .add_rtpmap(0, "PCMU", 8000, None)
+            .unwrap();
         let sdp = sip_sdp::builder::SessionDescriptionBuilder::new()
             .origin("alice", "1", "192.168.1.100")
+            .unwrap()
             .session_name("Test")
+            .unwrap()
             .connection("192.168.1.100")
+            .unwrap()
             .time(0, 0)
-            .media(
-                sip_sdp::MediaDescription::audio(0)
-                    .add_format(0)
-                    .add_rtpmap(0, "PCMU", 8000, None),
-            )
+            .media(media)
+            .unwrap()
             .build();
 
         assert!(sdp.get_audio_codec().is_none());

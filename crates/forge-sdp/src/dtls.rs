@@ -248,7 +248,9 @@ mod tests {
     fn test_set_dtls_fingerprint() {
         let mut sdp = SessionDescriptionBuilder::new()
             .origin("test", "12345", "192.168.1.1")
+            .unwrap()
             .session_name("Test")
+            .unwrap()
             .build();
 
         sdp.set_dtls_fingerprint(
@@ -268,7 +270,9 @@ mod tests {
     fn test_set_dtls_setup() {
         let mut sdp = SessionDescriptionBuilder::new()
             .origin("test", "12345", "192.168.1.1")
+            .unwrap()
             .session_name("Test")
+            .unwrap()
             .build();
 
         sdp.set_dtls_setup(DtlsSetup::Actpass);
@@ -307,7 +311,9 @@ mod tests {
     fn test_fingerprint_replaces_existing() {
         let mut sdp = SessionDescriptionBuilder::new()
             .origin("test", "12345", "192.168.1.1")
+            .unwrap()
             .session_name("Test")
+            .unwrap()
             .build();
 
         sdp.set_dtls_fingerprint("sha-256", "ABC:DEF");
@@ -322,7 +328,9 @@ mod tests {
     fn test_rejects_invalid_fingerprint() {
         let mut sdp = SessionDescriptionBuilder::new()
             .origin("test", "12345", "192.168.1.1")
+            .unwrap()
             .session_name("Test")
+            .unwrap()
             .build();
 
         sdp.set_dtls_fingerprint("sha-256\r\n", "ABC");

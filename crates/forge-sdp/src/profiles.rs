@@ -203,7 +203,7 @@ impl SdpProfile {
         let session_id = chrono::Utc::now().timestamp().to_string();
         let mut media = MediaDescription::audio(audio_port);
 
-        media.formats.push(111);
+        media.formats.push(SmolStr::new("111"));
         media.rtpmaps.insert(
             111,
             crate::RtpMap {
@@ -218,7 +218,7 @@ impl SdpProfile {
             value: SmolStr::new("111 opus/48000/2"),
         });
 
-        media.formats.push(101);
+        media.formats.push(SmolStr::new("101"));
         media.rtpmaps.insert(
             101,
             crate::RtpMap {
@@ -245,10 +245,14 @@ impl SdpProfile {
 
         SessionDescriptionBuilder::new()
             .origin("forge", &session_id, local_addr)
+            .unwrap()
             .session_name("Opus Audio Session")
+            .unwrap()
             .connection(local_addr)
+            .unwrap()
             .time(0, 0)
             .media(media)
+            .unwrap()
             .build()
     }
 
@@ -264,7 +268,7 @@ impl SdpProfile {
         media.protocol = Protocol::UdpTlsRtpSavpf;
 
         // Add Opus codec
-        media.formats.push(111);
+        media.formats.push(SmolStr::new("111"));
         media.rtpmaps.insert(
             111,
             crate::RtpMap {
@@ -284,7 +288,7 @@ impl SdpProfile {
         });
 
         // Add telephone-event (DTMF)
-        media.formats.push(101);
+        media.formats.push(SmolStr::new("101"));
         media.rtpmaps.insert(
             101,
             crate::RtpMap {
@@ -316,10 +320,14 @@ impl SdpProfile {
 
         SessionDescriptionBuilder::new()
             .origin("forge", &session_id, local_addr)
+            .unwrap()
             .session_name("WebRTC Audio Session")
+            .unwrap()
             .connection(local_addr)
+            .unwrap()
             .time(0, 0)
             .media(media)
+            .unwrap()
             .build()
     }
 

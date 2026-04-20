@@ -172,10 +172,10 @@ async fn main() -> Result<()> {
 
 async fn handle_message(state: Arc<AppState>, msg: Bytes, from: SocketAddr) -> Result<()> {
     if let Some(req) = parse_request(&msg) {
-        info!("← {:?} from {}", req.start.method, from);
+        info!("← {:?} from {}", req.method(), from);
         handle_request(state, req, from).await
     } else if let Some(resp) = parse_response(&msg) {
-        info!("← {} response from {}", resp.start.code, from);
+        info!("← {} response from {}", resp.code(), from);
         handle_response(state, resp, from).await
     } else {
         warn!("Failed to parse from {}", from);
@@ -184,7 +184,7 @@ async fn handle_message(state: Arc<AppState>, msg: Bytes, from: SocketAddr) -> R
 }
 
 async fn handle_request(state: Arc<AppState>, req: Request, from: SocketAddr) -> Result<()> {
-    match req.start.method {
+    match req.method() {
         Method::Register => handle_register(state, req, from).await,
         Method::Invite => handle_invite(state, req, from).await,
         Method::Ack => handle_ack(state, req).await,
@@ -201,7 +201,7 @@ async fn handle_request(state: Arc<AppState>, req: Request, from: SocketAddr) ->
 async fn handle_response(state: Arc<AppState>, resp: Response, _from: SocketAddr) -> Result<()> {
     // Extract Call-ID from response
     let call_id = resp
-        .headers
+        .headers()
         .get("Call-ID")
         .map(|v| v.to_string())
         .unwrap_or_else(|| "unknown".to_string());
@@ -217,14 +217,16 @@ async fn handle_response(state: Arc<AppState>, resp: Response, _from: SocketAddr
 
     info!(
         "← {} from {} → forwarding to {}",
-        resp.start.code, call_state.callee, call_state.caller
+        resp.code(),
+        call_state.callee,
+        call_state.caller
     );
 
     // For 200 OK responses, rewrite SDP and Contact header to point to Forge/server
     let mut modified_resp = resp.clone();
-    if resp.start.code == 200 && !resp.body.is_empty() {
+    if resp.code() == 200 && !resp.body().is_empty() {
         // Parse and rewrite SDP
-        let original_sdp = String::from_utf8_lossy(&resp.body);
+        let original_sdp = String::from_utf8_lossy(resp.body());
         let rewritten_sdp = rewrite_sdp(
             &original_sdp,
             &state.local_ip,
@@ -237,23 +239,24 @@ async fn handle_response(state: Arc<AppState>, resp: Response, _from: SocketAddr
         );
 
         // Update response body
-        modified_resp.body = rewritten_sdp.into_bytes().into();
+        let new_body: Bytes = rewritten_sdp.into_bytes().into();
+        let body_len = new_body.len();
+        modified_resp.set_body(new_body)?;
 
         // Update Content-Length header
-        let body_len = modified_resp.body.len();
-        modified_resp.headers.remove("Content-Length");
+        modified_resp.headers_mut().remove("Content-Length");
         modified_resp
-            .headers
-            .push("Content-Length".into(), body_len.to_string().into());
+            .headers_mut()
+            .push("Content-Length", body_len.to_string())?;
 
         // Rewrite Contact header to point to server
         // This ensures ACK is routed through us instead of directly to callee
         let server_contact = format!("<sip:{}@{}:5060>", call_state.callee, state.local_ip);
         info!("  Rewriting Contact: {}", server_contact);
-        modified_resp.headers.remove("Contact");
+        modified_resp.headers_mut().remove("Contact");
         modified_resp
-            .headers
-            .push("Contact".into(), server_contact.into());
+            .headers_mut()
+            .push("Contact", server_contact)?;
     }
 
     // Forward response to caller
@@ -264,7 +267,7 @@ async fn handle_response(state: Arc<AppState>, resp: Response, _from: SocketAddr
         .await?;
 
     // If 200 OK, mark call as Answered
-    if resp.start.code == 200 {
+    if resp.code() == 200 {
         info!("✓ {} answered - waiting for ACK", call_state.callee);
         state.calls.alter(&call_id, |_, mut cs| {
             cs.state = CallStateEnum::Answered;
@@ -305,12 +308,14 @@ async fn handle_register(state: Arc<AppState>, req: Request, from: SocketAddr) -
     }
 
     // Send 200 OK with Contact
-    let mut resp = state.uas.create_ok(&req, None);
-    if let Some(contact_hdr) = req.headers.get("Contact") {
-        resp.headers.push("Contact".into(), contact_hdr.clone());
+    let mut resp = state
+        .uas
+        .create_ok(&req, None)
+        .context("create_ok failed")?;
+    if let Some(contact_hdr) = req.headers().get("Contact") {
+        resp.headers_mut().push("Contact", contact_hdr)?;
     }
-    resp.headers
-        .push("Expires".into(), expires.to_string().into());
+    resp.headers_mut().push("Expires", expires.to_string())?;
 
     send_response(&state, resp, from).await?;
 
@@ -379,14 +384,15 @@ async fn handle_invite(state: Arc<AppState>, req: Request, from: SocketAddr) -> 
     // Create modified INVITE with Forge RTP in SDP to send to callee
     let sdp = create_sdp_answer(&state.local_ip, forge_session.rtp_port)?;
     let mut callee_invite = req.clone();
-    callee_invite.body = sdp.into_bytes().into();
+    let new_body: Bytes = sdp.into_bytes().into();
+    let body_len = new_body.len();
+    callee_invite.set_body(new_body)?;
 
     // Update Content-Length
-    let body_len = callee_invite.body.len();
-    callee_invite.headers.remove("Content-Length");
+    callee_invite.headers_mut().remove("Content-Length");
     callee_invite
-        .headers
-        .push("Content-Length".into(), body_len.to_string().into());
+        .headers_mut()
+        .push("Content-Length", body_len.to_string())?;
 
     // Forward INVITE to callee
     info!(
@@ -462,7 +468,10 @@ async fn handle_bye(state: Arc<AppState>, req: Request, from: SocketAddr) -> Res
     }
 
     // Send 200 OK
-    let ok = state.uas.create_ok(&req, None);
+    let ok = state
+        .uas
+        .create_ok(&req, None)
+        .context("create_ok failed")?;
     send_response(&state, ok, from).await?;
 
     info!("✓ Call terminated");
@@ -473,7 +482,10 @@ async fn handle_cancel(state: Arc<AppState>, req: Request, from: SocketAddr) -> 
     let call_id = extract_call_id(&req);
     info!("CANCEL for call {}", call_id);
 
-    let ok = state.uas.create_ok(&req, None);
+    let ok = state
+        .uas
+        .create_ok(&req, None)
+        .context("create_ok failed")?;
     send_response(&state, ok, from).await?;
 
     if let Some((_, call)) = state.calls.remove(&call_id) {
@@ -485,7 +497,10 @@ async fn handle_cancel(state: Arc<AppState>, req: Request, from: SocketAddr) -> 
 
 async fn handle_options(state: Arc<AppState>, req: Request, from: SocketAddr) -> Result<()> {
     debug!("OPTIONS");
-    let ok = state.uas.create_ok(&req, None);
+    let ok = state
+        .uas
+        .create_ok(&req, None)
+        .context("create_ok failed")?;
     send_response(&state, ok, from).await
 }
 
@@ -542,14 +557,14 @@ fn rewrite_sdp(sdp: &str, forge_ip: &str, forge_port: u16) -> String {
 }
 
 fn extract_call_id(req: &Request) -> String {
-    req.headers
+    req.headers()
         .get("Call-ID")
         .map(|v| v.to_string())
         .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn extract_username(req: &Request) -> String {
-    req.headers
+    req.headers()
         .get("From")
         .and_then(|v| {
             v.split("sip:")
@@ -562,10 +577,9 @@ fn extract_username(req: &Request) -> String {
 
 fn extract_request_user(req: &Request) -> String {
     // Extract username from Request-URI
-    if let Some(sip_uri) = req.start.uri.as_sip() {
+    if let Some(sip_uri) = req.uri().as_sip() {
         sip_uri
-            .user
-            .as_ref()
+            .user()
             .map(|u| u.to_string())
             .unwrap_or_else(|| "unknown".to_string())
     } else {
@@ -574,14 +588,14 @@ fn extract_request_user(req: &Request) -> String {
 }
 
 fn extract_contact(req: &Request) -> String {
-    req.headers
+    req.headers()
         .get("Contact")
         .map(|v| v.to_string())
         .unwrap_or_else(|| "sip:unknown".to_string())
 }
 
 fn extract_expires(req: &Request) -> u64 {
-    req.headers
+    req.headers()
         .get("Expires")
         .and_then(|v| v.parse().ok())
         .unwrap_or(3600)

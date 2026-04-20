@@ -15,16 +15,23 @@ use forge_sdp::{
 fn create_audio_offer(addr: &str, port: u16, codecs: &[(u8, &str, u32)]) -> SessionDescription {
     let mut builder = sip_sdp::builder::SessionDescriptionBuilder::new()
         .origin("alice", "1", addr)
+        .unwrap()
         .session_name("Test Offer")
+        .unwrap()
         .connection(addr)
+        .unwrap()
         .time(0, 0);
 
     let mut media = sip_sdp::MediaDescription::audio(port);
     for (pt, name, rate) in codecs {
-        media = media.add_format(*pt).add_rtpmap(*pt, name, *rate, None);
+        media = media
+            .add_format(*pt)
+            .unwrap()
+            .add_rtpmap(*pt, name, *rate, None)
+            .unwrap();
     }
 
-    builder = builder.media(media);
+    builder = builder.media(media).unwrap();
     builder.build()
 }
 
@@ -71,7 +78,7 @@ fn test_codec_prioritization_offerer_preference() {
     let answer = SessionDescription::negotiate_answer(&offer, &local_caps, "10.0.0.1").unwrap();
 
     // First format should be PCMU (offerer's preference)
-    assert_eq!(answer.media[0].formats[0], 0); // PCMU first
+    assert_eq!(answer.media[0].formats[0].as_str(), "0"); // PCMU first
 }
 
 #[test]
@@ -140,17 +147,23 @@ fn test_no_common_codec_audio_only() {
 
 #[test]
 fn test_direction_sendrecv_to_sendrecv() {
+    let media = sip_sdp::MediaDescription::audio(5000)
+        .add_format(0)
+        .unwrap()
+        .add_rtpmap(0, "PCMU", 8000, None)
+        .unwrap()
+        .direction("sendrecv")
+        .unwrap();
     let offer = sip_sdp::builder::SessionDescriptionBuilder::new()
         .origin("alice", "1", "192.168.1.100")
+        .unwrap()
         .session_name("Test")
+        .unwrap()
         .connection("192.168.1.100")
+        .unwrap()
         .time(0, 0)
-        .media(
-            sip_sdp::MediaDescription::audio(5000)
-                .add_format(0)
-                .add_rtpmap(0, "PCMU", 8000, None)
-                .direction("sendrecv"),
-        )
+        .media(media)
+        .unwrap()
         .build();
 
     let profile = SdpProfile::audio_only();
@@ -169,30 +182,42 @@ fn test_direction_sendrecv_to_sendrecv() {
 
 #[test]
 fn test_direction_sendonly_to_recvonly() {
+    let offer_media = sip_sdp::MediaDescription::audio(5000)
+        .add_format(0)
+        .unwrap()
+        .add_rtpmap(0, "PCMU", 8000, None)
+        .unwrap()
+        .direction("sendonly")
+        .unwrap();
     let offer = sip_sdp::builder::SessionDescriptionBuilder::new()
         .origin("alice", "1", "192.168.1.100")
+        .unwrap()
         .session_name("Test")
+        .unwrap()
         .connection("192.168.1.100")
+        .unwrap()
         .time(0, 0)
-        .media(
-            sip_sdp::MediaDescription::audio(5000)
-                .add_format(0)
-                .add_rtpmap(0, "PCMU", 8000, None)
-                .direction("sendonly"),
-        )
+        .media(offer_media)
+        .unwrap()
         .build();
 
+    let caps_media = sip_sdp::MediaDescription::audio(6000)
+        .add_format(0)
+        .unwrap()
+        .add_rtpmap(0, "PCMU", 8000, None)
+        .unwrap()
+        .direction("sendrecv")
+        .unwrap();
     let local_caps = sip_sdp::builder::SessionDescriptionBuilder::new()
         .origin("bob", "1", "10.0.0.1")
+        .unwrap()
         .session_name("Capabilities")
+        .unwrap()
         .connection("10.0.0.1")
+        .unwrap()
         .time(0, 0)
-        .media(
-            sip_sdp::MediaDescription::audio(6000)
-                .add_format(0)
-                .add_rtpmap(0, "PCMU", 8000, None)
-                .direction("sendrecv"), // We support sendrecv, library will compute answer direction
-        )
+        .media(caps_media)
+        .unwrap()
         .build();
 
     let answer = SessionDescription::negotiate_answer(&offer, &local_caps, "10.0.0.1").unwrap();
@@ -212,21 +237,28 @@ fn test_direction_sendonly_to_recvonly() {
 
 #[test]
 fn test_audio_video_offer_audio_only_answer() {
+    let audio = sip_sdp::MediaDescription::audio(5000)
+        .add_format(0)
+        .unwrap()
+        .add_rtpmap(0, "PCMU", 8000, None)
+        .unwrap();
+    let video = sip_sdp::MediaDescription::video(5002)
+        .add_format(96)
+        .unwrap()
+        .add_rtpmap(96, "H264", 90000, None)
+        .unwrap();
     let offer = sip_sdp::builder::SessionDescriptionBuilder::new()
         .origin("alice", "1", "192.168.1.100")
+        .unwrap()
         .session_name("Test")
+        .unwrap()
         .connection("192.168.1.100")
+        .unwrap()
         .time(0, 0)
-        .media(
-            sip_sdp::MediaDescription::audio(5000)
-                .add_format(0)
-                .add_rtpmap(0, "PCMU", 8000, None),
-        )
-        .media(
-            sip_sdp::MediaDescription::video(5002)
-                .add_format(96)
-                .add_rtpmap(96, "H264", 90000, None),
-        )
+        .media(audio)
+        .unwrap()
+        .media(video)
+        .unwrap()
         .build();
 
     let profile = SdpProfile::audio_only();
@@ -254,11 +286,17 @@ fn test_audio_video_offer_audio_only_answer() {
 fn test_extract_codecs_from_media() {
     let media = sip_sdp::MediaDescription::audio(5000)
         .add_format(0)
+        .unwrap()
         .add_format(8)
+        .unwrap()
         .add_format(111)
+        .unwrap()
         .add_rtpmap(0, "PCMU", 8000, None)
+        .unwrap()
         .add_rtpmap(8, "PCMA", 8000, None)
-        .add_rtpmap(111, "opus", 48000, Some("2"));
+        .unwrap()
+        .add_rtpmap(111, "opus", 48000, Some("2"))
+        .unwrap();
 
     let codecs = helpers::extract_codecs(&media);
 
@@ -276,9 +314,13 @@ fn test_extract_codecs_from_media() {
 fn test_extract_primary_codec() {
     let media = sip_sdp::MediaDescription::audio(5000)
         .add_format(0)
+        .unwrap()
         .add_format(8)
+        .unwrap()
         .add_rtpmap(0, "PCMU", 8000, None)
-        .add_rtpmap(8, "PCMA", 8000, None);
+        .unwrap()
+        .add_rtpmap(8, "PCMA", 8000, None)
+        .unwrap();
 
     let primary = helpers::extract_primary_codec(&media).unwrap();
 
@@ -290,9 +332,13 @@ fn test_extract_primary_codec() {
 fn test_find_dtmf_codec() {
     let media = sip_sdp::MediaDescription::audio(5000)
         .add_format(0)
+        .unwrap()
         .add_format(101)
+        .unwrap()
         .add_rtpmap(0, "PCMU", 8000, None)
-        .add_rtpmap(101, "telephone-event", 8000, None);
+        .unwrap()
+        .add_rtpmap(101, "telephone-event", 8000, None)
+        .unwrap();
 
     let dtmf = helpers::find_dtmf_codec(&media).unwrap();
 
@@ -502,21 +548,28 @@ fn test_get_audio_codec_from_negotiated_sdp() {
 
 #[test]
 fn test_find_media_by_type() {
+    let audio = sip_sdp::MediaDescription::audio(5000)
+        .add_format(0)
+        .unwrap()
+        .add_rtpmap(0, "PCMU", 8000, None)
+        .unwrap();
+    let video = sip_sdp::MediaDescription::video(5002)
+        .add_format(96)
+        .unwrap()
+        .add_rtpmap(96, "H264", 90000, None)
+        .unwrap();
     let sdp = sip_sdp::builder::SessionDescriptionBuilder::new()
         .origin("alice", "1", "192.168.1.100")
+        .unwrap()
         .session_name("Test")
+        .unwrap()
         .connection("192.168.1.100")
+        .unwrap()
         .time(0, 0)
-        .media(
-            sip_sdp::MediaDescription::audio(5000)
-                .add_format(0)
-                .add_rtpmap(0, "PCMU", 8000, None),
-        )
-        .media(
-            sip_sdp::MediaDescription::video(5002)
-                .add_format(96)
-                .add_rtpmap(96, "H264", 90000, None),
-        )
+        .media(audio)
+        .unwrap()
+        .media(video)
+        .unwrap()
         .build();
 
     let audio = sdp.find_media(MediaType::Audio).unwrap();

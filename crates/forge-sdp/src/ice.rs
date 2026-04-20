@@ -352,7 +352,9 @@ mod tests {
     fn test_set_ice_credentials() {
         let mut sdp = SessionDescriptionBuilder::new()
             .origin("test", "12345", "192.168.1.1")
+            .unwrap()
             .session_name("Test")
+            .unwrap()
             .build();
 
         sdp.set_ice_credentials("abcd1234", "password123456789012345678");
@@ -366,7 +368,9 @@ mod tests {
     fn test_ice_options() {
         let mut sdp = SessionDescriptionBuilder::new()
             .origin("test", "12345", "192.168.1.1")
+            .unwrap()
             .session_name("Test")
+            .unwrap()
             .build();
 
         sdp.add_ice_option("trickle");
@@ -415,7 +419,9 @@ mod tests {
     fn test_rejects_invalid_ice_credentials() {
         let mut sdp = SessionDescriptionBuilder::new()
             .origin("test", "12345", "192.168.1.1")
+            .unwrap()
             .session_name("Test")
+            .unwrap()
             .build();
 
         sdp.set_ice_credentials("bad\r\nvalue", "password123456789012345678");
@@ -429,7 +435,9 @@ mod tests {
     fn test_rejects_invalid_ice_option_and_candidate() {
         let mut sdp = SessionDescriptionBuilder::new()
             .origin("test", "12345", "192.168.1.1")
+            .unwrap()
             .session_name("Test")
+            .unwrap()
             .build();
 
         sdp.add_ice_option("trickle\r\nfoo");

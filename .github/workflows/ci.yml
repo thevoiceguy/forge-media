@@ -147,7 +147,17 @@ jobs:
           components: rustfmt
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        # `cargo fmt --all` and `cargo fmt` both follow path-dependencies, which
+        # in this workspace means recursing into the `external/siphon-rs`
+        # submodule. We only own our workspace members, so iterate them
+        # explicitly and skip any crate living under external/.
+        run: |
+          set -eo pipefail
+          members=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.manifest_path | contains("external/") | not) | .name')
+          for pkg in $members; do
+            cargo fmt -p "$pkg" -- --check
+          done
 
   build:
     name: Build

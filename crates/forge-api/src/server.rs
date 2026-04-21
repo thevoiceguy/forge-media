@@ -29,6 +29,19 @@ pub struct ApiServerConfig {
     pub allowed_origins: Vec<String>,
     pub disable_auth: bool,
     pub auth_tokens: Vec<String>,
+    /// Admin-scoped bearer tokens. These grant `TokenScope::Admin` and are
+    /// required for cluster-level operations (HA failover, drain). Keep
+    /// this list separate from `auth_tokens` so that Operator-scoped tokens
+    /// — which are held by call-control code on the hot path — cannot
+    /// trigger cluster-disrupting operations (audit finding C6).
+    pub admin_tokens: Vec<String>,
+    /// Optional separate listener that only serves admin routes. When
+    /// `Some`, the process additionally binds this address and exposes
+    /// admin endpoints there so operators can firewall-restrict the admin
+    /// surface to internal VIPs / management networks. When `None`, admin
+    /// endpoints are served on `bind_addr` and protected purely by scope
+    /// enforcement (still safe — admin scope is required).
+    pub admin_bind: Option<SocketAddr>,
     pub rate_limit_requests_per_window: usize,
     pub rate_limit_window_secs: u64,
     pub trusted_proxies: Vec<IpAddr>, // IPs allowed to set X-Forwarded-For
@@ -62,6 +75,8 @@ impl Default for ApiServerConfig {
             allowed_origins: vec![],
             disable_auth: false,
             auth_tokens: vec![uuid::Uuid::new_v4().to_string()],
+            admin_tokens: Vec::new(),
+            admin_bind: None,
             rate_limit_requests_per_window: 120,
             rate_limit_window_secs: 60,
             trusted_proxies: Vec::new(), // No proxies trusted by default
@@ -276,7 +291,33 @@ impl ApiServer {
             #[cfg(feature = "ha")]
             ha_manager.clone(),
         ));
-        let auth_config = middleware::auth::AuthConfig::new(config.auth_tokens.clone());
+        // Build the auth config with Operator-scoped tokens from `auth_tokens`
+        // and Admin-scoped tokens from `admin_tokens`. Separating the two
+        // ensures the call-control path (which uses operator tokens) cannot
+        // trigger cluster-disrupting admin operations (audit finding C6).
+        let mut scoped_tokens: Vec<middleware::auth::Token> = config
+            .auth_tokens
+            .iter()
+            .cloned()
+            .map(middleware::auth::Token::operator)
+            .collect();
+        for admin in &config.admin_tokens {
+            scoped_tokens.push(middleware::auth::Token::admin(admin.clone()));
+        }
+        // If no admin tokens are configured and at least one operator token
+        // exists, treat the operator tokens as also admin-capable for
+        // backwards compatibility. Emit a warning so operators notice.
+        if config.admin_tokens.is_empty() && !config.auth_tokens.is_empty() {
+            warn!(
+                "No admin_tokens configured; operator tokens will also satisfy \
+                 Admin-scope endpoints. Configure a separate `admin_tokens` \
+                 list to harden (audit finding C6)."
+            );
+            for op in &config.auth_tokens {
+                scoped_tokens.push(middleware::auth::Token::admin(op.clone()));
+            }
+        }
+        let auth_config = middleware::auth::AuthConfig::from_tokens(scoped_tokens);
         let rate_limiter = middleware::RateLimiter::new(
             config.rate_limit_requests_per_window,
             Duration::from_secs(config.rate_limit_window_secs),
@@ -406,13 +447,12 @@ impl ApiServer {
         Ok(Some(config))
     }
 
-    /// Build the router with all middleware and routes
-    fn build_router(&self) -> Router {
-        let mut router = routes::create_router()
+    /// Build a Router from a state-coupled base, layering middleware and CORS.
+    fn layer_middleware(&self, base: Router<Arc<AppState>>) -> Router {
+        let mut router = base
             .with_state(self.state.clone())
             .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024)); // 10 MB limit
 
-        // Add middleware
         let middleware_stack = ServiceBuilder::new()
             .layer(Extension(self.rate_limiter.clone()))
             .layer(Extension(self.auth_config.clone()))
@@ -424,7 +464,6 @@ impl ApiServer {
 
         router = router.layer(middleware_stack);
 
-        // Add CORS if enabled
         if self.config.enable_cors {
             if self.config.allowed_origins.is_empty() {
                 info!("CORS enabled but no allowed origins configured; skipping CORS layer");
@@ -434,6 +473,22 @@ impl ApiServer {
         }
 
         router
+    }
+
+    /// Build the main router (with all routes) or the public-only router
+    /// (when a separate admin listener is configured).
+    fn build_router(&self) -> Router {
+        let base = if self.config.admin_bind.is_some() {
+            routes::create_public_router()
+        } else {
+            routes::create_router()
+        };
+        self.layer_middleware(base)
+    }
+
+    /// Build the admin-only router. Only used when `admin_bind` is set.
+    fn build_admin_router(&self) -> Router {
+        self.layer_middleware(routes::create_admin_router())
     }
 
     /// Start the API server
@@ -482,6 +537,30 @@ impl ApiServer {
             }
         };
 
+        // Optionally start an admin-only listener (audit finding C6).
+        // When `admin_bind` is set the main listener does not serve admin
+        // routes; they are only reachable here.
+        let admin_server: Option<
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), std::io::Error>> + Send>>,
+        > = if let Some(admin_addr) = self.config.admin_bind {
+            let admin_router = self.build_admin_router();
+            info!("✓ Admin listener bound on {}", admin_addr);
+            let admin_listener = TcpListener::bind(admin_addr).await?;
+            Some(Box::pin(async move {
+                axum::serve(
+                    admin_listener,
+                    admin_router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .map_err(|e| {
+                    error!("Admin server error: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                })
+            }))
+        } else {
+            None
+        };
+
         // Optionally start HTTPS
         if let Some(tls) = tls_config {
             let https_addr = self.config.https_bind.unwrap_or(self.config.bind_addr);
@@ -506,10 +585,18 @@ impl ApiServer {
             };
 
             info!("Running both HTTP and HTTPS servers");
-            tokio::try_join!(http_server, https).map(|_| ())
+            if let Some(admin) = admin_server {
+                tokio::try_join!(http_server, https, admin).map(|_| ())
+            } else {
+                tokio::try_join!(http_server, https).map(|_| ())
+            }
         } else {
             info!("TLS disabled; HTTPS listener not started");
-            http_server.await
+            if let Some(admin) = admin_server {
+                tokio::try_join!(http_server, admin).map(|_| ())
+            } else {
+                http_server.await
+            }
         }
     }
 
@@ -571,6 +658,30 @@ impl ApiServer {
             }
         };
 
+        // Optional admin listener (audit finding C6)
+        let admin_server: Option<
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), std::io::Error>> + Send>>,
+        > = if let Some(admin_addr) = self.config.admin_bind {
+            let admin_router = self.build_admin_router();
+            info!("✓ Admin listener bound on {}", admin_addr);
+            let admin_listener = TcpListener::bind(admin_addr).await?;
+            let shutdown = shutdown_notify.clone();
+            Some(Box::pin(async move {
+                axum::serve(
+                    admin_listener,
+                    admin_router.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .with_graceful_shutdown(async move { shutdown.notified().await })
+                .await
+                .map_err(|e| {
+                    error!("Admin server error: {}", e);
+                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                })
+            }))
+        } else {
+            None
+        };
+
         let result = if let Some(tls) = tls_config {
             let https_addr = self.config.https_bind.unwrap_or(self.config.bind_addr);
 
@@ -591,10 +702,18 @@ impl ApiServer {
                 }
             };
 
-            tokio::try_join!(http_server, https_server).map(|_| ())
+            if let Some(admin) = admin_server {
+                tokio::try_join!(http_server, https_server, admin).map(|_| ())
+            } else {
+                tokio::try_join!(http_server, https_server).map(|_| ())
+            }
         } else {
             info!("TLS disabled; HTTPS listener not started");
-            http_server.await
+            if let Some(admin) = admin_server {
+                tokio::try_join!(http_server, admin).map(|_| ())
+            } else {
+                http_server.await
+            }
         };
 
         // Stop session timeout monitoring on shutdown

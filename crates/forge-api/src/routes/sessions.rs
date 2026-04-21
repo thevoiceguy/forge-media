@@ -11,6 +11,7 @@ use std::sync::Arc;
 use validator::Validate;
 
 use crate::error::{ApiError, ApiResult};
+use crate::middleware::auth::{RequireOperator, RequireReadOnly};
 use crate::response::{created, no_content, success, ApiSuccess};
 
 /// Request to create a new session
@@ -84,6 +85,34 @@ pub struct SessionListResponse {
     pub count: usize,
 }
 
+/// Map an arbitrary codec name (from the peer's SDP `a=rtpmap`) onto a
+/// fixed allowlist of labels for Prometheus counters. Anything outside the
+/// list becomes `"other"`. This is the defense for audit finding C7: the
+/// counter label space is now bounded and cannot be poisoned by a crafted
+/// SDP offer.
+///
+/// The allowlist matches the codec families the engine actually implements
+/// (see `forge_codecs`). Comparison is case-insensitive because SDP
+/// `rtpmap` casing varies between stacks.
+pub fn canonical_codec_label(raw: &str) -> &'static str {
+    match raw.to_ascii_uppercase().as_str() {
+        "OPUS" => "opus",
+        "PCMU" | "G711U" | "G711MU" | "MULAW" => "pcmu",
+        "PCMA" | "G711A" | "ALAW" => "pcma",
+        "G722" => "g722",
+        "G729" | "G729A" | "G729B" => "g729",
+        "ILBC" => "ilbc",
+        "CN" | "COMFORTNOISE" => "cn",
+        "TELEPHONE-EVENT" => "telephone-event",
+        "RED" => "red",
+        "VP8" => "vp8",
+        "VP9" => "vp9",
+        "H264" => "h264",
+        "AV1" => "av1",
+        _ => "other",
+    }
+}
+
 /// Application state with session manager
 #[derive(Clone)]
 pub struct AppState {
@@ -154,6 +183,7 @@ impl AppState {
 /// POST /v1/sessions
 #[tracing::instrument(skip(state, request), fields(call_id = ?request.call_id))]
 async fn create_session(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateSessionRequest>,
 ) -> ApiResult<axum::response::Response> {
@@ -242,9 +272,21 @@ async fn create_session(
                 .collect();
             if !codec_names.is_empty() {
                 negotiated_codecs.insert("audio".to_string(), codec_names.clone());
-                // Record metrics for each negotiated codec
+                // Record metrics for each negotiated codec.
+                //
+                // Audit finding C7: the counter label was the raw codec name
+                // from the peer's SDP. That's attacker-controlled high-
+                // cardinality input — an adversary can emit SDPs with
+                // unbounded unique `a=rtpmap` names and bloat the Prometheus
+                // registry until the process runs out of memory. Map every
+                // codec name through a closed enum of known values and send
+                // anything unexpected to a fixed "other" bucket.
                 for codec_name in &codec_names {
-                    counter!("sdp_codecs_negotiated_total", 1, "codec" => codec_name.clone());
+                    counter!(
+                        "sdp_codecs_negotiated_total",
+                        1,
+                        "codec" => canonical_codec_label(codec_name)
+                    );
                 }
             }
 
@@ -413,6 +455,7 @@ async fn create_session(
 /// GET /v1/sessions/{id}
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn get_session(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<ApiSuccess<SessionResponse>> {
@@ -463,6 +506,7 @@ async fn get_session(
 /// DELETE /v1/sessions/{id}
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn delete_session(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
@@ -484,6 +528,7 @@ async fn delete_session(
 ///
 /// GET /v1/sessions
 async fn list_sessions(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<ApiSuccess<SessionListResponse>> {
     tracing::info!("Listing sessions");
@@ -524,6 +569,7 @@ async fn list_sessions(
 /// POST /v1/sessions/{id}/start
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn start_session(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<ApiSuccess<SessionResponse>> {
@@ -581,6 +627,44 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::util::ServiceExt as _;
 
+    // C7 regression: the Prometheus `codec` label must map to a fixed,
+    // bounded set of strings regardless of what arrives on the wire.
+    #[test]
+    fn test_canonical_codec_label_known_values() {
+        assert_eq!(canonical_codec_label("opus"), "opus");
+        assert_eq!(canonical_codec_label("Opus"), "opus");
+        assert_eq!(canonical_codec_label("OPUS"), "opus");
+        assert_eq!(canonical_codec_label("PCMU"), "pcmu");
+        assert_eq!(canonical_codec_label("mulaw"), "pcmu");
+        assert_eq!(canonical_codec_label("PCMA"), "pcma");
+        assert_eq!(canonical_codec_label("G722"), "g722");
+        assert_eq!(canonical_codec_label("G729"), "g729");
+        assert_eq!(canonical_codec_label("G729A"), "g729");
+        assert_eq!(canonical_codec_label("telephone-event"), "telephone-event");
+    }
+
+    #[test]
+    fn test_canonical_codec_label_rejects_attacker_input() {
+        // Long / random / punctuation strings must collapse to "other",
+        // preventing label-cardinality DoS.
+        for crafted in [
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "my-custom-codec-name",
+            "!@#$%^&*()",
+            "\u{1F4A3}", // emoji
+            "opus2",
+            "opus/48000/2", // full rtpmap value
+            "",
+        ] {
+            assert_eq!(
+                canonical_codec_label(crafted),
+                "other",
+                "crafted input `{}` must not reach Prometheus verbatim",
+                crafted
+            );
+        }
+    }
+
     fn test_state_with_ports(min_port: u16, max_port: u16) -> Arc<AppState> {
         let port_pool_config = forge_rtp::PortPoolConfig::new(min_port, max_port).unwrap();
         let session_manager_config = forge_engine::SessionManagerConfig {
@@ -609,9 +693,24 @@ mod tests {
         test_state_with_ports(base, base + 1000)
     }
 
+    /// Wrap a stateful router with the auth layer stack configured with
+    /// an empty token list. The middleware then treats each request as
+    /// auth-disabled and stamps an Admin-scoped `AuthContext`, so the
+    /// scope extractors let the handlers execute.
+    fn with_auth(router: axum::Router<Arc<AppState>>, state: Arc<AppState>) -> axum::Router {
+        let auth_config = crate::middleware::auth::AuthConfig::new(Vec::<String>::new());
+        router
+            .with_state(state)
+            .layer(axum::Extension(auth_config))
+            .layer(axum::middleware::from_fn(
+                crate::middleware::auth::auth_middleware,
+            ))
+    }
+
     #[tokio::test]
     async fn test_create_session() {
-        let app = routes().with_state(test_state_with_ports(40000, 41000));
+        let state = test_state_with_ports(40000, 41000);
+        let app = with_auth(routes(), state);
 
         let request_body = serde_json::json!({
             "call_id": "test-123"
@@ -634,7 +733,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_sessions() {
-        let app = routes().with_state(test_state_with_ports(41000, 42000));
+        let state = test_state_with_ports(41000, 42000);
+        let app = with_auth(routes(), state);
 
         let response = app
             .oneshot(
@@ -668,7 +768,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = routes().with_state(state);
+        let app = with_auth(routes(), state);
 
         let response = app
             .oneshot(
@@ -702,7 +802,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = routes().with_state(state);
+        let app = with_auth(routes(), state);
 
         let response = app
             .oneshot(

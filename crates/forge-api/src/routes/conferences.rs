@@ -11,6 +11,7 @@ use uuid::Uuid;
 use validator::Validate;
 
 use crate::error::{ApiError, ApiResult};
+use crate::middleware::auth::{RequireOperator, RequireReadOnly};
 use crate::response::{created, no_content, success, ApiSuccess};
 use crate::routes::sessions::AppState;
 
@@ -245,6 +246,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 /// GET /v1/conferences
 #[tracing::instrument(skip(state))]
 async fn list_rooms(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<ApiSuccess<RoomListResponse>>> {
     tracing::info!("API request to list conference rooms");
@@ -281,6 +283,7 @@ async fn list_rooms(
 /// POST /v1/conferences
 #[tracing::instrument(skip(state, request), fields(room_id = ?request.room_id))]
 async fn create_room(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateRoomRequest>,
 ) -> ApiResult<axum::response::Response> {
@@ -312,6 +315,7 @@ async fn create_room(
 /// GET /v1/conferences/{room_id}
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn get_room(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<Json<ApiSuccess<RoomResponse>>> {
@@ -337,6 +341,7 @@ async fn get_room(
 /// DELETE /v1/conferences/{room_id}
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn delete_room(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
@@ -355,6 +360,7 @@ async fn delete_room(
 /// POST /v1/conferences/{room_id}/participants
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = ?request.participant_id))]
 async fn add_participant(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
     Json(request): Json<AddParticipantRequest>,
@@ -391,6 +397,7 @@ async fn add_participant(
 /// POST /v1/conferences/{room_id}/announcement
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, prompt = ?request.prompt))]
 async fn play_announcement(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
     Json(request): Json<PlayAnnouncementRequest>,
@@ -425,6 +432,7 @@ async fn play_announcement(
 /// DELETE /v1/conferences/{room_id}/participants/{participant_id}
 #[tracing::instrument(skip(state), fields(room_id = %room_id, participant_id = %participant_id))]
 async fn remove_participant(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path((room_id, participant_id)): Path<(String, String)>,
 ) -> ApiResult<axum::response::Response> {
@@ -454,6 +462,7 @@ async fn remove_participant(
 /// POST /v1/conferences/{room_id}/recording
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, output_path = ?request.output_path, codec = ?request.codec))]
 async fn start_recording(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
     Json(request): Json<StartRecordingRequest>,
@@ -531,6 +540,7 @@ async fn start_recording(
 /// DELETE /v1/conferences/{room_id}/recording
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn stop_recording(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
@@ -573,6 +583,7 @@ async fn stop_recording(
 /// POST /v1/conferences/{room_id}/participant-recording
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = %request.participant_id))]
 async fn start_participant_rec(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
     Json(request): Json<StartParticipantRecordingRequest>,
@@ -643,6 +654,7 @@ async fn start_participant_rec(
 /// DELETE /v1/conferences/{room_id}/participant-recording
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id))]
 async fn stop_participant_rec(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
     Json(request): Json<serde_json::Value>,
@@ -708,6 +720,7 @@ async fn stop_participant_rec(
 /// GET /v1/recordings
 #[tracing::instrument(skip(state))]
 async fn list_recordings(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<ApiSuccess<RecordingListResponse>>> {
     tracing::info!("API request to list recordings");
@@ -732,6 +745,7 @@ async fn list_recordings(
 /// GET /v1/recordings/{id}
 #[tracing::instrument(skip(state), fields(recording_id = %recording_id))]
 async fn get_recording(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(recording_id): Path<String>,
 ) -> ApiResult<Json<ApiSuccess<RecordingResponse>>> {
@@ -752,6 +766,7 @@ async fn get_recording(
 /// DELETE /v1/recordings/{id}
 #[tracing::instrument(skip(state), fields(recording_id = %recording_id))]
 async fn delete_recording(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(recording_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
@@ -861,6 +876,7 @@ fn resolve_prompt_path(base_dir: &FsPath, requested: &str) -> Result<PathBuf, St
 /// GET /v1/conferences/{room_id}/participants/{participant_id}/metadata
 #[tracing::instrument(skip(state), fields(room_id = %room_id, participant_id = %participant_id))]
 async fn get_participant_metadata(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path((room_id, participant_id)): Path<(String, String)>,
 ) -> ApiResult<Json<ApiSuccess<ParticipantMetadataResponse>>> {
@@ -919,6 +935,7 @@ async fn get_participant_metadata(
 /// GET /v1/conferences/{room_id}/participants/metadata
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn get_all_participants_metadata(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<Json<ApiSuccess<ParticipantMetadataListResponse>>> {
@@ -975,6 +992,7 @@ async fn get_all_participants_metadata(
 /// PUT /v1/conferences/{room_id}/participants/{participant_id}/state
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = %participant_id))]
 async fn update_participant_state(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path((room_id, participant_id)): Path<(String, String)>,
     Json(request): Json<UpdateParticipantStateRequest>,
@@ -1044,6 +1062,7 @@ async fn update_participant_state(
 /// POST /v1/conferences/{room_id}/configure
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id))]
 async fn configure_room(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
     Json(request): Json<ConfigureRoomRequest>,
@@ -1100,6 +1119,7 @@ async fn configure_room(
 /// GET /v1/conferences/{room_id}/config
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn get_room_config(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<Json<ApiSuccess<RoomConfigResponse>>> {
@@ -1138,6 +1158,7 @@ async fn get_room_config(
 /// GET /v1/conferences/{room_id}/participants
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn list_participants_with_status(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<Json<ApiSuccess<ParticipantDetailListResponse>>> {
@@ -1177,6 +1198,7 @@ async fn list_participants_with_status(
 /// GET /v1/conferences/{room_id}/waiting
 #[tracing::instrument(skip(state), fields(room_id = %room_id))]
 async fn list_waiting_participants(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<Json<ApiSuccess<ParticipantDetailListResponse>>> {
@@ -1215,6 +1237,7 @@ async fn list_waiting_participants(
 /// POST /v1/conferences/{room_id}/participants/{participant_id}/promote
 #[tracing::instrument(skip(state, request), fields(room_id = %room_id, participant_id = %participant_id))]
 async fn promote_participant(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path((room_id, participant_id)): Path<(String, String)>,
     Json(request): Json<PromoteParticipantRequest>,
@@ -1292,7 +1315,7 @@ mod tests {
     #[tokio::test]
     async fn test_create_and_get_room() {
         let state = create_test_state();
-        let app = routes().with_state(state.clone());
+        let app = crate::middleware::auth::wrap_for_tests(routes(), state.clone());
 
         // Create room
         let request = Request::builder()
@@ -1322,7 +1345,7 @@ mod tests {
         state.conference_bridge.create_room("room-1", None).unwrap();
         state.conference_bridge.create_room("room-2", None).unwrap();
 
-        let app = routes().with_state(state);
+        let app = crate::middleware::auth::wrap_for_tests(routes(), state);
 
         let request = Request::builder()
             .method("GET")

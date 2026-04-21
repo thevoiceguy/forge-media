@@ -12,13 +12,32 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::sessions::AppState;
+use crate::middleware::auth::{RequireAdmin, RequireReadOnly};
 
-/// Create HA routes
+/// Create HA routes (all endpoints: status + admin + health).
+///
+/// Served on the main listener when `admin_bind` is not configured.
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/ha/status", get(get_ha_status))
         .route("/ha/transfer-primary", post(transfer_primary))
         .route("/ha/health", get(health_probe))
+}
+
+/// HA routes that are safe for the public listener: status (read-only)
+/// and health (unauthenticated). Admin-only mutation endpoints are
+/// served by [`admin_routes`] instead.
+pub fn public_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/ha/status", get(get_ha_status))
+        .route("/ha/health", get(health_probe))
+}
+
+/// HA admin-only routes. Served on the admin listener when
+/// `ApiServerConfig::admin_bind` is set; otherwise rolled into the main
+/// router via [`routes`].
+pub fn admin_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/ha/transfer-primary", post(transfer_primary))
 }
 
 /// HA cluster status response
@@ -51,7 +70,10 @@ pub struct HAStatusResponse {
 /// - Health state
 /// - Session/conference counts
 /// - Failover history
-pub async fn get_ha_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_ha_status(
+    _auth: RequireReadOnly,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     #[cfg(feature = "ha")]
     {
         if let Some(ha_manager) = &state.ha_manager {
@@ -111,10 +133,19 @@ pub async fn get_ha_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// This endpoint allows operators to manually transfer primary role to another instance.
 /// The current primary will gracefully step down, allowing the standby to become primary.
 ///
+/// **Requires Admin scope.** (audit finding C6) HA failover disrupts the
+/// cluster and must not be triggerable by any bearer-token holder; keep
+/// admin tokens short-lived and rotate separately from operator tokens.
+/// For additional isolation, bind this listener to an admin-only interface
+/// via `ApiServerConfig::admin_bind`.
+///
 /// Returns:
 /// - 200 OK: Transfer initiated successfully
 /// - 503 Service Unavailable: HA not enabled or not currently primary
-pub async fn transfer_primary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn transfer_primary(
+    _auth: RequireAdmin,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     #[cfg(feature = "ha")]
     {
         if let Some(ha_manager) = &state.ha_manager {

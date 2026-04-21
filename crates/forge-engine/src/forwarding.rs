@@ -1,6 +1,8 @@
 //! RTP packet forwarding engine
 
 use crate::session::{MediaSession, Participant, RecordingSide, SessionState};
+#[cfg(feature = "opus")]
+use forge_codecs::AudioCodec as _;
 use forge_core::{ForgeError, Result};
 use forge_rtp::rtcp::RtcpPacket;
 use metrics::{counter, histogram};
@@ -174,7 +176,7 @@ impl ForwardingEngine {
 
                     // Check for AI audio responses
                     if let Some(ai_manager) = session.ai_manager().await {
-                        if let Some(audio_response) = ai_manager.try_recv_audio_response(&call_id).await {
+                        if let Some(audio_response) = ai_manager.try_recv_audio_response(call_id).await {
                             Self::handle_ai_audio_response(
                                 &session,
                                 &sockets,
@@ -330,9 +332,15 @@ impl ForwardingEngine {
             let b = participant_b.read().await;
 
             // Check if source IP matches participant A's remote IP
-            let a_ip_match = a.remote_addr.map(|addr| addr.ip() == source_addr.ip()).unwrap_or(false);
+            let a_ip_match = a
+                .remote_addr
+                .map(|addr| addr.ip() == source_addr.ip())
+                .unwrap_or(false);
             // Check if source IP matches participant B's remote IP
-            let b_ip_match = b.remote_addr.map(|addr| addr.ip() == source_addr.ip()).unwrap_or(false);
+            let b_ip_match = b
+                .remote_addr
+                .map(|addr| addr.ip() == source_addr.ip())
+                .unwrap_or(false);
 
             if a_ip_match && !b_ip_match {
                 // Packet from A (IP matches A only), forward to B
@@ -361,31 +369,55 @@ impl ForwardingEngine {
                     }
                 }
             } else {
-                // Unknown sender - learn the endpoint
-                tracing::debug!(
-                    "Learning remote RTP endpoint for session {}: {}",
-                    call_id.0,
-                    source_addr
-                );
+                // Unknown sender - candidate for symmetric-RTP learning.
+                //
+                // Audit finding C3: an off-path attacker who guesses the local
+                // RTP port can race the legitimate peer's first packet and be
+                // latched as a participant. When the signaling layer has
+                // populated `latch_allowed_ips` for a participant, require the
+                // source IP to be on that allowlist before latching.
+                let source_ip = source_addr.ip();
 
-                // If participant A doesn't have an endpoint, assign it
-                if a.remote_addr.is_none() {
+                let a_can_latch = a.remote_addr.is_none()
+                    && a.latch_allowed_ips
+                        .as_ref()
+                        .map_or(true, |allowed| allowed.contains(&source_ip));
+                let b_can_latch = b.remote_addr.is_none()
+                    && b.latch_allowed_ips
+                        .as_ref()
+                        .map_or(true, |allowed| allowed.contains(&source_ip));
+
+                if a_can_latch {
+                    tracing::info!(
+                        "Learning remote RTP endpoint for session {} leg A: {}",
+                        call_id.0,
+                        source_addr
+                    );
+                    counter!("forge_rtp_latch_learned_total", 1);
                     drop(a);
                     drop(b);
                     participant_a.write().await.remote_addr = Some(source_addr);
                     (Side::A, Side::B)
-                } else if b.remote_addr.is_none() {
+                } else if b_can_latch {
+                    tracing::info!(
+                        "Learning remote RTP endpoint for session {} leg B: {}",
+                        call_id.0,
+                        source_addr
+                    );
+                    counter!("forge_rtp_latch_learned_total", 1);
                     drop(a);
                     drop(b);
                     participant_b.write().await.remote_addr = Some(source_addr);
                     (Side::B, Side::A)
                 } else {
-                    // Both endpoints known but packet from unknown source
+                    // Either both endpoints are already known, or the source IP
+                    // is not in any participant's allowlist. Drop the packet.
                     tracing::warn!(
-                        "Received RTP packet from unknown source {} for session {}",
+                        "Rejected RTP packet from {} for session {} (unknown source or disallowed by latch policy)",
                         source_addr,
                         call_id.0
                     );
+                    counter!("forge_rtp_latch_rejected_total", 1);
                     return;
                 }
             }
@@ -642,7 +674,8 @@ impl ForwardingEngine {
                         // (e.g., PCMU at 8kHz → G.722 at 16kHz, where 20ms PCMU becomes
                         // 320 samples that get split into two 160-sample G.722 frames).
                         let num_frames = transcoded_payloads.len();
-                        let frame_sizes: Vec<usize> = transcoded_payloads.iter().map(|f| f.len()).collect();
+                        let frame_sizes: Vec<usize> =
+                            transcoded_payloads.iter().map(|f| f.len()).collect();
                         let combined_payload: Vec<u8> = if num_frames == 1 {
                             transcoded_payloads.into_iter().next().unwrap()
                         } else {

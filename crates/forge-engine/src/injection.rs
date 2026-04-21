@@ -397,12 +397,12 @@ impl PlaybackManager {
         // Create RTP packet
         // Payload type 0 = PCMU (G.711 µ-law)
         let packet = forge_rtp::rtp::RtpPacket::build(
-            0,            // payload_type: PCMU
-            rtp_seq,      // sequence number
+            0,             // payload_type: PCMU
+            rtp_seq,       // sequence number
             rtp_timestamp, // timestamp
-            rtp_ssrc,     // SSRC
+            rtp_ssrc,      // SSRC
             Bytes::from(payload),
-            false,        // marker: false for continuous audio
+            false, // marker: false for continuous audio
         );
 
         // Serialize to bytes
@@ -483,44 +483,47 @@ fn pcm_to_ulaw(samples: &[i16]) -> Vec<u8> {
     const BIAS: i16 = 0x84; // 132 in decimal
     const CLIP: i16 = 32635;
 
-    samples.iter().map(|&sample| {
-        // Get sign and magnitude
-        let sign = if sample < 0 { 0x80 } else { 0x00 };
-        let mut magnitude = sample.abs().min(CLIP) as i16;
+    samples
+        .iter()
+        .map(|&sample| {
+            // Get sign and magnitude
+            let sign = if sample < 0 { 0x80 } else { 0x00 };
+            let mut magnitude = sample.abs().min(CLIP) as i16;
 
-        // Add bias
-        magnitude = magnitude + BIAS;
+            // Add bias
+            magnitude = magnitude + BIAS;
 
-        // Find segment (exponent) by finding the position of the highest set bit
-        let exponent = if magnitude < 256 {
-            0
-        } else if magnitude < 512 {
-            1
-        } else if magnitude < 1024 {
-            2
-        } else if magnitude < 2048 {
-            3
-        } else if magnitude < 4096 {
-            4
-        } else if magnitude < 8192 {
-            5
-        } else if magnitude < 16384 {
-            6
-        } else {
-            7
-        };
+            // Find segment (exponent) by finding the position of the highest set bit
+            let exponent = if magnitude < 256 {
+                0
+            } else if magnitude < 512 {
+                1
+            } else if magnitude < 1024 {
+                2
+            } else if magnitude < 2048 {
+                3
+            } else if magnitude < 4096 {
+                4
+            } else if magnitude < 8192 {
+                5
+            } else if magnitude < 16384 {
+                6
+            } else {
+                7
+            };
 
-        // Extract mantissa (4 bits after the segment bit)
-        let mantissa = if exponent == 0 {
-            (magnitude >> 4) & 0x0F
-        } else {
-            (magnitude >> (exponent + 3)) & 0x0F
-        };
+            // Extract mantissa (4 bits after the segment bit)
+            let mantissa = if exponent == 0 {
+                (magnitude >> 4) & 0x0F
+            } else {
+                (magnitude >> (exponent + 3)) & 0x0F
+            };
 
-        // Combine sign, exponent, and mantissa, then invert all bits
-        let encoded = sign | (exponent << 4) | (mantissa as u8);
-        encoded ^ 0xFF
-    }).collect()
+            // Combine sign, exponent, and mantissa, then invert all bits
+            let encoded = sign | (exponent << 4) | (mantissa as u8);
+            encoded ^ 0xFF
+        })
+        .collect()
 }
 
 impl Clone for PlaybackManager {
@@ -577,12 +580,22 @@ mod tests {
         let source2 = Box::new(ToneGenerator::silence(8000));
 
         let _handle1 = manager
-            .start_playback(call_id.clone(), source1, AudioTarget::ParticipantA, MixMode::Mix)
+            .start_playback(
+                call_id.clone(),
+                source1,
+                AudioTarget::ParticipantA,
+                MixMode::Mix,
+            )
             .await
             .unwrap();
 
         let _handle2 = manager
-            .start_playback(call_id.clone(), source2, AudioTarget::ParticipantB, MixMode::Mix)
+            .start_playback(
+                call_id.clone(),
+                source2,
+                AudioTarget::ParticipantB,
+                MixMode::Mix,
+            )
             .await
             .unwrap();
 

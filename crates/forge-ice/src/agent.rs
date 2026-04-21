@@ -253,7 +253,7 @@ impl IceAgent {
 
         // Sort pairs by priority (descending)
         self.candidate_pairs
-            .sort_by(|a, b| b.priority.cmp(&a.priority));
+            .sort_by_key(|pair| std::cmp::Reverse(pair.priority));
 
         info!("Formed {} candidate pairs", self.candidate_pairs.len());
     }

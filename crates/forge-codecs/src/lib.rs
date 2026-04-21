@@ -3,7 +3,18 @@
 //! Provides encoding and decoding for various audio codecs used in telephony
 //! and media processing: Opus, G.711 (µ-law/A-law), G.722, G.729.
 
+// Pre-existing lint tolerances:
+// - `dead_code`: g729.rs carries placeholder structs for a future pure-Rust
+//   implementation (currently FFI-backed by bcg729). Documented as reserved.
+// - Style lints that would require public-API changes to fix.
+#![allow(dead_code)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::needless_return)]
+#![allow(clippy::wrong_self_convention)]
+#![allow(clippy::should_implement_trait)]
+
 pub mod g711;
+#[cfg(feature = "g722")]
 pub mod g722;
 pub mod g729;
 pub mod opus;
@@ -167,7 +178,12 @@ pub fn create_codec(format: &AudioFormat) -> Result<Box<dyn AudioCodec>> {
             };
             Ok(Box::new(opus::OpusCodec::with_config(config)?))
         }
+        #[cfg(feature = "g722")]
         AudioCodecType::G722 => Ok(Box::new(g722::G722Codec::new(g722::G722BitRate::Rate64k))),
+        #[cfg(not(feature = "g722"))]
+        AudioCodecType::G722 => Err(CodecError::NotSupported(
+            "G.722 support not enabled. Compile with --features g722".to_string(),
+        )),
         AudioCodecType::G729 => Err(CodecError::NotSupported(
             "G.729 codec not yet implemented".to_string(),
         )),

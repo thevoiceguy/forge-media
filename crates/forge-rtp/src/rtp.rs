@@ -244,15 +244,21 @@ impl RtpExtension {
         }
 
         let profile = u16::from_be_bytes([data[0], data[1]]);
-        let length = u16::from_be_bytes([data[2], data[3]]) as usize * 4;
+        let length_words = u16::from_be_bytes([data[2], data[3]]) as usize;
+        let length = length_words
+            .checked_mul(4)
+            .ok_or_else(|| ForgeError::Rtp("Extension length overflow".into()))?;
 
-        if data.len() < 4 + length {
+        let total = 4usize
+            .checked_add(length)
+            .ok_or_else(|| ForgeError::Rtp("Extension length overflow".into()))?;
+        if data.len() < total {
             return Err(ForgeError::Rtp("Extension data truncated".into()));
         }
 
         Ok(Self {
             profile,
-            data: Bytes::copy_from_slice(&data[4..4 + length]),
+            data: Bytes::copy_from_slice(&data[4..total]),
         })
     }
 
@@ -294,5 +300,35 @@ mod tests {
         assert_eq!(seq, 0x1234);
         assert_eq!(ts, 1);
         assert_eq!(ssrc, 0xABCDEF12);
+    }
+
+    // C1 regression: malicious extension length must not bypass bounds check
+    // via arithmetic overflow. A length field of 0xFFFF means
+    // 0xFFFF * 4 = 262140 bytes of extension payload, which cannot exist in a
+    // short packet. Parser must reject this cleanly (no panic, no OOB read).
+    #[test]
+    fn test_rtp_extension_length_overflow_rejected() {
+        // Only the 4-byte extension header — no payload — with length field = 0xFFFF.
+        let bogus = [0x00, 0x00, 0xFF, 0xFF];
+        let res = RtpExtension::parse(&bogus);
+        assert!(res.is_err(), "malicious ext length must be rejected");
+    }
+
+    #[test]
+    fn test_rtp_extension_truncated_rejected() {
+        // Claim 1 word (4 bytes) of payload but provide none.
+        let bogus = [0x00, 0x00, 0x00, 0x01];
+        let res = RtpExtension::parse(&bogus);
+        assert!(res.is_err(), "truncated ext payload must be rejected");
+    }
+
+    #[test]
+    fn test_rtp_extension_valid_roundtrip() {
+        // Valid: profile=0xBEDE (one-byte RFC 8285 header), one word of payload.
+        let data = [0xBE, 0xDE, 0x00, 0x01, 0xAA, 0xBB, 0xCC, 0xDD];
+        let ext = RtpExtension::parse(&data).expect("valid extension must parse");
+        assert_eq!(ext.profile, 0xBEDE);
+        assert_eq!(ext.data.len(), 4);
+        assert_eq!(&ext.data[..], &[0xAA, 0xBB, 0xCC, 0xDD]);
     }
 }

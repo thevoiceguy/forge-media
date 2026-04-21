@@ -1284,6 +1284,8 @@ mod tests {
             std::env::temp_dir().join("forge-test-prompts"),
             forge_core::config::default_ai_allowed_endpoints(),
             Arc::new(forge_core::EventBus::new()),
+            #[cfg(feature = "ha")]
+            None,
         ))
     }
 

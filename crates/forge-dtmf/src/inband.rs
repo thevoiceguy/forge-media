@@ -643,9 +643,7 @@ mod tests {
         let events = detector.process_samples(&samples).unwrap();
 
         // Should have at least a Start event for digit 5
-        let start = events
-            .iter()
-            .find(|e| e.event_type == DtmfEventType::Start);
+        let start = events.iter().find(|e| e.event_type == DtmfEventType::Start);
         assert!(
             start.is_some(),
             "Expected Start event for digit 5, got: {:?}",
@@ -676,9 +674,7 @@ mod tests {
         let samples = generate_dtmf_tone(941, 1477, 8000, 160, 10, 0.15);
         let events = detector.process_samples(&samples).unwrap();
 
-        let start = events
-            .iter()
-            .find(|e| e.event_type == DtmfEventType::Start);
+        let start = events.iter().find(|e| e.event_type == DtmfEventType::Start);
         assert!(
             start.is_some(),
             "Expected Start event for # at 15% amplitude, got: {:?}",

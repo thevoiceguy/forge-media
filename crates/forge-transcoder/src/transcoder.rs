@@ -156,7 +156,12 @@ impl Transcoder {
             let max_abs = resampled.iter().map(|s| s.abs()).max().unwrap_or(0);
             tracing::trace!(
                 "Transcode: {} bytes -> {} decoded -> {} resampled (first={}, last={}, max={})",
-                input.len(), pcm_len, resampled.len(), first, last, max_abs
+                input.len(),
+                pcm_len,
+                resampled.len(),
+                first,
+                last,
+                max_abs
             );
         }
 

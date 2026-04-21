@@ -148,9 +148,15 @@ impl PinAuthenticator {
 
         // Check both PINs using constant-time comparison to prevent timing attacks.
         // Always evaluate both to avoid leaking which PIN type is configured.
-        let host_match = self.config.host_pin.as_ref()
+        let host_match = self
+            .config
+            .host_pin
+            .as_ref()
             .map_or(false, |host_pin| constant_time_eq(pin, host_pin));
-        let guest_match = self.config.guest_pin.as_ref()
+        let guest_match = self
+            .config
+            .guest_pin
+            .as_ref()
             .map_or(false, |guest_pin| constant_time_eq(pin, guest_pin));
 
         // Host PIN takes priority

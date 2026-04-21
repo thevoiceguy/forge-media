@@ -30,6 +30,8 @@ if-addrs = "0.13"
 rand = { workspace = true }
 hmac = "0.12"
 sha1 = "0.10"
+# Constant-time comparison for MESSAGE-INTEGRITY HMAC (audit finding C10)
+subtle = { workspace = true }
 
 # Utilities
 bytes = { workspace = true }

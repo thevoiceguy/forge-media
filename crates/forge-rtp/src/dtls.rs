@@ -261,10 +261,18 @@ impl DtlsContext {
             .set_cipher_list("ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384")
             .map_err(|e| ForgeError::Internal(format!("Failed to set cipher list: {}", e)))?;
 
-        // Configure SRTP protection profiles (for key export)
-        // SRTP_AES128_CM_SHA1_80 is the most widely supported
+        // Configure SRTP protection profiles (for key export). Offer the
+        // AEAD GCM profiles first so peers that support them negotiate
+        // stronger crypto; fall back to legacy AES-CM_SHA1 for broad
+        // interoperability. `export_srtp_keys` sizes the exported keying
+        // material to the profile OpenSSL actually selected (audit C11).
         builder
-            .set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
+            .set_tlsext_use_srtp(
+                "SRTP_AEAD_AES_256_GCM:\
+                 SRTP_AEAD_AES_128_GCM:\
+                 SRTP_AES128_CM_SHA1_80:\
+                 SRTP_AES128_CM_SHA1_32",
+            )
             .map_err(|e| ForgeError::Internal(format!("Failed to set SRTP profiles: {}", e)))?;
 
         // Set verification mode
@@ -535,48 +543,79 @@ impl DtlsConnection {
     ///
     /// Uses RFC 5764 DTLS-SRTP key derivation to export keys for SRTP.
     /// Returns (client_key_material, server_key_material).
+    ///
+    /// Audit finding C11: the previous implementation exported a
+    /// hardcoded 60 bytes, which happens to fit AES_CM_128_HMAC_SHA1_80
+    /// (2 × (16 key + 14 salt) = 60) but silently truncates when
+    /// negotiating AES_256_GCM (2 × (32 key + 12 salt) = 88) and over-
+    /// allocates for AES_128_GCM. This method now queries the negotiated
+    /// SRTP profile from OpenSSL and exports exactly `2 × (key_len +
+    /// salt_len)` bytes, failing closed if the handshake didn't yield a
+    /// profile we know how to use.
     #[cfg(feature = "dtls")]
     pub fn export_srtp_keys(&self) -> Result<(SrtpKeyMaterial, SrtpKeyMaterial)> {
+        use openssl::srtp::SrtpProfileId;
+
         if self.state != DtlsState::Connected {
             return Err(ForgeError::Internal(
                 "DTLS not connected, cannot export keys".to_string(),
             ));
         }
 
-        // Export keying material using RFC 5764 label
-        // SRTP_AES128_CM_SHA1_80 uses:
-        // - 16 bytes master key
-        // - 14 bytes master salt
-        // Total: 30 bytes per direction = 60 bytes total
-        let label = "EXTRACTOR-dtls_srtp";
-        let mut key_material = vec![0u8; 60];
+        // Ask OpenSSL which SRTP profile was negotiated in the DTLS
+        // handshake's `use_srtp` extension (RFC 5764 §4.1.2).
+        let selected = self.ssl.selected_srtp_profile().ok_or_else(|| {
+            ForgeError::Internal(
+                "DTLS handshake completed without a negotiated SRTP profile".to_string(),
+            )
+        })?;
+        let profile = match selected.id() {
+            SrtpProfileId::SRTP_AES128_CM_SHA1_80 => SrtpProfile::Aes128CmHmacSha1_80,
+            SrtpProfileId::SRTP_AES128_CM_SHA1_32 => SrtpProfile::Aes128CmHmacSha1_32,
+            SrtpProfileId::SRTP_AEAD_AES_128_GCM => SrtpProfile::AeadAes128Gcm,
+            SrtpProfileId::SRTP_AEAD_AES_256_GCM => SrtpProfile::AeadAes256Gcm,
+            other => {
+                return Err(ForgeError::Internal(format!(
+                    "Unsupported negotiated SRTP profile: {:?}",
+                    other
+                )));
+            }
+        };
 
+        let key_len = profile.master_key_len();
+        let salt_len = profile.master_salt_len();
+        // Layout per RFC 5764 §4.2:
+        //   client_key | server_key | client_salt | server_salt
+        let total = 2 * (key_len + salt_len);
+        let mut key_material = vec![0u8; total];
+
+        let label = "EXTRACTOR-dtls_srtp";
         self.ssl
             .export_keying_material(&mut key_material, label, None)
             .map_err(|e| ForgeError::Internal(format!("Failed to export keys: {}", e)))?;
 
-        // Split into client and server keys
-        let client_master_key = key_material[0..16].to_vec();
-        let server_master_key = key_material[16..32].to_vec();
-        let client_master_salt = key_material[32..46].to_vec();
-        let server_master_salt = key_material[46..60].to_vec();
-
-        // Use AES_CM_128_HMAC_SHA1_80 profile (standard for WebRTC)
-        let profile = SrtpProfile::Aes128CmHmacSha1_80;
+        let client_master_key = key_material[0..key_len].to_vec();
+        let server_master_key = key_material[key_len..2 * key_len].to_vec();
+        let salt_base = 2 * key_len;
+        let client_master_salt = key_material[salt_base..salt_base + salt_len].to_vec();
+        let server_master_salt =
+            key_material[salt_base + salt_len..salt_base + 2 * salt_len].to_vec();
 
         let client_keys = SrtpKeyMaterial {
             master_key: client_master_key,
             master_salt: client_master_salt,
             profile,
         };
-
         let server_keys = SrtpKeyMaterial {
             master_key: server_master_key,
             master_salt: server_master_salt,
             profile,
         };
 
-        debug!("Exported SRTP keys from DTLS");
+        debug!(
+            "Exported DTLS-SRTP keys ({:?}: {}-byte key, {}-byte salt, {} bytes total)",
+            profile, key_len, salt_len, total
+        );
 
         Ok((client_keys, server_keys))
     }
@@ -623,6 +662,39 @@ mod tests {
         // Test server context
         let server_ctx = DtlsContext::new(cert.clone(), DtlsRole::Server);
         assert!(server_ctx.is_ok());
+    }
+
+    // C11 regression: the export layout must size itself to the
+    // negotiated profile. The previous hardcoded 60-byte buffer matched
+    // AES128_CM_SHA1_80 but silently under- or over-exported for the
+    // other three profiles. We can't run a real DTLS handshake in a unit
+    // test, but we can assert the per-profile byte budget this code path
+    // uses matches RFC 5764 / RFC 7714.
+    #[test]
+    fn test_srtp_profile_key_material_sizes() {
+        // (key, salt, total for two directions)
+        let cases = [
+            (SrtpProfile::Aes128CmHmacSha1_80, 16, 14, 60),
+            (SrtpProfile::Aes128CmHmacSha1_32, 16, 14, 60),
+            (SrtpProfile::AeadAes128Gcm, 16, 12, 56),
+            (SrtpProfile::AeadAes256Gcm, 32, 12, 88),
+        ];
+        for (profile, expect_key, expect_salt, expect_total) in cases {
+            assert_eq!(
+                profile.master_key_len(),
+                expect_key,
+                "{:?} key_len",
+                profile
+            );
+            assert_eq!(
+                profile.master_salt_len(),
+                expect_salt,
+                "{:?} salt_len",
+                profile
+            );
+            let total = 2 * (profile.master_key_len() + profile.master_salt_len());
+            assert_eq!(total, expect_total, "{:?} total export bytes", profile);
+        }
     }
 
     #[test]

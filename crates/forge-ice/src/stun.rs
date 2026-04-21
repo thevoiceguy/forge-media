@@ -4,7 +4,8 @@
 use bytes::{Buf, BufMut, BytesMut};
 use forge_core::{ForgeError, Result};
 use hmac::{Hmac, Mac};
-use rand::Rng;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use sha1::Sha1;
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -112,11 +113,17 @@ pub enum StunAttribute {
 }
 
 impl StunMessage {
-    /// Create a new STUN Binding Request
+    /// Create a new STUN Binding Request with a CSPRNG-derived transaction ID.
+    ///
+    /// RFC 8489 §6 requires transaction IDs to be unpredictable. Audit
+    /// finding C8: the previous implementation used `rand::thread_rng()`, a
+    /// ChaCha8-seeded PRNG that is deterministic after seed recovery. We use
+    /// `OsRng` (the OS CSPRNG — `getrandom(2)` on Linux, `BCryptGenRandom`
+    /// on Windows) so that an off-path attacker cannot predict an
+    /// outstanding transaction ID and forge a response.
     pub fn new_binding_request() -> Self {
-        let mut rng = rand::thread_rng();
         let mut transaction_id = [0u8; 12];
-        rng.fill(&mut transaction_id);
+        OsRng.fill_bytes(&mut transaction_id);
 
         Self {
             message_type: MessageType::BindingRequest,
@@ -208,6 +215,11 @@ impl StunMessage {
     /// using the provided key. This is used when receiving STUN messages to
     /// authenticate the sender.
     ///
+    /// The comparison is **constant-time** (`hmac::Mac::verify_slice` uses
+    /// `subtle::ConstantTimeEq` internally). Audit finding C10: the
+    /// previous `==` comparison leaked timing information an attacker
+    /// could use to probe valid signatures byte-by-byte.
+    ///
     /// # Arguments
     /// * `key` - The shared secret key for HMAC verification (typically the ICE password)
     ///
@@ -229,24 +241,19 @@ impl StunMessage {
         // Serialize message without FINGERPRINT and with zeroed MESSAGE-INTEGRITY
         let serialized = self.serialize_internal(false, Some([0u8; 20]));
 
-        // Calculate expected HMAC
-        let mut mac = Hmac::<Sha1>::new_from_slice(key).map_err(|e| {
+        // Constant-time compare via `verify_slice` (backed by `subtle`).
+        let mut verifier = Hmac::<Sha1>::new_from_slice(key).map_err(|e| {
             ForgeError::Ice(format!(
                 "Failed to create HMAC for MESSAGE-INTEGRITY verification: {}",
                 e
             ))
         })?;
-        mac.update(&serialized);
-
-        let result = mac.finalize().into_bytes();
-
-        // Compare received vs expected (constant-time comparison)
-        if received_integrity[..] == result[..20] {
-            Ok(true)
-        } else {
-            Err(ForgeError::Ice(
+        verifier.update(&serialized);
+        match verifier.verify_slice(&received_integrity[..]) {
+            Ok(()) => Ok(true),
+            Err(_) => Err(ForgeError::Ice(
                 "MESSAGE-INTEGRITY verification failed: HMAC mismatch".to_string(),
-            ))
+            )),
         }
     }
 
@@ -697,6 +704,113 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// Decision emitted by [`StunServer::handle_binding_request`] for an
+/// incoming STUN Binding Request.
+#[derive(Debug)]
+pub enum StunServerResponse {
+    /// Build and send a success response back to the peer.
+    Respond(StunMessage),
+    /// The request was malformed or failed integrity/authentication.
+    /// Drop silently — never echo or respond to off-path traffic (audit
+    /// finding C9: prevents the server from being used as an
+    /// amplification / reflection vector).
+    Drop(&'static str),
+}
+
+/// Authenticated STUN server — handles incoming Binding Requests for ICE
+/// connectivity checks.
+///
+/// Audit finding C9: a naive STUN responder that echoes XOR-MAPPED-ADDRESS
+/// for every incoming Binding Request turns the endpoint into a reflector
+/// with response > request amplification. This server type requires the
+/// incoming request to carry:
+///   * a correct `USERNAME` in the `remote_ufrag:local_ufrag` form,
+///   * a valid `MESSAGE-INTEGRITY` HMAC computed with the local ICE pwd,
+///   * a correct `FINGERPRINT` (RFC 8489 §14.7).
+///
+/// Requests failing any of those checks are silently dropped. Responses
+/// are only ever generated for requests that prove knowledge of the local
+/// ICE credentials, so an off-path attacker cannot solicit a response.
+pub struct StunServer {
+    /// Local ufrag — the peer's USERNAME must end in `:<local_ufrag>`.
+    local_ufrag: String,
+    /// Local password — used to verify MESSAGE-INTEGRITY on inbound
+    /// requests and to sign MESSAGE-INTEGRITY on outbound responses.
+    local_pwd: Vec<u8>,
+    /// Remote ufrag — the peer's USERNAME must start with `<remote_ufrag>:`.
+    remote_ufrag: String,
+}
+
+impl StunServer {
+    /// Create a new authenticated STUN server bound to a specific ICE
+    /// credential pair. Both ufrags and the local password must come from
+    /// the signaling channel (SDP `a=ice-ufrag` / `a=ice-pwd`).
+    pub fn new(local_ufrag: String, local_pwd: Vec<u8>, remote_ufrag: String) -> Self {
+        Self {
+            local_ufrag,
+            local_pwd,
+            remote_ufrag,
+        }
+    }
+
+    /// Inspect an incoming STUN packet and decide whether/how to respond.
+    ///
+    /// The caller should wire this up behind its inbound packet-dispatch
+    /// demux (STUN detection: first two bits 0, magic cookie at offset 4).
+    /// The request's `source` is used to populate XOR-MAPPED-ADDRESS on
+    /// the response.
+    pub fn handle_binding_request(&self, data: &[u8], source: SocketAddr) -> StunServerResponse {
+        let request = match StunMessage::parse(data) {
+            Ok(m) => m,
+            Err(_) => return StunServerResponse::Drop("malformed STUN packet"),
+        };
+
+        if request.message_type != MessageType::BindingRequest {
+            return StunServerResponse::Drop("not a Binding Request");
+        }
+
+        // USERNAME must be present and shaped `<remote_ufrag>:<local_ufrag>`.
+        let username = request.attributes.iter().find_map(|a| match a {
+            StunAttribute::Username(u) => Some(u.as_str()),
+            _ => None,
+        });
+        let username = match username {
+            Some(u) => u,
+            None => return StunServerResponse::Drop("missing USERNAME"),
+        };
+        let mut parts = username.splitn(2, ':');
+        let (req_remote, req_local) = match (parts.next(), parts.next()) {
+            (Some(l), Some(r)) => (l, r),
+            _ => return StunServerResponse::Drop("malformed USERNAME"),
+        };
+        if req_local != self.local_ufrag || req_remote != self.remote_ufrag {
+            return StunServerResponse::Drop("USERNAME does not match ICE credentials");
+        }
+
+        // MESSAGE-INTEGRITY: constant-time verify with the local password.
+        match request.verify_message_integrity(&self.local_pwd) {
+            Ok(true) => {}
+            _ => return StunServerResponse::Drop("invalid or missing MESSAGE-INTEGRITY"),
+        }
+
+        // Build the Binding Success Response mirroring the transaction ID.
+        let mut response = StunMessage {
+            message_type: MessageType::BindingResponse,
+            transaction_id: request.transaction_id,
+            attributes: Vec::new(),
+        };
+        response
+            .attributes
+            .push(StunAttribute::XorMappedAddress(source));
+        // Sign + fingerprint the response so the peer can verify it.
+        if response.add_message_integrity(&self.local_pwd).is_err() {
+            return StunServerResponse::Drop("failed to sign response");
+        }
+        response.add_fingerprint();
+        StunServerResponse::Respond(response)
+    }
+}
+
 /// STUN client for performing Binding requests
 pub struct StunClient {
     /// UDP socket for STUN communication
@@ -966,6 +1080,134 @@ mod tests {
             .attributes
             .iter()
             .any(|attr| matches!(attr, StunAttribute::IceControlling(0x123456789ABCDEF0))));
+    }
+
+    // C8 regression: transaction IDs must come from a CSPRNG and must not
+    // collide across successive builds in any practical sense.
+    #[test]
+    fn test_transaction_ids_are_unique_and_nonzero() {
+        use std::collections::HashSet;
+        let mut seen: HashSet<[u8; 12]> = HashSet::new();
+        for _ in 0..1024 {
+            let m = StunMessage::new_binding_request();
+            // Astronomically unlikely to be all-zero with a real CSPRNG.
+            assert!(m.transaction_id.iter().any(|b| *b != 0));
+            assert!(
+                seen.insert(m.transaction_id),
+                "collision in 1024 transaction IDs — CSPRNG not in use?"
+            );
+        }
+    }
+
+    // C10 regression: MESSAGE-INTEGRITY verification must be constant-time.
+    // We can't test timing directly here, but we *can* verify the behaviour
+    // is correct for a byte-flipped HMAC (which would fail
+    // short-circuit-compare earlier for leading-byte flips). Mostly a
+    // behavioural smoke test that we didn't break anything switching to
+    // `verify_slice`.
+    #[test]
+    fn test_message_integrity_rejects_per_byte_flip() {
+        let key = b"test-password";
+        for flip_byte in 0..20 {
+            let mut msg = StunMessage::new_binding_request();
+            msg.add_username("u:v".into());
+            msg.add_message_integrity(key).unwrap();
+            // Flip one byte of the HMAC.
+            if let Some(StunAttribute::MessageIntegrity(mi)) = msg
+                .attributes
+                .iter_mut()
+                .find(|a| matches!(a, StunAttribute::MessageIntegrity(_)))
+            {
+                mi[flip_byte] ^= 0x01;
+            }
+            let bytes = msg.serialize();
+            let parsed = StunMessage::parse(&bytes).unwrap();
+            assert!(
+                parsed.verify_message_integrity(key).is_err(),
+                "byte-{} flip was not detected",
+                flip_byte
+            );
+        }
+    }
+
+    // C9 regression: StunServer must reject requests lacking/wrong
+    // authentication instead of emitting a response (otherwise we're an
+    // open reflector).
+    #[test]
+    fn test_stun_server_rejects_unauthenticated() {
+        let server = StunServer::new(
+            "localuser".into(),
+            b"localpwd".to_vec(),
+            "remoteuser".into(),
+        );
+        let src = "192.0.2.5:1234".parse::<SocketAddr>().unwrap();
+
+        // (a) No MESSAGE-INTEGRITY, no USERNAME.
+        let mut m = StunMessage::new_binding_request();
+        m.add_fingerprint();
+        match server.handle_binding_request(&m.serialize(), src) {
+            StunServerResponse::Drop(_) => {}
+            StunServerResponse::Respond(_) => panic!("must not respond to unauthenticated req"),
+        }
+
+        // (b) Correct USERNAME but wrong MESSAGE-INTEGRITY key.
+        let mut m = StunMessage::new_binding_request();
+        m.add_username("remoteuser:localuser".into());
+        m.add_message_integrity(b"not-the-right-pwd").unwrap();
+        m.add_fingerprint();
+        match server.handle_binding_request(&m.serialize(), src) {
+            StunServerResponse::Drop(_) => {}
+            StunServerResponse::Respond(_) => panic!("must not respond to bad HMAC"),
+        }
+
+        // (c) Correct MESSAGE-INTEGRITY but wrong ufrag pair.
+        let mut m = StunMessage::new_binding_request();
+        m.add_username("remoteuser:someotherlocal".into());
+        m.add_message_integrity(b"localpwd").unwrap();
+        m.add_fingerprint();
+        match server.handle_binding_request(&m.serialize(), src) {
+            StunServerResponse::Drop(_) => {}
+            StunServerResponse::Respond(_) => panic!("must not respond to mismatched USERNAME"),
+        }
+
+        // (d) Not a Binding Request (success response injected).
+        let mut bogus = StunMessage::new_binding_request();
+        bogus.message_type = MessageType::BindingResponse;
+        bogus.add_username("remoteuser:localuser".into());
+        bogus.add_message_integrity(b"localpwd").unwrap();
+        bogus.add_fingerprint();
+        match server.handle_binding_request(&bogus.serialize(), src) {
+            StunServerResponse::Drop(_) => {}
+            StunServerResponse::Respond(_) => panic!("must not respond to non-request"),
+        }
+    }
+
+    #[test]
+    fn test_stun_server_accepts_authenticated() {
+        let server = StunServer::new(
+            "localuser".into(),
+            b"localpwd".to_vec(),
+            "remoteuser".into(),
+        );
+        let src = "192.0.2.5:1234".parse::<SocketAddr>().unwrap();
+
+        let mut m = StunMessage::new_binding_request();
+        m.add_username("remoteuser:localuser".into());
+        m.add_message_integrity(b"localpwd").unwrap();
+        m.add_fingerprint();
+
+        match server.handle_binding_request(&m.serialize(), src) {
+            StunServerResponse::Respond(resp) => {
+                assert_eq!(resp.message_type, MessageType::BindingResponse);
+                assert_eq!(resp.transaction_id, m.transaction_id);
+                // Response itself must validate MESSAGE-INTEGRITY so the peer
+                // can verify it.
+                assert!(resp.verify_message_integrity(b"localpwd").unwrap());
+                // And XOR-MAPPED-ADDRESS must echo the peer's source.
+                assert_eq!(resp.get_xor_mapped_address(), Some(src));
+            }
+            StunServerResponse::Drop(reason) => panic!("server dropped valid req: {}", reason),
+        }
     }
 
     #[test]

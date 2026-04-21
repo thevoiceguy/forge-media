@@ -11,6 +11,7 @@ use url::{Host, Url};
 use validator::Validate;
 
 use crate::error::{ApiError, ApiResult};
+use crate::middleware::auth::{RequireOperator, RequireReadOnly};
 use crate::response::{created, no_content, success, ApiSuccess};
 use crate::routes::sessions::AppState;
 
@@ -139,6 +140,7 @@ fn is_private_host(host: &Host<&str>) -> bool {
 /// POST /v1/sessions/{id}/ai
 #[tracing::instrument(skip(state, request), fields(call_id = %call_id))]
 async fn attach_ai(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
     Json(request): Json<AttachAIRequest>,
@@ -220,6 +222,7 @@ async fn attach_ai(
 /// GET /v1/sessions/{id}/ai
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn get_ai_status(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<ApiSuccess<AISessionResponse>> {
@@ -265,6 +268,7 @@ async fn get_ai_status(
 /// DELETE /v1/sessions/{id}/ai
 #[tracing::instrument(skip(state), fields(call_id = %call_id))]
 async fn detach_ai(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
@@ -289,6 +293,7 @@ async fn detach_ai(
 /// GET /v1/sessions/ai
 #[tracing::instrument(skip(state))]
 async fn list_ai_sessions(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<ApiSuccess<AISessionListResponse>> {
     let call_ids = state.ai_session_manager.list_sessions();
@@ -324,6 +329,7 @@ async fn list_ai_sessions(
 /// POST /v1/sessions/{id}/ai/function-response
 #[tracing::instrument(skip(state, request), fields(call_id = %call_id))]
 async fn send_function_response(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(call_id): Path<String>,
     Json(request): Json<FunctionResponseRequest>,
@@ -398,7 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_attach_ai_session_not_found() {
-        let app = routes().with_state(test_state());
+        let app = crate::middleware::auth::wrap_for_tests(routes(), test_state());
 
         let request_body = serde_json::json!({
             "api_key": "sk-test-key",
@@ -422,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_ai_status_not_found() {
-        let app = routes().with_state(test_state());
+        let app = crate::middleware::auth::wrap_for_tests(routes(), test_state());
 
         let response = app
             .oneshot(

@@ -48,6 +48,7 @@ validator = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
 url = "2.5"
+subtle = { workspace = true }
 
 [features]
 xdp = ["forge-engine/xdp"]

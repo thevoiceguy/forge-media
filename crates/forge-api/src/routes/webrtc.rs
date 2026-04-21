@@ -12,6 +12,7 @@ use std::sync::Arc;
 use validator::Validate;
 
 use crate::error::{ApiError, ApiResult};
+use crate::middleware::auth::{RequireOperator, RequireReadOnly};
 use crate::response::{created, no_content, success, ApiSuccess};
 use crate::routes::sessions::AppState;
 
@@ -139,6 +140,7 @@ pub struct AddIceCandidateRequest {
 /// POST /v1/webrtc/connections
 #[tracing::instrument(skip(state, request))]
 async fn create_connection(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Json(request): Json<CreateConnectionRequest>,
 ) -> ApiResult<axum::response::Response> {
@@ -205,6 +207,7 @@ async fn create_connection(
 /// GET /v1/webrtc/connections/{id}
 #[tracing::instrument(skip(state), fields(connection_id = %connection_id))]
 async fn get_connection(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(connection_id): Path<String>,
 ) -> ApiResult<ApiSuccess<ConnectionStatusResponse>> {
@@ -231,6 +234,7 @@ async fn get_connection(
 /// DELETE /v1/webrtc/connections/{id}
 #[tracing::instrument(skip(state), fields(connection_id = %connection_id))]
 async fn delete_connection(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(connection_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
@@ -258,6 +262,7 @@ async fn delete_connection(
 /// POST /v1/webrtc/connections/{id}/answer
 #[tracing::instrument(skip(state, request), fields(connection_id = %connection_id))]
 async fn set_answer(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(connection_id): Path<String>,
     Json(request): Json<SetAnswerRequest>,
@@ -304,6 +309,7 @@ async fn set_answer(
 /// POST /v1/webrtc/connections/{id}/ice-candidate
 #[tracing::instrument(skip(state, request), fields(connection_id = %connection_id))]
 async fn add_ice_candidate(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(connection_id): Path<String>,
     Json(request): Json<AddIceCandidateRequest>,
@@ -342,6 +348,7 @@ async fn add_ice_candidate(
 /// GET /v1/webrtc/connections/{id}/status
 #[tracing::instrument(skip(state), fields(connection_id = %connection_id))]
 async fn get_status(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(connection_id): Path<String>,
 ) -> ApiResult<ApiSuccess<ConnectionStatusResponse>> {
@@ -367,6 +374,7 @@ async fn get_status(
 ///
 /// GET /v1/webrtc/connections
 async fn list_connections(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<ApiSuccess<ConnectionListResponse>> {
     tracing::info!("Listing WebRTC connections");
@@ -438,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_connection() {
-        let app = routes().with_state(test_state());
+        let app = crate::middleware::auth::wrap_for_tests(routes(), test_state());
 
         let request_body = serde_json::json!({
             "stun_servers": ["stun:stun.l.google.com:19302"]
@@ -461,7 +469,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_connections() {
-        let app = routes().with_state(test_state());
+        let app = crate::middleware::auth::wrap_for_tests(routes(), test_state());
 
         let response = app
             .oneshot(

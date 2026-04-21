@@ -55,7 +55,16 @@ fn create_test_app() -> Router {
         None,
     ));
 
-    routes::create_router().with_state(state)
+    // Wrap with the auth layer so scope extractors stamp Admin context
+    // (auth disabled = anonymous Admin, see middleware::auth).
+    routes::create_router()
+        .with_state(state)
+        .layer(axum::middleware::from_fn(
+            forge_api::middleware::auth::auth_middleware,
+        ))
+        .layer(axum::Extension(
+            forge_api::middleware::auth::AuthConfig::new(Vec::<String>::new()),
+        ))
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@
 //!
 //! Provides REST API for attaching/detaching AI to conference rooms
 
+use crate::middleware::auth::{RequireOperator, RequireReadOnly};
 use crate::response::{created, no_content};
 use crate::routes::ai::validate_ai_endpoint;
 use crate::routes::sessions::AppState;
@@ -85,6 +86,7 @@ pub struct ConferenceAIListResponse {
 ///
 /// POST /v1/conferences/{room_id}/ai
 async fn attach_ai(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
     Json(request): Json<AttachConferenceAIRequest>,
@@ -205,6 +207,7 @@ async fn attach_ai(
 ///
 /// GET /v1/conferences/{room_id}/ai
 async fn get_ai_status(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
@@ -263,6 +266,7 @@ async fn get_ai_status(
 ///
 /// GET /v1/conferences/ai
 async fn list_conference_ai(
+    _auth: RequireReadOnly,
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<axum::response::Response> {
     let room_ids = state.conference_bridge.list_rooms();
@@ -313,6 +317,7 @@ async fn list_conference_ai(
 ///
 /// DELETE /v1/conferences/{room_id}/ai
 async fn detach_ai(
+    _auth: RequireOperator,
     State(state): State<Arc<AppState>>,
     Path(room_id): Path<String>,
 ) -> ApiResult<axum::response::Response> {

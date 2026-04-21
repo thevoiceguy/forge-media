@@ -262,8 +262,6 @@ jobs:
       matrix:
         features:
           - ""
-          - "transcoding"
-          - "conference"
           - "recording"
           - "full"
     steps:

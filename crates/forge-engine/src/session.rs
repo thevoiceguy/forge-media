@@ -1525,6 +1525,7 @@ impl MediaSession {
                 packets_lost: state.participant_a.stats.packets_lost,
                 last_packet_at: None, // Will be updated when packets arrive
             },
+            latch_allowed_ips: None,
         };
 
         let participant_b = Participant {
@@ -1544,6 +1545,7 @@ impl MediaSession {
                 packets_lost: state.participant_b.stats.packets_lost,
                 last_packet_at: None,
             },
+            latch_allowed_ips: None,
         };
 
         // Parse session state
@@ -1618,6 +1620,9 @@ impl MediaSession {
             ai_manager: Arc::new(RwLock::new(None)),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            relay_rfc2833: AtomicBool::new(false),
+            telephone_event_pt_a: AtomicU8::new(101),
+            telephone_event_pt_b: AtomicU8::new(101),
         };
 
         tracing::info!(

@@ -1,6 +1,8 @@
 //! RTP packet forwarding engine
 
 use crate::session::{MediaSession, Participant, RecordingSide, SessionState};
+#[cfg(feature = "opus")]
+use forge_codecs::AudioCodec as _;
 use forge_core::{ForgeError, Result};
 use forge_rtp::rtcp::RtcpPacket;
 use metrics::{counter, histogram};
@@ -174,7 +176,7 @@ impl ForwardingEngine {
 
                     // Check for AI audio responses
                     if let Some(ai_manager) = session.ai_manager().await {
-                        if let Some(audio_response) = ai_manager.try_recv_audio_response(&call_id).await {
+                        if let Some(audio_response) = ai_manager.try_recv_audio_response(call_id).await {
                             Self::handle_ai_audio_response(
                                 &session,
                                 &sockets,

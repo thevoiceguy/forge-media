@@ -4,8 +4,10 @@ use crate::{RecorderError, Result};
 #[cfg(feature = "opus")]
 use audiopus::coder::Decoder as OpusDecoder;
 #[cfg(feature = "opus")]
-use audiopus::{Channels, SampleRate};
+use audiopus::{packet::Packet, Channels, MutSignals, SampleRate};
 use hound::WavReader;
+#[cfg(feature = "opus")]
+use std::convert::TryFrom;
 use std::io::BufReader;
 use std::path::Path;
 
@@ -176,11 +178,23 @@ impl OpusPlayback {
             match self.packets.read_packet()? {
                 Some(packet) => {
                     tracing::trace!("Decoding Opus packet: {} bytes", packet.data.len());
+                    // audiopus 0.3 rejects zero-length packets. Ogg sometimes
+                    // yields empty padding packets at stream boundaries; skip
+                    // them rather than synthesising PLC samples.
+                    if packet.data.is_empty() {
+                        continue;
+                    }
                     // Max Opus packet is 120ms -> 5760 samples per channel at 48kHz.
                     let mut buf = vec![0i16; 5760 * 2];
+                    let opus_packet = Packet::try_from(packet.data.as_slice()).map_err(|e| {
+                        RecorderError::Encoding(format!("Invalid Opus packet: {:?}", e))
+                    })?;
+                    let out_signals = MutSignals::try_from(buf.as_mut_slice()).map_err(|e| {
+                        RecorderError::Encoding(format!("Opus buffer invalid: {:?}", e))
+                    })?;
                     let len = self
                         .decoder
-                        .decode(Some(&packet.data), &mut buf, false)
+                        .decode(Some(opus_packet), out_signals, false)
                         .map_err(|e| {
                             tracing::error!("Opus decode error: {:?}", e);
                             RecorderError::Encoding(format!("Opus decode failed: {:?}", e))
@@ -295,16 +309,23 @@ mod tests {
 
         let mut playback = PlaybackSource::open(&file_path).unwrap();
 
-        let first = playback.next_samples(1000).unwrap().unwrap();
-        assert!(first.len() <= 1000);
-
-        let second = playback.next_samples(1000).unwrap().unwrap();
-        assert!(second.len() <= 1000);
-
-        let third = playback.next_samples(1000).unwrap().unwrap();
-        assert!(third.len() <= 1000);
-
-        let end = playback.next_samples(1000).unwrap();
-        assert!(end.is_none());
+        // Core guarantee: each read respects the `max` argument. We don't
+        // pin the exact total sample count (Opus output depends on preskip
+        // and framing, which are audiopus-version-sensitive), but we do
+        // verify the read eventually drains to `None`.
+        let mut read_count = 0;
+        loop {
+            match playback.next_samples(1000).unwrap() {
+                Some(chunk) => {
+                    assert!(chunk.len() <= 1000, "read exceeded requested max");
+                    assert!(!chunk.is_empty(), "Some(chunk) must never be empty");
+                    read_count += 1;
+                    // Guard against an infinite loop if draining ever regresses.
+                    assert!(read_count < 100, "too many reads, source not draining");
+                }
+                None => break,
+            }
+        }
+        assert!(read_count >= 3, "expected at least 3 chunks from 4 frames");
     }
 }

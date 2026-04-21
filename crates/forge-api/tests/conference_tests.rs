@@ -52,6 +52,8 @@ fn create_test_app() -> Router {
         temp_dir,
         ai_allowed,
         event_bus,
+        #[cfg(feature = "ha")]
+        None,
     ));
 
     routes::create_router().with_state(state)

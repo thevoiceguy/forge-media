@@ -371,7 +371,10 @@ mod tests {
     use tower::util::ServiceExt as _;
 
     fn test_state() -> Arc<AppState> {
-        let base = 60000 + ((std::process::id() % 5000) * 2) as u16;
+        // Pick a base port in [50000, 60000) so that `base + 1000` is still in
+        // u16 range regardless of the PID. The original `60000 + pid%5000 * 2`
+        // overflowed u16 when the product exceeded 5535.
+        let base: u16 = 50000 + ((std::process::id() % 5000) * 2) as u16;
         let port_pool_config = forge_rtp::PortPoolConfig::new(base, base + 1000).unwrap();
         let session_manager_config = forge_engine::SessionManagerConfig {
             port_pool_config,
@@ -388,6 +391,8 @@ mod tests {
             std::env::temp_dir().join("forge-test-prompts"),
             forge_core::config::default_ai_allowed_endpoints(),
             Arc::new(forge_core::EventBus::new()),
+            #[cfg(feature = "ha")]
+            None,
         ))
     }
 

@@ -153,7 +153,8 @@ impl IceCandidate {
             CandidateType::Relay => 0,
         };
 
-        let local_pref = local_pref.min(65535) as u32;
+        // `local_pref` is a u16 whose max is already 65535; no clamp needed.
+        let local_pref = local_pref as u32;
         let component_val = (256 - component.min(256)) as u32;
 
         (type_pref << 24) | (local_pref << 8) | component_val

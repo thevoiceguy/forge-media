@@ -42,5 +42,12 @@ pub enum RecorderError {
     Internal(String),
 }
 
+#[cfg(feature = "opus")]
+impl From<ogg::OggReadError> for RecorderError {
+    fn from(err: ogg::OggReadError) -> Self {
+        RecorderError::InvalidFormat(format!("Ogg read error: {}", err))
+    }
+}
+
 /// Result type for recorder operations
 pub type Result<T> = std::result::Result<T, RecorderError>;

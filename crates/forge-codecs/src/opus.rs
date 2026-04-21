@@ -18,7 +18,11 @@
 #[cfg(feature = "opus")]
 use audiopus::coder::{Decoder, Encoder};
 #[cfg(feature = "opus")]
-use audiopus::{Application, Bitrate, Channels, SampleRate as OpusSampleRate};
+use audiopus::packet::Packet;
+#[cfg(feature = "opus")]
+use audiopus::{Application, Bitrate, Channels, MutSignals, SampleRate as OpusSampleRate};
+#[cfg(feature = "opus")]
+use std::convert::TryFrom;
 
 use crate::AudioCodec;
 use crate::{AudioFormat, CodecError, Result};
@@ -178,7 +182,7 @@ impl OpusCodec {
             .map_err(|e| CodecError::Encoding(format!("Failed to create Opus encoder: {:?}", e)))?;
 
         encoder
-            .set_bitrate(Bitrate::Bits(config.bitrate as i32))
+            .set_bitrate(Bitrate::BitsPerSecond(config.bitrate as i32))
             .map_err(|e| CodecError::Encoding(format!("Failed to set bitrate: {:?}", e)))?;
 
         let decoder = Decoder::new(sample_rate, channels)
@@ -210,9 +214,15 @@ impl OpusCodec {
         let frame_size = self.config.frame_size();
         let mut output = vec![0i16; frame_size];
 
+        // audiopus 0.3 wraps input/output in newtype validators.
+        let packet = Packet::try_from(encoded)
+            .map_err(|e| CodecError::Decoding(format!("Invalid Opus packet: {:?}", e)))?;
+        let out_signals = MutSignals::try_from(output.as_mut_slice())
+            .map_err(|e| CodecError::Decoding(format!("Opus output buffer invalid: {:?}", e)))?;
+
         let decoded_len = self
             .decoder
-            .decode(Some(encoded), &mut output, false)
+            .decode(Some(packet), out_signals, false)
             .map_err(|e| CodecError::Decoding(format!("Opus decoding failed: {:?}", e)))?;
 
         output.truncate(decoded_len);
@@ -274,11 +284,39 @@ impl AudioCodec for OpusCodec {
     }
 
     fn reset(&mut self) {
-        // Reset encoder and decoder state
-        let _ = self.encoder.reset_state();
-        let _ = self.decoder.reset_state();
+        // audiopus 0.3 removed `reset_state`. Re-create the codec in place; on
+        // failure, leave the existing state untouched (the caller's best
+        // alternative would be to abandon the codec anyway).
+        let sample_rate = match self.config.sample_rate {
+            8000 => OpusSampleRate::Hz8000,
+            12000 => OpusSampleRate::Hz12000,
+            16000 => OpusSampleRate::Hz16000,
+            24000 => OpusSampleRate::Hz24000,
+            _ => OpusSampleRate::Hz48000,
+        };
+        let channels = if self.config.channels == 1 {
+            Channels::Mono
+        } else {
+            Channels::Stereo
+        };
+        if let Ok(mut enc) = Encoder::new(sample_rate, channels, self.config.application.into()) {
+            let _ = enc.set_bitrate(Bitrate::BitsPerSecond(self.config.bitrate as i32));
+            self.encoder = enc;
+        }
+        if let Ok(dec) = Decoder::new(sample_rate, channels) {
+            self.decoder = dec;
+        }
     }
 }
+
+// audiopus 0.3's Encoder/Decoder hold raw FFI pointers and are not Send or
+// Sync by default. They are thread-safe to move and to use with exclusive
+// access, so we mark our wrapper Send + Sync (access is serialized by the
+// surrounding Mutex in every call site).
+#[cfg(feature = "opus")]
+unsafe impl Send for OpusCodec {}
+#[cfg(feature = "opus")]
+unsafe impl Sync for OpusCodec {}
 
 // Stub implementation when opus feature is disabled
 #[cfg(not(feature = "opus"))]
@@ -401,8 +439,12 @@ mod tests {
         let mut codec = OpusCodec::new().unwrap();
         let frame_size = codec.config().frame_size();
 
-        // Create a simple test signal
-        let pcm: Vec<i16> = (0..frame_size).map(|i| (i as i16) * 100).collect();
+        // Create a simple test signal. Use 32-bit math then saturate to i16
+        // to avoid overflow for large frame sizes (48kHz/20ms = 960 samples,
+        // which would otherwise overflow i16 at `i * 100`).
+        let pcm: Vec<i16> = (0..frame_size)
+            .map(|i| ((i as i32 * 100).clamp(i16::MIN as i32, i16::MAX as i32)) as i16)
+            .collect();
 
         // Encode
         let encoded = codec.encode(&pcm).unwrap();

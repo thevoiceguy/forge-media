@@ -29,7 +29,7 @@ base64 = "0.21"
 # Async utilities
 async-trait = "0.1"
 dashmap = { workspace = true }
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

@@ -475,6 +475,33 @@ impl SessionManager {
             .collect()
     }
 
+    /// Get the runtime media configuration for a specific participant leg.
+    pub async fn participant_media_state(
+        &self,
+        call_id: &CallId,
+        leg: crate::session::ParticipantLabel,
+    ) -> Result<crate::session::ParticipantMediaState> {
+        let session = self
+            .get_session(call_id)
+            .ok_or_else(|| ForgeError::SessionNotFound(call_id.0.clone()))?;
+
+        Ok(session.participant_media_state(leg).await)
+    }
+
+    /// Update the runtime media configuration for a specific participant leg.
+    pub async fn update_participant_media(
+        &self,
+        call_id: &CallId,
+        leg: crate::session::ParticipantLabel,
+        update: crate::session::ParticipantMediaUpdate,
+    ) -> Result<crate::session::ParticipantMediaState> {
+        let session = self
+            .get_session(call_id)
+            .ok_or_else(|| ForgeError::SessionNotFound(call_id.0.clone()))?;
+
+        session.update_participant_media(leg, update).await
+    }
+
     /// Start forwarding for a session
     #[tracing::instrument(skip(self), fields(call_id = %call_id.0))]
     pub async fn start_session(&self, call_id: &CallId) -> Result<()> {

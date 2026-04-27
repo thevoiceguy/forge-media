@@ -1209,10 +1209,11 @@ dependencies = [
 
 [[package]]
 name = "forge-api"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum",
  "axum-server",
+ "base64 0.21.7",
  "chrono",
  "clap",
  "dashmap",
@@ -1234,6 +1235,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tower",
@@ -1304,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "forge-engine"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1366,6 +1368,7 @@ dependencies = [
  "serde",
  "sha1",
  "socket2 0.6.2",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1373,11 +1376,12 @@ dependencies = [
 
 [[package]]
 name = "forge-injection"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "forge-core",
  "rubato",
  "symphonia",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1525,7 +1529,7 @@ dependencies = [
 
 [[package]]
 name = "forge-siprec"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.21.7",
  "bytes",
@@ -3612,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "sip-core"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "bytes",
  "httpdate",
@@ -3702,7 +3706,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transport"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3713,6 +3717,7 @@ dependencies = [
  "rustls-pki-types",
  "sip-observe",
  "socket2 0.5.10",
+ "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.21.0",

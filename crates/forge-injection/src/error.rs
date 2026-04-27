@@ -51,6 +51,13 @@ pub enum InjectionError {
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// A requested file path is outside the configured audio-injection
+    /// sandbox (audit finding C16). User-supplied paths must resolve to a
+    /// file inside `InjectionSandbox::base_dir` with no symlinks, `..`
+    /// components, or other escape vectors.
+    #[error("path rejected by injection sandbox: {0}")]
+    PathRejected(String),
 }
 
 /// Convert symphonia errors to InjectionError

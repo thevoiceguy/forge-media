@@ -265,14 +265,79 @@ impl RecordingSession {
         quick_xml::se::to_string(self)
     }
 
-    /// Deserialize from XML string
+    /// Maximum accepted XML payload size, in bytes.
+    ///
+    /// RFC 7865 metadata for a realistic SIPREC session is at most a few KB.
+    /// Capping at 1 MiB still gives ~3 orders of magnitude of headroom over
+    /// any conceivable legitimate payload while keeping the per-message
+    /// allocation budget bounded — a malicious SRC feeding us a multi-MB
+    /// document is rejected before the XML deserializer sees a byte
+    /// (audit finding C12).
+    pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
+
+    /// Deserialize from XML string, with hardening against XXE, external
+    /// entity expansion, and billion-laughs attacks (audit finding C12).
+    ///
+    /// The SIPREC metadata format does not use DTDs or entity references.
+    /// Any `<!DOCTYPE`, `<!ENTITY`, or `<!ATTLIST` declaration in the wire
+    /// XML is therefore suspicious — we reject the payload outright rather
+    /// than relying on the XML parser's entity-expansion limits.
     ///
     /// # Errors
     ///
-    /// Returns an error if deserialization fails.
+    /// Returns an error if the payload exceeds [`MAX_METADATA_BYTES`],
+    /// contains a DTD / entity declaration, or fails to deserialize.
     pub fn from_xml(xml: &str) -> Result<Self, quick_xml::DeError> {
+        if let Err(reason) = validate_siprec_xml(xml) {
+            return Err(quick_xml::DeError::Custom(reason));
+        }
         quick_xml::de::from_str(xml)
     }
+}
+
+/// Check that an incoming metadata payload is safe to hand to the XML
+/// deserializer.
+///
+/// Called by [`RecordingSession::from_xml`] — exposed as a helper so
+/// transport-layer code (e.g., the multipart/mixed dispatcher in `sip.rs`)
+/// can apply the same filter before buffering the body.
+pub fn validate_siprec_xml(xml: &str) -> Result<(), String> {
+    if xml.len() > RecordingSession::MAX_METADATA_BYTES {
+        return Err(format!(
+            "metadata exceeds maximum size ({} > {} bytes)",
+            xml.len(),
+            RecordingSession::MAX_METADATA_BYTES
+        ));
+    }
+
+    // Character-level scan for doctype / entity decls. We intentionally
+    // match lowercase + uppercase and ignore whitespace after `<!` — the
+    // patterns are not legal in legitimate SIPREC metadata, so false
+    // positives are acceptable.
+    let bytes = xml.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i] == b'<' && bytes[i + 1] == b'!' {
+            // Look at the next run of alphabetic bytes.
+            let tail = &bytes[i + 2..];
+            // Case-insensitive prefix match against the forbidden markers.
+            let matches_ci = |needle: &[u8]| -> bool {
+                tail.len() >= needle.len()
+                    && tail
+                        .iter()
+                        .take(needle.len())
+                        .zip(needle.iter())
+                        .all(|(b, n)| b.eq_ignore_ascii_case(n))
+            };
+            if matches_ci(b"DOCTYPE")
+                || matches_ci(b"ENTITY")
+                || matches_ci(b"ATTLIST")
+                || matches_ci(b"NOTATION")
+            {
+                return Err("metadata contains forbidden DTD/entity declaration".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Participant {
@@ -381,6 +446,75 @@ impl MediaStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C12 regression: `from_xml` must reject DOCTYPE / ENTITY declarations
+    // outright, before the parser attempts to expand them.
+    #[test]
+    fn test_from_xml_rejects_doctype() {
+        let payload = r#"<?xml version="1.0"?>
+<!DOCTYPE recording [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+<recording><session><id>s1</id><start>2026-01-01T00:00:00Z</start></session></recording>"#;
+        let err = RecordingSession::from_xml(payload).expect_err("DOCTYPE must be rejected");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("forbidden DTD/entity"),
+            "expected XXE rejection, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_from_xml_rejects_entity_decl() {
+        let payload = r#"<!ENTITY lol "lol"><recording></recording>"#;
+        let err = RecordingSession::from_xml(payload).expect_err("ENTITY must be rejected");
+        assert!(format!("{}", err).contains("forbidden"));
+    }
+
+    #[test]
+    fn test_from_xml_rejects_billion_laughs_shaped_payload() {
+        // Classic "billion laughs" shape — DOCTYPE header alone is enough
+        // for us to drop it, which is what we want because recursive entity
+        // expansion would otherwise happen inside the parser.
+        let payload = r#"<?xml version="1.0"?>
+<!DOCTYPE bomb [
+  <!ENTITY a "aa">
+  <!ENTITY b "&a;&a;">
+  <!ENTITY c "&b;&b;">
+]>
+<recording>&c;</recording>"#;
+        assert!(RecordingSession::from_xml(payload).is_err());
+    }
+
+    #[test]
+    fn test_from_xml_rejects_oversize_payload() {
+        let mut huge = String::with_capacity(RecordingSession::MAX_METADATA_BYTES + 128);
+        huge.push_str("<recording>");
+        while huge.len() < RecordingSession::MAX_METADATA_BYTES + 1 {
+            huge.push_str("<filler>x</filler>");
+        }
+        huge.push_str("</recording>");
+        let err = RecordingSession::from_xml(&huge).expect_err("oversize must be rejected");
+        assert!(format!("{}", err).contains("exceeds maximum size"));
+    }
+
+    #[test]
+    fn test_validate_siprec_xml_accepts_clean_payload() {
+        // Minimal but structurally valid — no DTD, no oversize.
+        let xml = r#"<recording><datamode>complete</datamode></recording>"#;
+        assert!(validate_siprec_xml(xml).is_ok());
+    }
+
+    #[test]
+    fn test_from_xml_roundtrip_after_hardening() {
+        // A real session serialized then parsed must still succeed — the
+        // hardening must not regress the happy path.
+        let mut session = RecordingSession::new("session-xx");
+        session.add_participant(Participant::caller("sip:alice@example.com"));
+        session.add_media_stream(MediaStream::audio("stream-1", "192.168.1.10", 5004));
+        let xml = session.to_xml().unwrap();
+        let parsed = RecordingSession::from_xml(&xml).unwrap();
+        assert_eq!(parsed.session_id, "session-xx");
+    }
 
     #[test]
     fn test_create_recording_session() {

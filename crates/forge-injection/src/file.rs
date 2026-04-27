@@ -3,7 +3,7 @@
 use crate::error::{InjectionError, Result};
 use crate::source::AudioSource;
 use forge_core::AudioFrame;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use symphonia::core::audio::{AudioBuffer, AudioBufferRef, Signal};
 use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::conv::FromSample;
@@ -71,19 +71,137 @@ pub struct FileSource {
     finished: bool,
 }
 
+/// Sandbox for audio-injection file paths.
+///
+/// Audit finding C16: `FileSource::new` previously accepted any
+/// user-supplied path and called `std::fs::File::open`, giving an
+/// attacker arbitrary-file-read within the process's UID. All
+/// path-accepting entry points now go through an `InjectionSandbox`,
+/// which pins a single `base_dir` and rejects paths that:
+///   * are absolute and outside `base_dir`,
+///   * contain `..` or `.` components (relative),
+///   * or would follow a symlink out of the sandbox.
+///
+/// Construct once at startup (from operator config) and pass it to
+/// [`FileSource::open_in_sandbox`] for every injection request.
+#[derive(Debug, Clone)]
+pub struct InjectionSandbox {
+    /// Canonicalised absolute root directory for prompt / announcement
+    /// audio files. Any resolved injection path must live under this
+    /// directory.
+    base_dir: PathBuf,
+}
+
+impl InjectionSandbox {
+    /// Build a sandbox pinned to `base_dir`. The base is canonicalised at
+    /// construction so later relative-path resolution is unambiguous.
+    pub fn new(base_dir: impl AsRef<Path>) -> Result<Self> {
+        let base = base_dir.as_ref();
+        let canonical = base.canonicalize().map_err(|e| {
+            InjectionError::PathRejected(format!(
+                "sandbox base {} not accessible: {}",
+                base.display(),
+                e
+            ))
+        })?;
+        Ok(Self {
+            base_dir: canonical,
+        })
+    }
+
+    /// The sandbox's canonicalised root.
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
+    /// Resolve a user-supplied injection path to a concrete filesystem
+    /// path, rejecting anything that escapes the sandbox.
+    ///
+    /// Rules:
+    ///   * Relative paths are joined to `base_dir`.
+    ///   * Components must all be `Normal` (no `.` / `..` / RootDir /
+    ///     Prefix) for the relative part.
+    ///   * The resulting path is canonicalised and must still start with
+    ///     `base_dir` — which handles symlinks pointing outside the
+    ///     sandbox.
+    pub fn resolve(&self, requested: impl AsRef<Path>) -> Result<PathBuf> {
+        let requested = requested.as_ref();
+
+        // Absolute paths: must already be inside the sandbox (and have no
+        // traversal components).
+        let joined = if requested.is_absolute() {
+            if has_relative_components(requested) {
+                return Err(InjectionError::PathRejected(format!(
+                    "path contains ./ or ../ components: {}",
+                    requested.display()
+                )));
+            }
+            requested.to_path_buf()
+        } else {
+            // Relative paths: every component must be Normal.
+            for comp in requested.components() {
+                if !matches!(comp, Component::Normal(_)) {
+                    return Err(InjectionError::PathRejected(format!(
+                        "path contains non-normal components: {}",
+                        requested.display()
+                    )));
+                }
+            }
+            self.base_dir.join(requested)
+        };
+
+        // Resolve symlinks and normalise, then confirm still inside root.
+        let canonical = joined.canonicalize().map_err(|e| {
+            InjectionError::PathRejected(format!("cannot resolve path {}: {}", joined.display(), e))
+        })?;
+        if !canonical.starts_with(&self.base_dir) {
+            return Err(InjectionError::PathRejected(format!(
+                "path resolves outside sandbox: {} → {}",
+                joined.display(),
+                canonical.display()
+            )));
+        }
+        Ok(canonical)
+    }
+}
+
+/// Does this path contain any `.` or `..` components?
+fn has_relative_components(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+}
+
 impl FileSource {
-    /// Create a new file source from a path
+    /// Open an audio file in a sandboxed directory.
     ///
-    /// # Arguments
+    /// **Preferred constructor for audit finding C16** — resolves
+    /// `path` against the given [`InjectionSandbox`] so that user-supplied
+    /// filenames cannot escape the configured prompts directory.
+    pub fn open_in_sandbox(sandbox: &InjectionSandbox, path: impl AsRef<Path>) -> Result<Self> {
+        let resolved = sandbox.resolve(path)?;
+        Self::open_trusted(resolved)
+    }
+
+    /// Open a file by a fully-trusted, already-validated path.
     ///
-    /// * `path` - Path to the audio file
+    /// **Do not call this with attacker-influenced input.** This is the
+    /// raw file-open path — the sandboxing / canonicalisation happens in
+    /// [`open_in_sandbox`]. Prefer that constructor.
+    pub fn open_trusted(path: impl AsRef<Path>) -> Result<Self> {
+        Self::new_inner(path.as_ref())
+    }
+
+    /// Create a new file source from a path.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be opened, the format is unsupported,
-    /// or no audio track is found.
+    /// **Deprecated:** prefer [`open_in_sandbox`]. This method performs
+    /// **no path validation** and should only be used for trusted input
+    /// (test fixtures, operator-controlled absolute paths). Exists purely
+    /// for backward compatibility.
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
+        Self::new_inner(path.as_ref())
+    }
+
+    fn new_inner(path: &Path) -> Result<Self> {
         let file_path = path.display().to_string();
 
         debug!("Opening audio file: {}", file_path);
@@ -415,5 +533,90 @@ mod tests {
         let channels = source.channels() as usize;
         let frame = source.read_frame(960).unwrap();
         assert_eq!(frame.len(), 960 * channels);
+    }
+
+    // --- C16 sandbox regression tests ---
+
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(path, b"").unwrap();
+    }
+
+    #[test]
+    fn test_sandbox_accepts_relative_within_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(&tmp.path().join("prompt.wav"));
+        let sb = InjectionSandbox::new(tmp.path()).unwrap();
+        let resolved = sb.resolve("prompt.wav").unwrap();
+        assert!(resolved.starts_with(sb.base_dir()));
+        assert!(resolved.ends_with("prompt.wav"));
+    }
+
+    #[test]
+    fn test_sandbox_rejects_parent_dir_traversal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sb = InjectionSandbox::new(tmp.path()).unwrap();
+        let err = sb.resolve("../etc/passwd").expect_err("must reject ..");
+        assert!(matches!(err, InjectionError::PathRejected(_)));
+    }
+
+    #[test]
+    fn test_sandbox_rejects_absolute_outside_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sb = InjectionSandbox::new(tmp.path()).unwrap();
+        // Absolute to a path outside the sandbox.
+        let err = sb
+            .resolve("/etc/passwd")
+            .expect_err("absolute path outside base must be rejected");
+        assert!(matches!(err, InjectionError::PathRejected(_)));
+    }
+
+    #[test]
+    fn test_sandbox_rejects_symlink_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, b"top secret").unwrap();
+
+        // Create a symlink inside the sandbox that points outside.
+        let link = tmp.path().join("escape.wav");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        #[cfg(not(unix))]
+        {
+            // Symlinks are awkward on Windows without privileges — skip.
+            return;
+        }
+
+        let sb = InjectionSandbox::new(tmp.path()).unwrap();
+        let err = sb
+            .resolve("escape.wav")
+            .expect_err("symlink escape must be rejected");
+        assert!(matches!(err, InjectionError::PathRejected(_)));
+    }
+
+    #[test]
+    fn test_sandbox_rejects_dot_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(&tmp.path().join("sub").join("file.wav"));
+        let sb = InjectionSandbox::new(tmp.path()).unwrap();
+        // "./sub/file.wav" has a CurDir component — rejected.
+        let err = sb
+            .resolve(Path::new(".").join("sub").join("file.wav"))
+            .expect_err("./ prefix must be rejected");
+        assert!(matches!(err, InjectionError::PathRejected(_)));
+    }
+
+    #[test]
+    fn test_sandbox_rejects_nonexistent_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sb = InjectionSandbox::new(tmp.path()).unwrap();
+        // Canonicalize fails for nonexistent → PathRejected wraps it.
+        let err = sb
+            .resolve("does-not-exist.wav")
+            .expect_err("nonexistent path must be rejected");
+        assert!(matches!(err, InjectionError::PathRejected(_)));
     }
 }

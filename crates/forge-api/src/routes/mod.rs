@@ -6,6 +6,7 @@ pub mod conferences;
 pub mod event_bus;
 pub mod ha;
 pub mod health;
+pub mod media_websocket;
 pub mod metrics;
 pub mod prometheus;
 pub mod sessions;
@@ -30,6 +31,7 @@ pub fn create_router() -> Router<Arc<sessions::AppState>> {
         .merge(conference_ai::routes())
         .merge(webrtc::routes())
         .merge(ai::routes())
+        .merge(media_websocket::routes())
         .merge(metrics::routes())
         .merge(prometheus::routes())
         .merge(websocket::routes())
@@ -49,6 +51,7 @@ pub fn create_public_router() -> Router<Arc<sessions::AppState>> {
         .merge(conference_ai::routes())
         .merge(webrtc::routes())
         .merge(ai::routes())
+        .merge(media_websocket::routes())
         .merge(metrics::routes())
         .merge(prometheus::routes())
         .merge(websocket::routes())

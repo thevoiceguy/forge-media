@@ -312,6 +312,50 @@ impl SipRequest {
         request
     }
 
+    /// Create a SIPREC re-INVITE that targets an existing dialog
+    /// (RFC 7866 §5.6 / RFC 3261 §14).
+    ///
+    /// Unlike [`Self::new_siprec_invite`], this reuses the dialog's
+    /// `Call-ID`, the caller-supplied `cseq` (which must come from
+    /// [`SipDialog::next_cseq`] so it monotonically increments), and the
+    /// dialog's confirmed `to_tag` if any. The SRS will then route the
+    /// updated SDP/metadata into the existing recording session instead of
+    /// creating a new one — audit finding C1.
+    pub fn new_siprec_reinvite(
+        from_uri: impl Into<String>,
+        to_uri: impl Into<String>,
+        call_id: impl Into<String>,
+        cseq: u32,
+        local_addr: SocketAddr,
+        from_tag: impl Into<String>,
+        to_tag: Option<String>,
+    ) -> Self {
+        let from = from_uri.into();
+        let to = to_uri.into();
+        let contact = format!("sip:{}:{}", local_addr.ip(), local_addr.port());
+
+        let mut request = Self {
+            method: SipMethod::Invite,
+            request_uri: to.clone(),
+            from: from.clone(),
+            from_tag: from_tag.into(),
+            to: to.clone(),
+            to_tag,
+            call_id: call_id.into(),
+            cseq,
+            contact,
+            local_addr,
+            headers: Vec::new(),
+            body: None,
+        };
+
+        request.add_header("Accept", "application/sdp, application/rs-metadata+xml");
+        request.add_header("Require", "siprec");
+        request.add_header("Content-Type", "multipart/mixed");
+
+        request
+    }
+
     /// Create a BYE request for an existing dialog
     pub fn new_bye(
         from_uri: impl Into<String>,
@@ -465,6 +509,82 @@ impl SipRequest {
     }
 }
 
+/// Transport security of the SIP signalling channel that will carry this
+/// SDP. Used to decide whether it's safe to emit SDES `a=crypto` lines
+/// (audit finding C14 — SRTP master keys in SDES are protected only by
+/// the signalling transport; emitting them over plaintext UDP/TCP exposes
+/// the session key to anyone on-path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SipTransport {
+    /// TLS (SIPS). Safe to carry SDES inline keys.
+    Tls,
+    /// Plaintext TCP. Not safe for SDES.
+    Tcp,
+    /// Plaintext UDP. Not safe for SDES.
+    Udp,
+}
+
+impl SipTransport {
+    /// True when the transport encrypts signalling (SIPS / TLS).
+    pub fn is_secure(&self) -> bool {
+        matches!(self, SipTransport::Tls)
+    }
+}
+
+impl Default for SipTransport {
+    /// Default to TLS. Downgrading is an explicit operator choice; the
+    /// library must not silently allow plaintext signalling for secure
+    /// sessions.
+    fn default() -> Self {
+        SipTransport::Tls
+    }
+}
+
+/// Error returned when an SDP operation would violate the configured
+/// security policy (e.g., emitting SDES keys over plaintext SIP) or
+/// references a stream that isn't present in the builder.
+#[derive(Debug, thiserror::Error)]
+pub enum SdpSecurityError {
+    /// `enable_srtp` was called but the signalling transport is plaintext.
+    #[error(
+        "refusing to emit SDES a=crypto over plaintext SIP transport ({0:?}); \
+         use TLS signalling or switch to DTLS-SRTP"
+    )]
+    InsecureTransportForSdes(SipTransport),
+
+    /// `enable_srtp` was called with a `stream_index` outside the range of
+    /// streams that have been added — caller would silently believe SDES
+    /// was enabled while the SDP went out unprotected.
+    #[error("SDP stream index {index} out of range (have {total} streams)")]
+    StreamIndexOutOfRange { index: usize, total: usize },
+}
+
+/// Recording-indication session attribute (RFC 9197 + SIPREC extensions).
+///
+/// Signals to the far end whether the call is being recorded, is paused,
+/// or has no indicator set. Emitted as the SDP session-level attribute
+/// `a=recording:{on|off}` and (for paused) an additional
+/// `a=recording-paused` attribute per draft-ietf-siprec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingIndication {
+    /// Do not emit a recording indicator at all (legacy / pre-RFC 9197).
+    NotSignalled,
+    /// Recording is active — emit `a=recording:on`.
+    On,
+    /// Recording is paused — emit `a=recording:on` plus `a=recording-paused`.
+    Paused,
+    /// Recording is explicitly off / disabled — emit `a=recording:off`.
+    Off,
+}
+
+impl Default for RecordingIndication {
+    fn default() -> Self {
+        // RFC 9197 recommends indicating recording status on every call.
+        // SIPREC SRC is by definition recording, so default to `On`.
+        RecordingIndication::On
+    }
+}
+
 /// SDP (Session Description Protocol) builder for SIPREC
 ///
 /// Creates SDP for recording sessions with RTP media streams.
@@ -476,6 +596,11 @@ pub struct SdpBuilder {
     session_name: String,
     connection_addr: IpAddr,
     media_streams: Vec<MediaDescription>,
+    /// Signalling transport this SDP will travel over. Determines whether
+    /// SDES is permitted.
+    transport: SipTransport,
+    /// Recording indicator to advertise at session level (audit C13).
+    recording_indication: RecordingIndication,
 }
 
 /// Media stream description
@@ -490,8 +615,21 @@ pub struct MediaDescription {
 }
 
 impl SdpBuilder {
-    /// Create a new SDP builder
+    /// Create a new SDP builder. Defaults to TLS signalling — callers that
+    /// plan to send this SDP over plaintext SIP must opt in explicitly via
+    /// [`SdpBuilder::new_with_transport`].
     pub fn new(origin_addr: IpAddr, connection_addr: IpAddr) -> Self {
+        Self::new_with_transport(origin_addr, connection_addr, SipTransport::default())
+    }
+
+    /// Create a new SDP builder, specifying the transport that will carry
+    /// the resulting SIP message. The transport governs whether SDES
+    /// `a=crypto` can be emitted (audit finding C14).
+    pub fn new_with_transport(
+        origin_addr: IpAddr,
+        connection_addr: IpAddr,
+        transport: SipTransport,
+    ) -> Self {
         Self {
             session_id: rand::random::<u64>().to_string(),
             session_version: 1,
@@ -499,7 +637,30 @@ impl SdpBuilder {
             session_name: "SIPREC Recording Session".to_string(),
             connection_addr,
             media_streams: Vec::new(),
+            transport,
+            recording_indication: RecordingIndication::default(),
         }
+    }
+
+    /// The transport this builder was configured for.
+    pub fn transport(&self) -> SipTransport {
+        self.transport
+    }
+
+    /// Set the recording indication advertised at session level.
+    ///
+    /// Emits `a=recording:on` / `a=recording:off` (and, when paused, an
+    /// additional `a=recording-paused`) — audit finding C13: this is the
+    /// call-recording consent indicator required by RFC 9197 and by
+    /// two-party-consent jurisdictions.
+    pub fn set_recording_indication(&mut self, indication: RecordingIndication) -> &mut Self {
+        self.recording_indication = indication;
+        self
+    }
+
+    /// The recording indication currently configured.
+    pub fn recording_indication(&self) -> RecordingIndication {
+        self.recording_indication
     }
 
     /// Add an audio stream
@@ -520,21 +681,41 @@ impl SdpBuilder {
         self.media_streams.push(media);
     }
 
-    /// Add SRTP (secure RTP) support
+    /// Add SDES-SRTP (secure RTP with inline keys) support.
+    ///
+    /// Audit finding C14: SDES master keys ride in the SDP body, which is
+    /// confidentiality-protected only by the SIP transport. If the
+    /// transport is plaintext (UDP/TCP), anyone on-path can read the key
+    /// and decrypt the entire recording. This method now hard-fails in
+    /// that case — callers must either switch the dialog to TLS (SIPS) or
+    /// use DTLS-SRTP (where keys never appear in SDP).
     pub fn enable_srtp(
         &mut self,
         stream_index: usize,
         tag: u32,
         crypto_suite: &str,
         key_material_b64: &str,
-    ) {
-        if let Some(media) = self.media_streams.get_mut(stream_index) {
-            media.protocol = "RTP/SAVP".to_string();
-            media.attributes.push(format!(
-                "crypto:{} {} inline:{}",
-                tag, crypto_suite, key_material_b64
-            ));
+    ) -> Result<(), SdpSecurityError> {
+        if !self.transport.is_secure() {
+            return Err(SdpSecurityError::InsecureTransportForSdes(self.transport));
         }
+        // Audit C14 (defense in depth): refuse to silently no-op when the
+        // caller targets a non-existent stream index. A no-op here used to
+        // hide the bug from the caller, who would believe SDES had been
+        // enabled while the SDP went out as plain RTP/AVP.
+        let total = self.media_streams.len();
+        let media = self.media_streams.get_mut(stream_index).ok_or(
+            SdpSecurityError::StreamIndexOutOfRange {
+                index: stream_index,
+                total,
+            },
+        )?;
+        media.protocol = "RTP/SAVP".to_string();
+        media.attributes.push(format!(
+            "crypto:{} {} inline:{}",
+            tag, crypto_suite, key_material_b64
+        ));
+        Ok(())
     }
 
     /// Build the SDP as a string
@@ -550,6 +731,19 @@ impl SdpBuilder {
         sdp.push_str(&format!("s={}\r\n", self.session_name));
         sdp.push_str(&format!("c=IN IP4 {}\r\n", self.connection_addr));
         sdp.push_str("t=0 0\r\n");
+
+        // Recording indicator (RFC 9197 + SIPREC pause/resume) — session-
+        // level attribute so recipients can surface it to UI consent
+        // indicators. (Audit finding C13.)
+        match self.recording_indication {
+            RecordingIndication::NotSignalled => {}
+            RecordingIndication::On => sdp.push_str("a=recording:on\r\n"),
+            RecordingIndication::Paused => {
+                sdp.push_str("a=recording:on\r\n");
+                sdp.push_str("a=recording-paused\r\n");
+            }
+            RecordingIndication::Off => sdp.push_str("a=recording:off\r\n"),
+        }
 
         // Media descriptions
         for media in &self.media_streams {
@@ -580,6 +774,80 @@ impl SdpBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C14 regression: enable_srtp must refuse to emit inline keys over a
+    // plaintext SIP transport regardless of the order of calls.
+    #[test]
+    fn test_enable_srtp_refused_on_udp() {
+        let ip = "127.0.0.1".parse().unwrap();
+        let mut sdp = SdpBuilder::new_with_transport(ip, ip, SipTransport::Udp);
+        sdp.add_audio_stream(10000, "PCMU", 0, 8000);
+        let err = sdp
+            .enable_srtp(0, 1, "AES_CM_128_HMAC_SHA1_80", "AAAA")
+            .expect_err("UDP must reject SDES");
+        assert!(matches!(
+            err,
+            SdpSecurityError::InsecureTransportForSdes(SipTransport::Udp)
+        ));
+        let body = sdp.build();
+        assert!(
+            !body.contains("crypto:"),
+            "no crypto line must be written on rejection"
+        );
+        assert!(
+            body.contains("RTP/AVP") && !body.contains("RTP/SAVP"),
+            "profile must stay plain RTP/AVP after rejection"
+        );
+    }
+
+    #[test]
+    fn test_enable_srtp_refused_on_tcp() {
+        let ip = "127.0.0.1".parse().unwrap();
+        let mut sdp = SdpBuilder::new_with_transport(ip, ip, SipTransport::Tcp);
+        sdp.add_audio_stream(10000, "PCMU", 0, 8000);
+        assert!(sdp
+            .enable_srtp(0, 1, "AES_CM_128_HMAC_SHA1_80", "AAAA")
+            .is_err());
+    }
+
+    #[test]
+    fn test_enable_srtp_allowed_on_tls() {
+        let ip = "127.0.0.1".parse().unwrap();
+        let mut sdp = SdpBuilder::new_with_transport(ip, ip, SipTransport::Tls);
+        sdp.add_audio_stream(10000, "PCMU", 0, 8000);
+        sdp.enable_srtp(0, 1, "AES_CM_128_HMAC_SHA1_80", "AAAA")
+            .expect("TLS must accept SDES");
+        let body = sdp.build();
+        assert!(body.contains("RTP/SAVP"));
+        assert!(body.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAA"));
+    }
+
+    #[test]
+    fn test_enable_srtp_rejects_out_of_range_index() {
+        // C14 defense-in-depth: a bad stream index used to silently `Ok(())`
+        // and the caller (src.rs:304) would believe SDES had been enabled.
+        let ip = "127.0.0.1".parse().unwrap();
+        let mut sdp = SdpBuilder::new_with_transport(ip, ip, SipTransport::Tls);
+        sdp.add_audio_stream(10000, "PCMU", 0, 8000);
+        let err = sdp
+            .enable_srtp(5, 1, "AES_CM_128_HMAC_SHA1_80", "AAAA")
+            .expect_err("out-of-range index must be rejected");
+        assert!(matches!(
+            err,
+            SdpSecurityError::StreamIndexOutOfRange { index: 5, total: 1 }
+        ));
+        let body = sdp.build();
+        assert!(!body.contains("crypto:"));
+        assert!(body.contains("RTP/AVP") && !body.contains("RTP/SAVP"));
+    }
+
+    #[test]
+    fn test_default_transport_is_tls() {
+        assert_eq!(SipTransport::default(), SipTransport::Tls);
+        assert!(SipTransport::Tls.is_secure());
+        assert!(!SipTransport::Tcp.is_secure());
+        assert!(!SipTransport::Udp.is_secure());
+    }
 
     #[test]
     fn test_sip_invite_generation() {

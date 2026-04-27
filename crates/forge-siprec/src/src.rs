@@ -5,7 +5,7 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
@@ -13,7 +13,9 @@ use tokio::sync::RwLock;
 
 use crate::forking::{ForkingError, MediaForker};
 use crate::metadata::{MediaStream, Participant, ParticipantRole, RecordingSession};
-use crate::sip::{DialogManager, SdpBuilder, SipDialog, SipRequest};
+use crate::sip::{
+    DialogManager, RecordingIndication, SdpBuilder, SipDialog, SipRequest, SipTransport,
+};
 use crate::srtp_keys::{SrtpKeyError, SrtpKeyManager};
 
 /// SRC configuration
@@ -31,8 +33,26 @@ pub struct SrcConfig {
     /// Backup SRS URI (for failover)
     pub backup_srs_uri: Option<String>,
 
-    /// Enable SRTP key forwarding
+    /// Enable SRTP key forwarding (SDES — RFC 4568 `a=crypto` inline keys).
+    ///
+    /// **Only honoured when `sip_transport` is TLS** (audit finding C14).
+    /// If this is `true` and `sip_transport` is plaintext, session start
+    /// fails with [`SrcError::InsecureSrtpTransport`] — refusing to leak
+    /// SRTP master keys on the wire is the safe default. Use DTLS-SRTP for
+    /// transports that cannot be upgraded to TLS.
     pub forward_srtp_keys: bool,
+
+    /// Transport that will carry the SIPREC INVITE + subsequent
+    /// re-INVITEs. TLS by default so that `forward_srtp_keys = true` is
+    /// safe out of the box; downgrading to TCP/UDP is an explicit choice
+    /// and disables SDES key forwarding.
+    pub sip_transport: SipTransport,
+
+    /// Emit the RFC 9197 recording indicator in SDP (audit finding C13).
+    /// Defaults to `On` — recording participants must be informed unless
+    /// the operator has an explicit legal basis to suppress the
+    /// indicator.
+    pub recording_indication: RecordingIndication,
 
     /// Recording reason
     pub recording_reason: Option<String>,
@@ -46,6 +66,8 @@ impl Default for SrcConfig {
             rtp_bind_address: None,
             backup_srs_uri: None,
             forward_srtp_keys: true,
+            sip_transport: SipTransport::Tls,
+            recording_indication: RecordingIndication::On,
             recording_reason: Some("Compliance recording".to_string()),
         }
     }
@@ -82,6 +104,14 @@ pub enum SrcError {
     #[error("Session not found: {0}")]
     SessionNotFound(String),
 
+    /// Configuration refuses to emit SDES SRTP keys over plaintext SIP
+    /// (audit finding C14).
+    #[error(
+        "refusing to forward SRTP keys (SDES) over non-TLS SIP transport ({0:?}); \
+         set `sip_transport = SipTransport::Tls` or clear `forward_srtp_keys`"
+    )]
+    InsecureSrtpTransport(SipTransport),
+
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
@@ -115,6 +145,19 @@ pub struct RecordingSessionState {
 
     /// Failover attempt count
     pub failover_attempts: u32,
+
+    /// Whether the recording is currently paused (RFC 7866 §5.6). While
+    /// paused, forwarded RTP is dropped in [`SessionRecordingClient::forward_rtp`]
+    /// and a re-INVITE has been sent to the SRS advertising the
+    /// `a=recording-paused` session attribute.
+    pub paused: bool,
+
+    /// Participant IDs whose audio has been muted for consent reasons
+    /// (audit finding C13). When a participant ID is in this set their
+    /// streams are dropped before reaching the SRS — neither the RTP
+    /// forker nor the recording sees their audio — but the session
+    /// itself continues so other participants keep being recorded.
+    pub muted_participants: HashSet<String>,
 }
 
 /// Session Recording Client
@@ -206,11 +249,24 @@ impl SessionRecordingClient {
             )
             .await;
 
-        // Build SDP with media streams
-        let mut sdp = SdpBuilder::new(
+        // Audit C14: fail fast if the operator requested SDES key forwarding
+        // over a plaintext signalling transport. Emitting `a=crypto` inline
+        // keys without TLS leaks the session master key to any on-path
+        // observer.
+        if self.config.forward_srtp_keys && !self.config.sip_transport.is_secure() {
+            return Err(SrcError::InsecureSrtpTransport(self.config.sip_transport));
+        }
+
+        // Build SDP with media streams, tagged with the signalling transport
+        // so `enable_srtp` can enforce the same invariant at the SDP layer,
+        // and with the configured recording indicator so the far end can
+        // surface consent UI (audit finding C13).
+        let mut sdp = SdpBuilder::new_with_transport(
             self.config.local_address.ip(),
             self.config.local_address.ip(),
+            self.config.sip_transport,
         );
+        sdp.set_recording_indication(self.config.recording_indication);
 
         let mut stream_ids = Vec::new();
 
@@ -237,15 +293,27 @@ impl SessionRecordingClient {
                         crypto_attr,
                     )?;
 
-                    // Add SRTP to SDP
-                    let key_info = self.srtp_key_manager.get_key_by_stream(&stream_id).unwrap();
+                    // Add SRTP to SDP. The key was just inserted by
+                    // `add_from_crypto_attr` above; treat a missing entry as
+                    // an internal invariant violation rather than panicking
+                    // on attacker-influenced state.
+                    let key_info = self
+                        .srtp_key_manager
+                        .get_key_by_stream(&stream_id)
+                        .ok_or_else(|| {
+                            SrcError::Internal(format!(
+                                "SRTP key for stream {} missing immediately after insert",
+                                stream_id
+                            ))
+                        })?;
 
                     let mut key_material = Vec::new();
                     key_material.extend_from_slice(&key_info.key_material.master_key);
                     key_material.extend_from_slice(&key_info.key_material.master_salt);
                     let key_material_b64 = STANDARD.encode(&key_material);
 
-                    sdp.enable_srtp(idx, key_info.tag, &key_info.suite, &key_material_b64);
+                    sdp.enable_srtp(idx, key_info.tag, &key_info.suite, &key_material_b64)
+                        .map_err(|e| SrcError::Sip(e.to_string()))?;
                 }
             }
 
@@ -300,6 +368,8 @@ impl SessionRecordingClient {
             srs_address: None, // Would be set after SIP response
             using_backup: false,
             failover_attempts: 0,
+            paused: false,
+            muted_participants: HashSet::new(),
         };
 
         self.active_sessions
@@ -395,9 +465,20 @@ impl SessionRecordingClient {
 
     /// Forward an RTP packet to SRS
     pub async fn forward_rtp(&self, session_id: &str, rtp_packet: &[u8]) -> Result<()> {
-        // Verify session exists
-        if !self.active_sessions.contains_key(session_id) {
-            return Err(SrcError::SessionNotFound(session_id.to_string()));
+        // Verify session exists and check pause state (audit finding C15).
+        let paused = {
+            let state = self
+                .active_sessions
+                .get(session_id)
+                .ok_or_else(|| SrcError::SessionNotFound(session_id.to_string()))?;
+            state.paused
+        };
+        if paused {
+            // Paused sessions drop all media at the SRC boundary. The SRS
+            // has already been notified via re-INVITE with
+            // `a=recording-paused`; dropping here ensures no audio hits the
+            // recording file while paused.
+            return Ok(());
         }
 
         // Parse SSRC from RTP header (bytes 8-11)
@@ -412,6 +493,199 @@ impl SessionRecordingClient {
         self.media_forker.forward_by_ssrc(ssrc, rtp_packet).await?;
 
         Ok(())
+    }
+
+    // ============================================================
+    // Pause / resume / update (audit findings C13 + C15, RFC 7866 §5.6)
+    // ============================================================
+
+    /// Pause the recording (RFC 7866 §5.6).
+    ///
+    /// Marks the session paused — subsequent [`forward_rtp`] calls drop
+    /// packets at the SRC boundary — and notifies the SRS by synthesising a
+    /// re-INVITE whose SDP advertises `a=recording:on` + `a=recording-paused`.
+    ///
+    /// Returns an error if the session is unknown or already paused. The
+    /// synthesised re-INVITE is returned to the caller for actual wire
+    /// transmission; the underlying SIP stack is out of scope for this
+    /// crate (see the module-level `TODO` comments).
+    pub async fn pause_recording(&self, session_id: &str) -> Result<SipRequest> {
+        let (dialog, metadata, stream_ids) = {
+            let mut state = self
+                .active_sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SrcError::SessionNotFound(session_id.to_string()))?;
+            if state.paused {
+                return Err(SrcError::Internal("recording already paused".into()));
+            }
+            state.paused = true;
+            (
+                state.dialog.clone(),
+                state.metadata.clone(),
+                state.stream_ids.clone(),
+            )
+        };
+        self.build_metadata_reinvite(
+            session_id,
+            dialog,
+            metadata,
+            stream_ids,
+            RecordingIndication::Paused,
+        )
+        .await
+    }
+
+    /// Resume a previously-paused recording (RFC 7866 §5.6).
+    pub async fn resume_recording(&self, session_id: &str) -> Result<SipRequest> {
+        let (dialog, metadata, stream_ids) = {
+            let mut state = self
+                .active_sessions
+                .get_mut(session_id)
+                .ok_or_else(|| SrcError::SessionNotFound(session_id.to_string()))?;
+            if !state.paused {
+                return Err(SrcError::Internal("recording is not paused".into()));
+            }
+            state.paused = false;
+            (
+                state.dialog.clone(),
+                state.metadata.clone(),
+                state.stream_ids.clone(),
+            )
+        };
+        self.build_metadata_reinvite(
+            session_id,
+            dialog,
+            metadata,
+            stream_ids,
+            RecordingIndication::On,
+        )
+        .await
+    }
+
+    /// Push an updated `RecordingSession` metadata document to the SRS via
+    /// a SIPREC re-INVITE (RFC 7866 §4). Use this when participants join or
+    /// leave mid-call so the SRS's recording stays in sync.
+    pub async fn update_session_metadata(
+        &self,
+        session_id: &str,
+        updater: impl FnOnce(&mut RecordingSession),
+    ) -> Result<SipRequest> {
+        let (dialog, metadata, stream_ids, paused) = {
+            let state = self
+                .active_sessions
+                .get(session_id)
+                .ok_or_else(|| SrcError::SessionNotFound(session_id.to_string()))?;
+            (
+                state.dialog.clone(),
+                state.metadata.clone(),
+                state.stream_ids.clone(),
+                state.paused,
+            )
+        };
+        {
+            let mut md = metadata.write().await;
+            updater(&mut md);
+        }
+        let indication = if paused {
+            RecordingIndication::Paused
+        } else {
+            self.config.recording_indication
+        };
+        self.build_metadata_reinvite(session_id, dialog, metadata, stream_ids, indication)
+            .await
+    }
+
+    /// Mute a participant for consent reasons (audit finding C13). Their
+    /// audio stops being forwarded to the SRS until [`unmute_participant`]
+    /// is called. Used to satisfy "recording consent" opt-outs — the
+    /// session stays up for other participants so the call isn't torn down.
+    pub async fn mute_participant(&self, session_id: &str, participant_id: &str) -> Result<()> {
+        let mut state = self
+            .active_sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SrcError::SessionNotFound(session_id.to_string()))?;
+        state.muted_participants.insert(participant_id.to_string());
+        Ok(())
+    }
+
+    /// Reverse of [`mute_participant`].
+    pub async fn unmute_participant(&self, session_id: &str, participant_id: &str) -> Result<()> {
+        let mut state = self
+            .active_sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SrcError::SessionNotFound(session_id.to_string()))?;
+        state.muted_participants.remove(participant_id);
+        Ok(())
+    }
+
+    /// True if `participant_id` is currently muted in this session. Used
+    /// by media-forwarding code to drop the muted participant's packets.
+    pub fn is_participant_muted(&self, session_id: &str, participant_id: &str) -> bool {
+        self.active_sessions
+            .get(session_id)
+            .map(|s| s.muted_participants.contains(participant_id))
+            .unwrap_or(false)
+    }
+
+    /// Build the re-INVITE that carries updated metadata + recording
+    /// indicator to the SRS. Shared between pause/resume/update paths.
+    ///
+    /// Audit C1: a re-INVITE must target the existing dialog (RFC 7866
+    /// §5.6 / RFC 3261 §14) — same `Call-ID`, monotonically-incremented
+    /// `CSeq`, original `From`-tag, and the confirmed `To`-tag if any.
+    /// Constructing a fresh `SipRequest::new_siprec_invite` (which mints a
+    /// new `Call-ID` and `CSeq=1`) would make every pause/resume/update
+    /// look like an unrelated brand-new recording session to the SRS,
+    /// silently breaking pause/resume semantics on the wire.
+    async fn build_metadata_reinvite(
+        &self,
+        _session_id: &str,
+        dialog: Arc<RwLock<SipDialog>>,
+        metadata: Arc<RwLock<RecordingSession>>,
+        _stream_ids: Vec<String>,
+        indication: RecordingIndication,
+    ) -> Result<SipRequest> {
+        // Rebuild SDP with the new indication. Streams use the original
+        // configuration — re-INVITEs don't renegotiate codecs here.
+        let mut sdp = SdpBuilder::new_with_transport(
+            self.config.local_address.ip(),
+            self.config.local_address.ip(),
+            self.config.sip_transport,
+        );
+        sdp.set_recording_indication(indication);
+
+        let metadata_xml = {
+            let md = metadata.read().await;
+            md.to_xml().map_err(|e| SrcError::Metadata(e.to_string()))?
+        };
+
+        // Bump CSeq under a write lock so concurrent pause/resume/update
+        // calls serialize cleanly and never collide on the same CSeq.
+        let (call_id, cseq, from_uri, to_uri, local_contact, from_tag, to_tag) = {
+            let mut dialog_w = dialog.write().await;
+            let cseq = dialog_w.next_cseq();
+            (
+                dialog_w.call_id.clone(),
+                cseq,
+                dialog_w.local_uri.clone(),
+                dialog_w.remote_uri.clone(),
+                dialog_w.local_contact,
+                dialog_w.local_tag.clone(),
+                dialog_w.remote_tag.clone(),
+            )
+        };
+
+        let mut invite = SipRequest::new_siprec_reinvite(
+            from_uri,
+            to_uri,
+            call_id,
+            cseq,
+            local_contact,
+            from_tag,
+            to_tag,
+        );
+        invite.set_multipart_body(sdp.build(), metadata_xml);
+        Ok(invite)
     }
 
     /// Stop a recording session
@@ -596,6 +870,299 @@ impl Default for MediaConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // C14 regression: SrcConfig with `forward_srtp_keys = true` plus a
+    // plaintext transport must fail at start_recording rather than leaking
+    // SRTP master keys into the SDP body that will ride unencrypted.
+    #[tokio::test]
+    async fn test_start_recording_refuses_sdes_over_udp() {
+        let config = SrcConfig {
+            forward_srtp_keys: true,
+            sip_transport: SipTransport::Udp,
+            ..Default::default()
+        };
+        let src = SessionRecordingClient::new(config).await.unwrap();
+
+        let media_config = MediaConfig::new().add_stream(StreamConfig {
+            codec: "PCMU".to_string(),
+            payload_type: 0,
+            sample_rate: 8000,
+            rtp_port: 5004,
+            ssrc: 0x12345678,
+            destination_address: "192.168.1.100:5004".parse().unwrap(),
+            crypto_attr: Some(
+                "1 AES_CM_128_HMAC_SHA1_80 inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR".into(),
+            ),
+        });
+
+        let result = src
+            .start_recording(
+                "call-udp",
+                "sip:alice@example.com",
+                "sip:bob@example.com",
+                media_config,
+            )
+            .await;
+        match result {
+            Err(SrcError::InsecureSrtpTransport(SipTransport::Udp)) => {}
+            other => panic!("expected InsecureSrtpTransport over UDP, got {:?}", other),
+        }
+        assert_eq!(src.active_session_count(), 0, "session must not be created");
+    }
+
+    // C13 regression: start_recording with default config must surface
+    // the `a=recording:on` session indicator in the generated SDP so
+    // recorded parties can see / be shown that the call is being captured.
+    #[tokio::test]
+    async fn test_recording_indicator_emitted_by_default() {
+        let ip = "127.0.0.1".parse().unwrap();
+        let mut sdp = SdpBuilder::new_with_transport(ip, ip, SipTransport::Tls);
+        sdp.add_audio_stream(10000, "PCMU", 0, 8000);
+        let body = sdp.build();
+        assert!(
+            body.contains("\r\na=recording:on\r\n"),
+            "expected a=recording:on in SDP, got:\n{}",
+            body
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recording_indicator_paused_emits_both_lines() {
+        let ip = "127.0.0.1".parse().unwrap();
+        let mut sdp = SdpBuilder::new_with_transport(ip, ip, SipTransport::Tls);
+        sdp.add_audio_stream(10000, "PCMU", 0, 8000);
+        sdp.set_recording_indication(RecordingIndication::Paused);
+        let body = sdp.build();
+        assert!(body.contains("\r\na=recording:on\r\n"));
+        assert!(body.contains("\r\na=recording-paused\r\n"));
+    }
+
+    #[tokio::test]
+    async fn test_recording_indicator_not_signalled_is_silent() {
+        let ip = "127.0.0.1".parse().unwrap();
+        let mut sdp = SdpBuilder::new_with_transport(ip, ip, SipTransport::Tls);
+        sdp.add_audio_stream(10000, "PCMU", 0, 8000);
+        sdp.set_recording_indication(RecordingIndication::NotSignalled);
+        let body = sdp.build();
+        assert!(!body.contains("a=recording"));
+    }
+
+    // C15 regression: the pause/resume flow updates session state and
+    // produces a re-INVITE whose SDP contains the paused indicator. While
+    // paused, forwarded RTP is dropped.
+    #[tokio::test]
+    async fn test_pause_resume_flow() {
+        let src = SessionRecordingClient::new(SrcConfig::default())
+            .await
+            .unwrap();
+        let media_config = MediaConfig::new().add_stream(StreamConfig {
+            codec: "PCMU".to_string(),
+            payload_type: 0,
+            sample_rate: 8000,
+            rtp_port: 5004,
+            ssrc: 0x12345678,
+            destination_address: "192.168.1.100:5004".parse().unwrap(),
+            crypto_attr: None,
+        });
+        let sid = src
+            .start_recording(
+                "call-pause",
+                "sip:alice@example.com",
+                "sip:bob@example.com",
+                media_config,
+            )
+            .await
+            .unwrap();
+
+        // Pause — returns a re-INVITE with `a=recording-paused`.
+        let reinvite = src.pause_recording(&sid).await.unwrap();
+        let wire = reinvite.build();
+        assert!(wire.contains("a=recording:on"));
+        assert!(wire.contains("a=recording-paused"));
+
+        // While paused, forward_rtp silently drops so no packets hit the
+        // SRS. Use a well-formed packet.
+        let mut pkt = vec![0x80, 0x00, 0x00, 0x01, 0, 0, 0, 0];
+        pkt.extend_from_slice(&0x12345678u32.to_be_bytes());
+        pkt.extend_from_slice(&[0u8; 12]);
+        src.forward_rtp(&sid, &pkt).await.unwrap();
+
+        // Double-pause rejected.
+        assert!(src.pause_recording(&sid).await.is_err());
+
+        // Resume clears paused-indicator from SDP.
+        let reinvite = src.resume_recording(&sid).await.unwrap();
+        let wire = reinvite.build();
+        assert!(wire.contains("a=recording:on"));
+        assert!(!wire.contains("a=recording-paused"));
+
+        // Double-resume rejected.
+        assert!(src.resume_recording(&sid).await.is_err());
+    }
+
+    // C1 regression: pause/resume/update re-INVITEs must reuse the
+    // existing dialog's Call-ID and bump CSeq, not start a fresh dialog.
+    // Otherwise the SRS treats every state change as an unrelated new
+    // recording session and pause/resume become no-ops on the wire.
+    #[tokio::test]
+    async fn test_reinvite_reuses_dialog_call_id_and_cseq() {
+        let src = SessionRecordingClient::new(SrcConfig::default())
+            .await
+            .unwrap();
+        let media_config = MediaConfig::new().add_stream(StreamConfig {
+            codec: "PCMU".to_string(),
+            payload_type: 0,
+            sample_rate: 8000,
+            rtp_port: 5004,
+            ssrc: 0x12345678,
+            destination_address: "192.168.1.100:5004".parse().unwrap(),
+            crypto_attr: None,
+        });
+        let sid = src
+            .start_recording(
+                "call-reinvite",
+                "sip:alice@example.com",
+                "sip:bob@example.com",
+                media_config,
+            )
+            .await
+            .unwrap();
+
+        // Confirm the dialog so it carries a remote tag — required for a
+        // proper re-INVITE per RFC 3261.
+        src.confirm_session_dialog(&sid, "tag-srs".to_string())
+            .await
+            .unwrap();
+
+        // Snapshot the existing dialog Call-ID; the re-INVITE must reuse it.
+        let dialog_call_id = {
+            let session = src.active_sessions.get(&sid).unwrap();
+            let dialog = session.dialog.read().await;
+            dialog.call_id.clone()
+        };
+
+        let pause = src.pause_recording(&sid).await.unwrap();
+        assert_eq!(
+            pause.call_id(),
+            dialog_call_id,
+            "re-INVITE must reuse the dialog's Call-ID"
+        );
+        assert_eq!(
+            pause.cseq(),
+            2,
+            "first re-INVITE after start (CSeq=1) must be CSeq=2"
+        );
+        let pause_wire = pause.build();
+        assert!(
+            pause_wire.contains("tag=tag-srs"),
+            "re-INVITE must carry the dialog's remote tag"
+        );
+
+        let resume = src.resume_recording(&sid).await.unwrap();
+        assert_eq!(resume.call_id(), dialog_call_id);
+        assert_eq!(resume.cseq(), 3, "second re-INVITE must bump CSeq again");
+
+        let update = src
+            .update_session_metadata(&sid, |md| {
+                md.add_extension("note", "late-joiner");
+            })
+            .await
+            .unwrap();
+        assert_eq!(update.call_id(), dialog_call_id);
+        assert_eq!(update.cseq(), 4);
+    }
+
+    // C13 regression: muting a participant keeps the session alive for
+    // everyone else but marks the participant so the forwarding layer can
+    // drop their audio.
+    #[tokio::test]
+    async fn test_mute_participant_for_consent() {
+        let src = SessionRecordingClient::new(SrcConfig::default())
+            .await
+            .unwrap();
+        let sid = src
+            .start_recording(
+                "call-mute",
+                "sip:alice@example.com",
+                "sip:bob@example.com",
+                MediaConfig::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!src.is_participant_muted(&sid, "caller"));
+        src.mute_participant(&sid, "caller").await.unwrap();
+        assert!(src.is_participant_muted(&sid, "caller"));
+        assert!(!src.is_participant_muted(&sid, "callee"));
+
+        src.unmute_participant(&sid, "caller").await.unwrap();
+        assert!(!src.is_participant_muted(&sid, "caller"));
+    }
+
+    // C15 regression: update_session_metadata reflects mutations into the
+    // re-INVITE body so the SRS sees late-joining participants.
+    #[tokio::test]
+    async fn test_update_session_metadata_reinvite() {
+        let src = SessionRecordingClient::new(SrcConfig::default())
+            .await
+            .unwrap();
+        let sid = src
+            .start_recording(
+                "call-update",
+                "sip:alice@example.com",
+                "sip:bob@example.com",
+                MediaConfig::new(),
+            )
+            .await
+            .unwrap();
+
+        let reinvite = src
+            .update_session_metadata(&sid, |md| {
+                md.add_participant(
+                    Participant::new(
+                        "late-joiner",
+                        "sip:charlie@example.com",
+                        ParticipantRole::Unknown,
+                    )
+                    .with_name("Charlie"),
+                );
+            })
+            .await
+            .unwrap();
+
+        let wire = reinvite.build();
+        assert!(wire.contains("sip:charlie@example.com"));
+    }
+
+    // Explicit downgrade: same insecure transport, but operator has turned
+    // off `forward_srtp_keys`, so there are no SDES keys to leak — allowed.
+    #[tokio::test]
+    async fn test_start_recording_allowed_over_udp_without_sdes() {
+        let config = SrcConfig {
+            forward_srtp_keys: false,
+            sip_transport: SipTransport::Udp,
+            ..Default::default()
+        };
+        let src = SessionRecordingClient::new(config).await.unwrap();
+        let media_config = MediaConfig::new().add_stream(StreamConfig {
+            codec: "PCMU".to_string(),
+            payload_type: 0,
+            sample_rate: 8000,
+            rtp_port: 5004,
+            ssrc: 0x12345678,
+            destination_address: "192.168.1.100:5004".parse().unwrap(),
+            crypto_attr: None,
+        });
+        assert!(src
+            .start_recording(
+                "call-nosdes",
+                "sip:alice@example.com",
+                "sip:bob@example.com",
+                media_config,
+            )
+            .await
+            .is_ok());
+    }
 
     #[tokio::test]
     async fn test_src_creation() {

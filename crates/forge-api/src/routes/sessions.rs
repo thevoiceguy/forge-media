@@ -3,10 +3,15 @@
 use axum::extract::{Path, State};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use forge_core::{CallId, ParticipantId};
-use forge_engine::SessionManager;
+use forge_core::{AudioCodec, CallId, ParticipantId};
+use forge_engine::{
+    ParticipantCodecConfig, ParticipantLabel, ParticipantMediaState, ParticipantMediaUpdate,
+    SessionManager,
+};
 use metrics::{counter, histogram};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use validator::Validate;
 
@@ -85,6 +90,32 @@ pub struct SessionListResponse {
     pub count: usize,
 }
 
+/// Request to update runtime media configuration for a participant leg.
+#[derive(Debug, Serialize, Deserialize, Validate)]
+pub struct UpdateParticipantMediaRequest {
+    /// Remote RTP endpoint for this leg (e.g. "203.0.113.10:4000")
+    #[validate(length(min = 1, max = 64))]
+    pub remote_rtp_addr: Option<String>,
+    /// Clear the currently configured/learned remote RTP endpoint.
+    pub clear_remote_rtp_addr: Option<bool>,
+    /// RTP payload type for the negotiated codec.
+    #[validate(range(max = 127))]
+    pub payload_type: Option<u8>,
+    /// Negotiated codec name (e.g. "pcmu", "pcma", "opus")
+    #[validate(length(min = 1, max = 32))]
+    pub codec: Option<String>,
+    /// Codec clock rate (Hz), e.g. 8000 or 48000.
+    #[validate(range(min = 1, max = 192000))]
+    pub clock_rate: Option<u32>,
+    /// Negotiated telephone-event payload type for RFC 2833 DTMF.
+    #[validate(range(max = 127))]
+    pub telephone_event_payload_type: Option<u8>,
+    /// Restrict symmetric RTP latching to the provided source IPs.
+    pub latch_allowed_ips: Option<Vec<String>>,
+    /// Clear any configured source-IP latch allowlist.
+    pub clear_latch_allowed_ips: Option<bool>,
+}
+
 /// Map an arbitrary codec name (from the peer's SDP `a=rtpmap`) onto a
 /// fixed allowlist of labels for Prometheus counters. Anything outside the
 /// list becomes `"other"`. This is the defense for audit finding C7: the
@@ -113,6 +144,105 @@ pub fn canonical_codec_label(raw: &str) -> &'static str {
     }
 }
 
+fn parse_participant_leg(raw: &str) -> Result<ParticipantLabel, ApiError> {
+    raw.parse().map_err(ApiError::InvalidRequest)
+}
+
+fn parse_audio_codec(raw: &str) -> Result<AudioCodec, ApiError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "pcmu" | "g711u" | "mulaw" => Ok(AudioCodec::PCMU),
+        "pcma" | "g711a" | "alaw" => Ok(AudioCodec::PCMA),
+        "g722" => Ok(AudioCodec::G722),
+        "g729" | "g729a" | "g729b" => Ok(AudioCodec::G729),
+        "opus" => Ok(AudioCodec::Opus),
+        "speex" => Ok(AudioCodec::Speex),
+        "ilbc" => Ok(AudioCodec::ILBC),
+        "amr" => Ok(AudioCodec::AMR),
+        "amrwb" | "amr-wb" => Ok(AudioCodec::AMRWB),
+        "pcm" | "pcm16" => Ok(AudioCodec::PCM),
+        _ => Err(ApiError::InvalidRequest(format!(
+            "Unsupported codec '{}'",
+            raw
+        ))),
+    }
+}
+
+fn build_participant_media_update(
+    request: UpdateParticipantMediaRequest,
+) -> Result<ParticipantMediaUpdate, ApiError> {
+    let remote_addr =
+        match (
+            request.remote_rtp_addr.as_ref(),
+            request.clear_remote_rtp_addr.unwrap_or(false),
+        ) {
+            (Some(_), true) => {
+                return Err(ApiError::InvalidRequest(
+                    "remote_rtp_addr and clear_remote_rtp_addr cannot both be set".to_string(),
+                ))
+            }
+            (Some(addr), false) => Some(Some(addr.parse::<SocketAddr>().map_err(|e| {
+                ApiError::InvalidRequest(format!("Invalid remote_rtp_addr: {}", e))
+            })?)),
+            (None, true) => Some(None),
+            (None, false) => None,
+        };
+
+    let codec_fields_set = [
+        request.payload_type.is_some(),
+        request.codec.is_some(),
+        request.clock_rate.is_some(),
+    ]
+    .into_iter()
+    .filter(|is_set| *is_set)
+    .count();
+
+    let codec_config = if codec_fields_set == 0 {
+        None
+    } else if codec_fields_set != 3 {
+        return Err(ApiError::InvalidRequest(
+            "payload_type, codec, and clock_rate must be provided together".to_string(),
+        ));
+    } else {
+        Some(ParticipantCodecConfig {
+            payload_type: request.payload_type.unwrap(),
+            codec: parse_audio_codec(request.codec.as_deref().unwrap())?,
+            clock_rate: request.clock_rate.unwrap(),
+        })
+    };
+
+    let latch_allowed_ips = match (
+        request.latch_allowed_ips.as_ref(),
+        request.clear_latch_allowed_ips.unwrap_or(false),
+    ) {
+        (Some(_), true) => {
+            return Err(ApiError::InvalidRequest(
+                "latch_allowed_ips and clear_latch_allowed_ips cannot both be set".to_string(),
+            ))
+        }
+        (Some(ips), false) => {
+            let mut parsed = HashSet::with_capacity(ips.len());
+            for ip in ips {
+                parsed.insert(ip.parse::<IpAddr>().map_err(|e| {
+                    ApiError::InvalidRequest(format!(
+                        "Invalid latch_allowed_ips entry '{}': {}",
+                        ip, e
+                    ))
+                })?);
+            }
+            Some(Some(parsed))
+        }
+        (None, true) => Some(None),
+        (None, false) => None,
+    };
+
+    Ok(ParticipantMediaUpdate {
+        remote_addr,
+        codec_config,
+        telephone_event_payload_type: request.telephone_event_payload_type,
+        latch_allowed_ips,
+    })
+}
+
 /// Application state with session manager
 #[derive(Clone)]
 pub struct AppState {
@@ -127,6 +257,7 @@ pub struct AppState {
     pub core_event_bus: Arc<forge_core::EventBus>,
     pub webrtc_manager: Arc<super::webrtc::WebRtcManager>,
     pub ai_session_manager: Arc<forge_engine::AISessionManager>,
+    pub media_bridge_manager: Arc<forge_engine::MediaBridgeManager>,
     /// HA manager for cluster coordination (optional, feature-gated)
     #[cfg(feature = "ha")]
     pub ha_manager: Option<Arc<crate::ha::HAManager>>,
@@ -159,6 +290,7 @@ impl AppState {
 
         // Create AI session manager
         let ai_session_manager = Arc::new(forge_engine::AISessionManager::new());
+        let media_bridge_manager = Arc::new(forge_engine::MediaBridgeManager::new());
 
         Self {
             session_manager,
@@ -172,6 +304,7 @@ impl AppState {
             core_event_bus,
             webrtc_manager,
             ai_session_manager,
+            media_bridge_manager,
             #[cfg(feature = "ha")]
             ha_manager,
         }
@@ -524,6 +657,54 @@ async fn delete_session(
     Ok(no_content())
 }
 
+/// Get runtime media configuration for a participant leg.
+///
+/// GET /v1/sessions/{id}/participants/{leg}/media
+#[tracing::instrument(skip(state), fields(call_id = %call_id, leg = %leg))]
+async fn get_participant_media(
+    _auth: RequireReadOnly,
+    State(state): State<Arc<AppState>>,
+    Path((call_id, leg)): Path<(String, String)>,
+) -> ApiResult<ApiSuccess<ParticipantMediaState>> {
+    let call_id = CallId(call_id);
+    let leg = parse_participant_leg(&leg)?;
+
+    let participant = state
+        .session_manager
+        .participant_media_state(&call_id, leg)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(success(participant))
+}
+
+/// Update runtime media configuration for a participant leg.
+///
+/// PUT /v1/sessions/{id}/participants/{leg}/media
+#[tracing::instrument(skip(state, request), fields(call_id = %call_id, leg = %leg))]
+async fn update_participant_media(
+    _auth: RequireOperator,
+    State(state): State<Arc<AppState>>,
+    Path((call_id, leg)): Path<(String, String)>,
+    Json(request): Json<UpdateParticipantMediaRequest>,
+) -> ApiResult<ApiSuccess<ParticipantMediaState>> {
+    request
+        .validate()
+        .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
+
+    let call_id = CallId(call_id);
+    let leg = parse_participant_leg(&leg)?;
+    let update = build_participant_media_update(request)?;
+
+    let participant = state
+        .session_manager
+        .update_participant_media(&call_id, leg, update)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(success(participant))
+}
+
 /// List all sessions
 ///
 /// GET /v1/sessions
@@ -618,6 +799,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/v1/sessions/{id}", get(get_session))
         .route("/v1/sessions/{id}", delete(delete_session))
         .route("/v1/sessions/{id}/start", post(start_session))
+        .route(
+            "/v1/sessions/{id}/participants/{leg}/media",
+            get(get_participant_media).put(update_participant_media),
+        )
 }
 
 #[cfg(test)]
@@ -816,5 +1001,105 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_update_participant_media_route() {
+        let state = test_state_with_ports(44000, 45000);
+
+        state
+            .session_manager
+            .create_session(
+                CallId("test-media-123".to_string()),
+                ParticipantId::new("caller"),
+                ParticipantId::new("callee"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let app = with_auth(routes(), state);
+        let request_body = serde_json::json!({
+            "remote_rtp_addr": "203.0.113.20:5000",
+            "payload_type": 8,
+            "codec": "pcma",
+            "clock_rate": 8000,
+            "telephone_event_payload_type": 101,
+            "latch_allowed_ips": ["203.0.113.20"]
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/sessions/test-media-123/participants/b/media")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let response: crate::response::ApiSuccess<ParticipantMediaState> =
+            serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(response.data.leg, ParticipantLabel::B);
+        assert_eq!(response.data.participant_id, "callee");
+        assert_eq!(
+            response.data.remote_rtp_addr,
+            Some("203.0.113.20:5000".parse::<SocketAddr>().unwrap())
+        );
+        assert_eq!(response.data.payload_type, 8);
+        assert_eq!(response.data.codec, AudioCodec::PCMA);
+        assert_eq!(response.data.clock_rate, 8000);
+        assert_eq!(response.data.telephone_event_payload_type, 101);
+        assert_eq!(
+            response.data.latch_allowed_ips,
+            Some(vec!["203.0.113.20".parse::<IpAddr>().unwrap()])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_participant_media_route_rejects_partial_codec_tuple() {
+        let state = test_state_with_ports(45000, 46000);
+
+        state
+            .session_manager
+            .create_session(
+                CallId("test-media-invalid-123".to_string()),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let app = with_auth(routes(), state);
+        let request_body = serde_json::json!({
+            "codec": "opus"
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/sessions/test-media-invalid-123/participants/a/media")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&request_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

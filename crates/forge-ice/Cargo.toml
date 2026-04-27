@@ -28,7 +28,7 @@ if-addrs = "0.13"
 
 # Random for STUN transaction IDs
 rand = { workspace = true }
-hmac = "0.12"
+hmac = "0.13"
 sha1 = "0.10"
 # Constant-time comparison for MESSAGE-INTEGRITY HMAC (audit finding C10)
 subtle = { workspace = true }

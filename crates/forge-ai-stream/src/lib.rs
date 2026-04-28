@@ -62,7 +62,9 @@ pub use bargein::{BargeInConfig, BargeInDetector, BargeInState};
 pub use connector::{AIConnector, AIConnectorConfig, AIConnectorType, AISession};
 pub use deepgram::{DeepgramConfig, DeepgramConnector, DeepgramModel, DeepgramVoices};
 pub use elevenlabs::{ElevenLabsConfig, ElevenLabsConnector, ElevenLabsModel, ElevenLabsVoices};
-pub use events::{AIEvent, AIEventType, FunctionCall, TranscriptSegment};
+pub use events::{
+    AIEvent, AIEventType, FunctionCall, SessionConfig, TranscriptSegment, TurnDetectionMode,
+};
 pub use openai::{OpenAIConfig, OpenAIConnector, OpenAIModel};
 pub use vad::{VadConfig, VadDetector, VadState};
 

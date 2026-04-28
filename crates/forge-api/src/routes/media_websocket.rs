@@ -14,7 +14,10 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use forge_core::{CallId, DtmfDetectionMethod, DtmfEventKind, ForgeEvent};
-use forge_engine::{MediaBridgeHandle, MediaTarget, OutboundMediaFrame, ParticipantLabel};
+use forge_engine::{
+    MediaBridgeHandle, MediaTarget, OutboundDtmfRequest, OutboundMediaFrame, OutboundMediaRequest,
+    ParticipantLabel, PlayoutMode,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -48,6 +51,23 @@ enum ClientMessage {
         target: MediaTarget,
         sample_rate: u32,
         data: String,
+        playback_id: Option<String>,
+        mode: Option<PlayoutMode>,
+    },
+    Flush {
+        target: Option<MediaTarget>,
+        playback_id: Option<String>,
+    },
+    Stop {
+        target: Option<MediaTarget>,
+        playback_id: Option<String>,
+    },
+    Dtmf {
+        target: MediaTarget,
+        digit: String,
+        duration_ms: Option<u32>,
+        playback_id: Option<String>,
+        mode: Option<PlayoutMode>,
     },
 }
 
@@ -77,11 +97,29 @@ enum ServerMessage {
         method: DtmfDetectionMethod,
         event_type: DtmfEventKind,
     },
+    Transcription {
+        text: String,
+        confidence: f32,
+        is_final: bool,
+    },
+    AiToolCall {
+        tool_name: String,
+        arguments: String,
+    },
+    AiSession {
+        state: &'static str,
+        provider: Option<String>,
+    },
     SessionState {
         state: &'static str,
     },
     SessionTerminated {
         reason: String,
+    },
+    Ack {
+        action: &'static str,
+        playback_id: Option<String>,
+        target: Option<MediaTarget>,
     },
     Error {
         message: String,
@@ -179,14 +217,24 @@ async fn handle_socket(
                                     break;
                                 }
                             }
-                            Ok(ClientMessage::Audio { target, sample_rate, data }) => {
+                            Ok(ClientMessage::Audio {
+                                target,
+                                sample_rate,
+                                data,
+                                playback_id,
+                                mode,
+                            }) => {
                                 match decode_pcm16_base64(&data) {
                                     Ok(samples) => {
-                                        if let Err(e) = outbound_tx.send(OutboundMediaFrame {
-                                            target,
-                                            sample_rate,
-                                            samples,
-                                        }).await {
+                                        let request =
+                                            OutboundMediaRequest::Audio(OutboundMediaFrame {
+                                                target,
+                                                sample_rate,
+                                                samples,
+                                                playback_id: playback_id.clone(),
+                                                mode: mode.unwrap_or_default(),
+                                            });
+                                        if let Err(e) = outbound_tx.send(request).await {
                                             warn!(
                                                 "Failed to queue outbound media for call {}: {}",
                                                 call_id.0,
@@ -202,6 +250,158 @@ async fn handle_socket(
                                             {
                                                 break;
                                             }
+                                        } else if !send_json(
+                                            &mut socket,
+                                            &ServerMessage::Ack {
+                                                action: "audio_queued",
+                                                playback_id,
+                                                target: Some(target),
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if !send_json(
+                                            &mut socket,
+                                            &ServerMessage::Error {
+                                                message: e.to_string(),
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(ClientMessage::Flush { target, playback_id }) => {
+                                if let Err(e) = outbound_tx
+                                    .send(OutboundMediaRequest::Flush {
+                                        target,
+                                        playback_id: playback_id.clone(),
+                                    })
+                                    .await
+                                {
+                                    warn!(
+                                        "Failed to queue flush request for call {}: {}",
+                                        call_id.0,
+                                        e
+                                    );
+                                    if !send_json(
+                                        &mut socket,
+                                        &ServerMessage::Error {
+                                            message: format!(
+                                                "Failed to queue flush request: {}",
+                                                e
+                                            ),
+                                        },
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                } else if !send_json(
+                                    &mut socket,
+                                    &ServerMessage::Ack {
+                                        action: "flush_queued",
+                                        playback_id,
+                                        target,
+                                    },
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(ClientMessage::Stop { target, playback_id }) => {
+                                if let Err(e) = outbound_tx
+                                    .send(OutboundMediaRequest::Stop {
+                                        target,
+                                        playback_id: playback_id.clone(),
+                                    })
+                                    .await
+                                {
+                                    warn!(
+                                        "Failed to queue stop request for call {}: {}",
+                                        call_id.0,
+                                        e
+                                    );
+                                    if !send_json(
+                                        &mut socket,
+                                        &ServerMessage::Error {
+                                            message: format!(
+                                                "Failed to queue stop request: {}",
+                                                e
+                                            ),
+                                        },
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                } else if !send_json(
+                                    &mut socket,
+                                    &ServerMessage::Ack {
+                                        action: "stop_queued",
+                                        playback_id,
+                                        target,
+                                    },
+                                )
+                                .await
+                                {
+                                    break;
+                                }
+                            }
+                            Ok(ClientMessage::Dtmf {
+                                target,
+                                digit,
+                                duration_ms,
+                                playback_id,
+                                mode,
+                            }) => {
+                                match parse_dtmf_digit(&digit) {
+                                    Ok(digit) => {
+                                        let request =
+                                            OutboundMediaRequest::Dtmf(OutboundDtmfRequest {
+                                                target,
+                                                digit,
+                                                duration_ms: duration_ms.unwrap_or(160),
+                                                playback_id: playback_id.clone(),
+                                                mode: mode.unwrap_or_default(),
+                                            });
+                                        if let Err(e) = outbound_tx.send(request).await {
+                                            warn!(
+                                                "Failed to queue outbound DTMF for call {}: {}",
+                                                call_id.0,
+                                                e
+                                            );
+                                            if !send_json(
+                                                &mut socket,
+                                                &ServerMessage::Error {
+                                                    message: format!(
+                                                        "Failed to queue outbound DTMF: {}",
+                                                        e
+                                                    ),
+                                                },
+                                            )
+                                            .await
+                                            {
+                                                break;
+                                            }
+                                        } else if !send_json(
+                                            &mut socket,
+                                            &ServerMessage::Ack {
+                                                action: "dtmf_queued",
+                                                playback_id,
+                                                target: Some(target),
+                                            },
+                                        )
+                                        .await
+                                        {
+                                            break;
                                         }
                                     }
                                     Err(e) => {
@@ -312,6 +512,65 @@ async fn forward_call_event(socket: &mut WebSocket, call_id: &CallId, event: For
             )
             .await
         }
+        ForgeEvent::TranscriptionResult {
+            call_id: event_call_id,
+            text,
+            confidence,
+            is_final,
+            ..
+        } if event_call_id == *call_id => {
+            send_json(
+                socket,
+                &ServerMessage::Transcription {
+                    text,
+                    confidence,
+                    is_final,
+                },
+            )
+            .await
+        }
+        ForgeEvent::AiToolCall {
+            call_id: event_call_id,
+            tool_name,
+            arguments,
+            ..
+        } if event_call_id == *call_id => {
+            send_json(
+                socket,
+                &ServerMessage::AiToolCall {
+                    tool_name,
+                    arguments,
+                },
+            )
+            .await
+        }
+        ForgeEvent::AiSessionStarted {
+            call_id: event_call_id,
+            provider,
+            ..
+        } if event_call_id == *call_id => {
+            send_json(
+                socket,
+                &ServerMessage::AiSession {
+                    state: "active",
+                    provider: Some(provider),
+                },
+            )
+            .await
+        }
+        ForgeEvent::AiSessionEnded {
+            call_id: event_call_id,
+            ..
+        } if event_call_id == *call_id => {
+            send_json(
+                socket,
+                &ServerMessage::AiSession {
+                    state: "terminated",
+                    provider: None,
+                },
+            )
+            .await
+        }
         ForgeEvent::SessionCreated {
             call_id: event_call_id,
             ..
@@ -391,6 +650,24 @@ fn decode_pcm16_base64(data: &str) -> Result<Vec<i16>, ApiError> {
         .collect())
 }
 
+fn parse_dtmf_digit(value: &str) -> Result<forge_engine::DtmfDigit, ApiError> {
+    let mut chars = value.chars();
+    let Some(ch) = chars.next() else {
+        return Err(ApiError::InvalidRequest(
+            "DTMF digit must contain exactly one character".to_string(),
+        ));
+    };
+
+    if chars.next().is_some() {
+        return Err(ApiError::InvalidRequest(
+            "DTMF digit must contain exactly one character".to_string(),
+        ));
+    }
+
+    forge_engine::DtmfDigit::from_char(ch)
+        .map_err(|e| ApiError::InvalidRequest(format!("Invalid DTMF digit: {}", e)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,19 +703,55 @@ mod tests {
 
     #[test]
     fn test_audio_message_parsing() {
-        let msg = r#"{"type":"audio","target":"both","sample_rate":16000,"data":"AAE="}"#;
+        let msg = r#"{"type":"audio","target":"both","sample_rate":16000,"data":"AAE=","playback_id":"play-1","mode":"replace"}"#;
         let parsed: ClientMessage = serde_json::from_str(msg).unwrap();
         match parsed {
             ClientMessage::Audio {
                 target,
                 sample_rate,
+                playback_id,
+                mode,
                 ..
             } => {
                 assert_eq!(target, MediaTarget::Both);
                 assert_eq!(sample_rate, 16000);
+                assert_eq!(playback_id.as_deref(), Some("play-1"));
+                assert_eq!(mode, Some(PlayoutMode::Replace));
             }
             _ => panic!("expected audio message"),
         }
+    }
+
+    #[test]
+    fn test_dtmf_message_parsing() {
+        let msg = r##"{"type":"dtmf","target":"a","digit":"#","duration_ms":240,"playback_id":"tone-1","mode":"append"}"##;
+        let parsed: ClientMessage = serde_json::from_str(msg).unwrap();
+        match parsed {
+            ClientMessage::Dtmf {
+                target,
+                digit,
+                duration_ms,
+                playback_id,
+                mode,
+            } => {
+                assert_eq!(target, MediaTarget::A);
+                assert_eq!(digit, "#");
+                assert_eq!(duration_ms, Some(240));
+                assert_eq!(playback_id.as_deref(), Some("tone-1"));
+                assert_eq!(mode, Some(PlayoutMode::Append));
+            }
+            _ => panic!("expected dtmf message"),
+        }
+    }
+
+    #[test]
+    fn test_parse_dtmf_digit() {
+        assert_eq!(
+            parse_dtmf_digit("#").unwrap(),
+            forge_engine::DtmfDigit::Hash
+        );
+        assert!(parse_dtmf_digit("12").is_err());
+        assert!(parse_dtmf_digit("").is_err());
     }
 
     #[test]

@@ -11,13 +11,15 @@ pub mod persistence;
 pub mod session;
 
 pub use ai_integration::{AISession, AISessionConfig, AISessionManager, AISessionState};
+pub use forge_dtmf::DtmfDigit;
 pub use forwarding::ForwardingEngine;
 pub use injection::{
     AudioTarget, MixMode, PlaybackHandle, PlaybackId, PlaybackManager, PlaybackStatus,
 };
 pub use manager::{SessionManager, SessionManagerConfig};
 pub use media_bridge::{
-    InboundMediaFrame, MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundMediaFrame,
+    InboundMediaFrame, MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundDtmfRequest,
+    OutboundMediaFrame, OutboundMediaRequest, PlayoutMode,
 };
 pub use persistence::{
     ConnectionState, PersistedAISession, PersistenceBackend, PersistenceBackendType,

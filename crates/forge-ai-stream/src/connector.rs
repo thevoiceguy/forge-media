@@ -176,11 +176,29 @@ pub trait AIConnector: Send + Sync {
     async fn next_event(&mut self) -> Result<Option<AIEvent>>;
 
     /// Send a function call response
-    async fn send_function_response(
+    async fn send_function_response(&mut self, call_id: String, output: String) -> Result<()>;
+
+    /// Send labeled audio for a specific participant.
+    ///
+    /// Connectors without native speaker-label support can ignore the label and
+    /// fall back to plain audio streaming.
+    async fn send_labeled_audio(
         &mut self,
-        call_id: impl Into<String> + Send,
-        output: impl Into<String> + Send,
-    ) -> Result<()>;
+        _participant_id: &str,
+        audio_data: &[i16],
+        sample_rate: u32,
+    ) -> Result<()> {
+        self.send_audio(audio_data, sample_rate).await
+    }
+
+    /// Send an out-of-band DTMF notification to the AI provider.
+    ///
+    /// Providers without a DTMF control channel can report unsupported.
+    async fn send_dtmf_event(&mut self, _digit: char, _detection_method: &str) -> Result<()> {
+        Err(crate::AIStreamError::Config(
+            "DTMF events are not supported by this connector".to_string(),
+        ))
+    }
 
     /// Interrupt the current AI response (barge-in)
     async fn interrupt(&mut self) -> Result<()>;

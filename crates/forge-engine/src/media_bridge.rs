@@ -286,11 +286,7 @@ mod tests {
                 Err(_) => failures += 1,
             }
         }
-        assert_eq!(
-            successes.len(),
-            1,
-            "exactly one attach must win the race"
-        );
+        assert_eq!(successes.len(), 1, "exactly one attach must win the race");
         assert_eq!(failures, 31, "all losers must report ResourceLimit");
         assert!(manager.has_bridge(&call_id));
     }

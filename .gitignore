@@ -152,3 +152,7 @@ TAGS
 # direnv
 .envrc
 .direnv/
+
+# AI coding tools (per-user state)
+.claude/
+.codex

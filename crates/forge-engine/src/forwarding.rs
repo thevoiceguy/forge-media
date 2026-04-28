@@ -1,7 +1,7 @@
 //! RTP packet forwarding engine
 
-use crate::session::{MediaSession, Participant, RecordingSide, SessionState};
-#[cfg(feature = "opus")]
+use crate::media_bridge::{InboundMediaFrame, MediaTarget};
+use crate::session::{MediaSession, Participant, ParticipantLabel, RecordingSide, SessionState};
 use forge_codecs::AudioCodec as _;
 use forge_core::{ForgeError, Result};
 use forge_rtp::rtcp::RtcpPacket;
@@ -165,8 +165,8 @@ impl ForwardingEngine {
                         }
                     }
                 }
-                // Timeout check and AI audio response handling (run periodically)
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                // Timeout check and generated audio playout (run periodically)
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(20)) => {
                     // Check for timeout
                     if session.is_timed_out().await {
                         tracing::info!("Session {} timed out, stopping forwarding", call_id.0);
@@ -174,19 +174,20 @@ impl ForwardingEngine {
                         break;
                     }
 
-                    // Check for AI audio responses
-                    if let Some(ai_manager) = session.ai_manager().await {
-                        if let Some(audio_response) = ai_manager.try_recv_audio_response(call_id).await {
-                            Self::handle_ai_audio_response(
-                                &session,
-                                &sockets,
-                                &participant_a,
-                                &participant_b,
-                                audio_response,
-                            )
-                            .await;
-                        }
-                    }
+                    Self::drain_ai_audio_responses(
+                        &session,
+                        &sockets,
+                        &participant_a,
+                        &participant_b,
+                    )
+                    .await;
+                    Self::drain_media_bridge_outbound(
+                        &session,
+                        &sockets,
+                        &participant_a,
+                        &participant_b,
+                    )
+                    .await;
                 }
             }
         }
@@ -271,157 +272,19 @@ impl ForwardingEngine {
             counter!("forge_dtmf_rfc2833_relayed_total", 1);
         }
 
-        // Decode audio for recording and optional DTMF detection
-        let payload_type = packet.header.payload_type();
-        let opus_pt = session.dtmf_config().opus_payload_type;
-        let is_opus_payload = opus_pt.map(|pt| payload_type == pt).unwrap_or(false);
-
-        // Decode G.711 (payload types 0=PCMU, 8=PCMA) or Opus to PCM
-        // This is needed for both recording AND inband DTMF detection
-        let pcm_samples: Vec<i16> = if payload_type == 0 || payload_type == 8 || is_opus_payload {
-            if payload_type == 0 {
-                // PCMU (µ-law)
-                packet
-                    .payload
-                    .iter()
-                    .map(|&byte| forge_codecs::g711::decode_ulaw(byte))
-                    .collect()
-            } else if payload_type == 8 {
-                // PCMA (A-law)
-                packet
-                    .payload
-                    .iter()
-                    .map(|&byte| forge_codecs::g711::decode_alaw(byte))
-                    .collect()
-            } else if is_opus_payload {
-                // Opus - decode using the Opus decoder
-                #[cfg(feature = "opus")]
-                {
-                    let mut decoder = session.opus_decoder().lock().await;
-                    match decoder.decode(&packet.payload) {
-                        Ok(samples) => samples,
-                        Err(e) => {
-                            tracing::trace!(
-                                "Opus decoding failed for session {}: {}",
-                                call_id.0,
-                                e
-                            );
-                            Vec::new()
-                        }
-                    }
-                }
-                #[cfg(not(feature = "opus"))]
-                {
-                    tracing::trace!("Opus decoding disabled: opus feature not enabled");
-                    Vec::new()
-                }
-            } else {
-                // Shouldn't reach here, but handle gracefully
-                Vec::new()
-            }
-        } else {
-            // Not an audio codec we can decode
-            Vec::new()
+        let Some((sender, receiver)) =
+            Self::determine_packet_sides(session, participant_a, participant_b, source_addr).await
+        else {
+            return;
         };
 
-        // Determine which participant sent this packet
-        // Note: We match by IP only (not IP:port) to handle non-symmetric RTP where
-        // phones send from different ports than they receive on (common with NAT)
-        let (sender, receiver) = {
-            let a = participant_a.read().await;
-            let b = participant_b.read().await;
-
-            // Check if source IP matches participant A's remote IP
-            let a_ip_match = a
-                .remote_addr
-                .map(|addr| addr.ip() == source_addr.ip())
-                .unwrap_or(false);
-            // Check if source IP matches participant B's remote IP
-            let b_ip_match = b
-                .remote_addr
-                .map(|addr| addr.ip() == source_addr.ip())
-                .unwrap_or(false);
-
-            if a_ip_match && !b_ip_match {
-                // Packet from A (IP matches A only), forward to B
-                (Side::A, Side::B)
-            } else if b_ip_match && !a_ip_match {
-                // Packet from B (IP matches B only), forward to A
-                (Side::B, Side::A)
-            } else if a_ip_match && b_ip_match {
-                // Both IPs match (same IP for both legs, e.g., hairpin call)
-                // Fall back to exact port match, then first-packet learning
-                if a.remote_addr == Some(source_addr) {
-                    (Side::A, Side::B)
-                } else if b.remote_addr == Some(source_addr) {
-                    (Side::B, Side::A)
-                } else {
-                    // Same IP, different port - use port proximity heuristic
-                    let a_port = a.remote_addr.map(|addr| addr.port()).unwrap_or(0);
-                    let b_port = b.remote_addr.map(|addr| addr.port()).unwrap_or(0);
-                    let src_port = source_addr.port();
-                    let a_diff = (a_port as i32 - src_port as i32).abs();
-                    let b_diff = (b_port as i32 - src_port as i32).abs();
-                    if a_diff <= b_diff {
-                        (Side::A, Side::B)
-                    } else {
-                        (Side::B, Side::A)
-                    }
-                }
-            } else {
-                // Unknown sender - candidate for symmetric-RTP learning.
-                //
-                // Audit finding C3: an off-path attacker who guesses the local
-                // RTP port can race the legitimate peer's first packet and be
-                // latched as a participant. When the signaling layer has
-                // populated `latch_allowed_ips` for a participant, require the
-                // source IP to be on that allowlist before latching.
-                let source_ip = source_addr.ip();
-
-                let a_can_latch = a.remote_addr.is_none()
-                    && a.latch_allowed_ips
-                        .as_ref()
-                        .map_or(true, |allowed| allowed.contains(&source_ip));
-                let b_can_latch = b.remote_addr.is_none()
-                    && b.latch_allowed_ips
-                        .as_ref()
-                        .map_or(true, |allowed| allowed.contains(&source_ip));
-
-                if a_can_latch {
-                    tracing::info!(
-                        "Learning remote RTP endpoint for session {} leg A: {}",
-                        call_id.0,
-                        source_addr
-                    );
-                    counter!("forge_rtp_latch_learned_total", 1);
-                    drop(a);
-                    drop(b);
-                    participant_a.write().await.remote_addr = Some(source_addr);
-                    (Side::A, Side::B)
-                } else if b_can_latch {
-                    tracing::info!(
-                        "Learning remote RTP endpoint for session {} leg B: {}",
-                        call_id.0,
-                        source_addr
-                    );
-                    counter!("forge_rtp_latch_learned_total", 1);
-                    drop(a);
-                    drop(b);
-                    participant_b.write().await.remote_addr = Some(source_addr);
-                    (Side::B, Side::A)
-                } else {
-                    // Either both endpoints are already known, or the source IP
-                    // is not in any participant's allowlist. Drop the packet.
-                    tracing::warn!(
-                        "Rejected RTP packet from {} for session {} (unknown source or disallowed by latch policy)",
-                        source_addr,
-                        call_id.0
-                    );
-                    counter!("forge_rtp_latch_rejected_total", 1);
-                    return;
-                }
-            }
+        let sender_codec = match sender {
+            Side::A => participant_a.read().await.codec_config.clone(),
+            Side::B => participant_b.read().await.codec_config.clone(),
         };
+
+        let pcm_samples =
+            Self::decode_audio_payload(session, call_id, &packet, &sender_codec).await;
 
         // Process decoded samples (if any)
         if !pcm_samples.is_empty() {
@@ -447,6 +310,29 @@ impl ForwardingEngine {
                             e
                         );
                     }
+                }
+            }
+
+            if let Some(media_bridge) = session.media_bridge_manager().await {
+                let frame = InboundMediaFrame {
+                    leg: sender.label(),
+                    codec: sender_codec.codec,
+                    payload_type: sender_codec.payload_type,
+                    sample_rate: Self::codec_audio_sample_rate(
+                        sender_codec.codec,
+                        sender_codec.clock_rate,
+                    ),
+                    timestamp: packet.header.timestamp,
+                    sequence_number: packet.header.sequence_number,
+                    samples: pcm_samples.clone(),
+                };
+
+                if let Err(e) = media_bridge.try_send_inbound_frame(call_id, frame) {
+                    tracing::debug!(
+                        "Failed to send inbound media frame to bridge for session {}: {}",
+                        call_id.0,
+                        e
+                    );
                 }
             }
 
@@ -591,6 +477,524 @@ impl ForwardingEngine {
                 "Cannot forward RTP packet - receiver endpoint not yet learned for session {}",
                 call_id.0
             );
+        }
+    }
+
+    async fn drain_ai_audio_responses(
+        session: &Arc<MediaSession>,
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+    ) {
+        let call_id = session.call_id();
+
+        if let Some(ai_manager) = session.ai_manager().await {
+            while let Some(audio_response) = ai_manager.try_recv_audio_response(call_id).await {
+                Self::send_generated_audio(
+                    session,
+                    sockets,
+                    participant_a,
+                    participant_b,
+                    MediaTarget::Both,
+                    audio_response.sample_rate,
+                    &audio_response.samples,
+                    GeneratedAudioSource::AI,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn drain_media_bridge_outbound(
+        session: &Arc<MediaSession>,
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+    ) {
+        let call_id = session.call_id();
+
+        if let Some(media_bridge) = session.media_bridge_manager().await {
+            while let Some(frame) = media_bridge.try_recv_outbound_frame(call_id).await {
+                Self::send_generated_audio(
+                    session,
+                    sockets,
+                    participant_a,
+                    participant_b,
+                    frame.target,
+                    frame.sample_rate,
+                    &frame.samples,
+                    GeneratedAudioSource::MediaBridge,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn determine_packet_sides(
+        session: &Arc<MediaSession>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        source_addr: std::net::SocketAddr,
+    ) -> Option<(Side, Side)> {
+        let call_id = session.call_id();
+        let a = participant_a.read().await;
+        let b = participant_b.read().await;
+
+        let a_ip_match = a
+            .remote_addr
+            .map(|addr| addr.ip() == source_addr.ip())
+            .unwrap_or(false);
+        let b_ip_match = b
+            .remote_addr
+            .map(|addr| addr.ip() == source_addr.ip())
+            .unwrap_or(false);
+
+        if a_ip_match && !b_ip_match {
+            return Some((Side::A, Side::B));
+        }
+        if b_ip_match && !a_ip_match {
+            return Some((Side::B, Side::A));
+        }
+        if a_ip_match && b_ip_match {
+            if a.remote_addr == Some(source_addr) {
+                return Some((Side::A, Side::B));
+            }
+            if b.remote_addr == Some(source_addr) {
+                return Some((Side::B, Side::A));
+            }
+
+            let a_port = a.remote_addr.map(|addr| addr.port()).unwrap_or(0);
+            let b_port = b.remote_addr.map(|addr| addr.port()).unwrap_or(0);
+            let src_port = source_addr.port();
+            let a_diff = (a_port as i32 - src_port as i32).abs();
+            let b_diff = (b_port as i32 - src_port as i32).abs();
+            return Some(if a_diff <= b_diff {
+                (Side::A, Side::B)
+            } else {
+                (Side::B, Side::A)
+            });
+        }
+
+        let source_ip = source_addr.ip();
+        let a_can_latch = a.remote_addr.is_none()
+            && a.latch_allowed_ips
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&source_ip));
+        let b_can_latch = b.remote_addr.is_none()
+            && b.latch_allowed_ips
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&source_ip));
+
+        if a_can_latch {
+            tracing::info!(
+                "Learning remote RTP endpoint for session {} leg A: {}",
+                call_id.0,
+                source_addr
+            );
+            counter!("forge_rtp_latch_learned_total", 1);
+            drop(a);
+            drop(b);
+            participant_a.write().await.remote_addr = Some(source_addr);
+            return Some((Side::A, Side::B));
+        }
+        if b_can_latch {
+            tracing::info!(
+                "Learning remote RTP endpoint for session {} leg B: {}",
+                call_id.0,
+                source_addr
+            );
+            counter!("forge_rtp_latch_learned_total", 1);
+            drop(a);
+            drop(b);
+            participant_b.write().await.remote_addr = Some(source_addr);
+            return Some((Side::B, Side::A));
+        }
+
+        tracing::warn!(
+            "Rejected RTP packet from {} for session {} (unknown source or disallowed by latch policy)",
+            source_addr,
+            call_id.0
+        );
+        counter!("forge_rtp_latch_rejected_total", 1);
+        None
+    }
+
+    async fn decode_audio_payload(
+        _session: &Arc<MediaSession>,
+        call_id: &forge_core::CallId,
+        packet: &forge_rtp::RtpPacket,
+        codec_config: &crate::session::ParticipantCodecConfig,
+    ) -> Vec<i16> {
+        if packet.header.payload_type() != codec_config.payload_type {
+            return Vec::new();
+        }
+
+        match codec_config.codec {
+            forge_core::AudioCodec::PCMU => packet
+                .payload
+                .iter()
+                .map(|&byte| forge_codecs::g711::decode_ulaw(byte))
+                .collect(),
+            forge_core::AudioCodec::PCMA => packet
+                .payload
+                .iter()
+                .map(|&byte| forge_codecs::g711::decode_alaw(byte))
+                .collect(),
+            forge_core::AudioCodec::Opus => {
+                #[cfg(feature = "opus")]
+                {
+                    let mut decoder = _session.opus_decoder().lock().await;
+                    match decoder.decode(&packet.payload) {
+                        Ok(samples) => samples,
+                        Err(e) => {
+                            tracing::trace!(
+                                "Opus decoding failed for session {}: {}",
+                                call_id.0,
+                                e
+                            );
+                            Vec::new()
+                        }
+                    }
+                }
+                #[cfg(not(feature = "opus"))]
+                {
+                    tracing::trace!("Opus decoding disabled: opus feature not enabled");
+                    Vec::new()
+                }
+            }
+            forge_core::AudioCodec::G722 => {
+                #[cfg(feature = "g722")]
+                {
+                    let mut codec = forge_codecs::g722::G722Codec::default();
+                    match codec.decode(&packet.payload) {
+                        Ok(samples) => samples,
+                        Err(e) => {
+                            tracing::trace!(
+                                "G.722 decoding failed for session {}: {}",
+                                call_id.0,
+                                e
+                            );
+                            Vec::new()
+                        }
+                    }
+                }
+                #[cfg(not(feature = "g722"))]
+                {
+                    tracing::trace!("G.722 decoding disabled: g722 feature not enabled");
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    async fn send_generated_audio(
+        session: &Arc<MediaSession>,
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        target: MediaTarget,
+        input_sample_rate: u32,
+        samples: &[i16],
+        source: GeneratedAudioSource,
+    ) {
+        if samples.is_empty() {
+            return;
+        }
+
+        let mut sent_any = false;
+
+        for (leg, participant) in [
+            (ParticipantLabel::A, participant_a),
+            (ParticipantLabel::B, participant_b),
+        ] {
+            if !target.includes(leg) {
+                continue;
+            }
+
+            if Self::send_generated_audio_to_leg(
+                session,
+                sockets,
+                participant_a,
+                participant_b,
+                leg,
+                participant,
+                input_sample_rate,
+                samples,
+                source,
+            )
+            .await
+            {
+                sent_any = true;
+            }
+        }
+
+        if sent_any {
+            session.update_activity().await;
+        }
+    }
+
+    async fn send_generated_audio_to_leg(
+        session: &Arc<MediaSession>,
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        leg: ParticipantLabel,
+        participant: &Arc<RwLock<Participant>>,
+        input_sample_rate: u32,
+        samples: &[i16],
+        source: GeneratedAudioSource,
+    ) -> bool {
+        let (remote_addr, codec, payload_type, clock_rate) = {
+            let participant = participant.read().await;
+            (
+                participant.remote_addr,
+                participant.codec_config.codec,
+                participant.codec_config.payload_type,
+                participant.codec_config.clock_rate,
+            )
+        };
+
+        let Some(remote_addr) = remote_addr else {
+            tracing::debug!(
+                "Skipping generated audio for session {} leg {} - no remote address",
+                session.call_id().0,
+                leg.as_str()
+            );
+            return false;
+        };
+
+        let audio_sample_rate = Self::codec_audio_sample_rate(codec, clock_rate);
+        let resampled_samples = if input_sample_rate != audio_sample_rate {
+            Self::resample_audio(samples, input_sample_rate, audio_sample_rate)
+        } else {
+            samples.to_vec()
+        };
+
+        let Some(frame_samples) = Self::generated_frame_sample_count(codec, audio_sample_rate)
+        else {
+            tracing::warn!(
+                "Unsupported codec for generated audio on session {} leg {}: {:?}",
+                session.call_id().0,
+                leg.as_str(),
+                codec
+            );
+            return false;
+        };
+
+        let timestamp_increment = clock_rate / 50;
+        if timestamp_increment == 0 {
+            tracing::warn!(
+                "Invalid RTP clock rate for generated audio on session {} leg {}: {}",
+                session.call_id().0,
+                leg.as_str(),
+                clock_rate
+            );
+            return false;
+        }
+
+        let mut sent_any = false;
+
+        for (index, chunk) in resampled_samples.chunks(frame_samples).enumerate() {
+            let mut frame_pcm = chunk.to_vec();
+            if frame_pcm.len() < frame_samples {
+                frame_pcm.resize(frame_samples, 0);
+            }
+
+            let Some(encoded_payload) =
+                Self::encode_generated_payload(session, codec, &frame_pcm).await
+            else {
+                return sent_any;
+            };
+
+            if Self::send_generated_rtp_packet(
+                session,
+                sockets,
+                participant_a,
+                participant_b,
+                leg,
+                remote_addr,
+                payload_type,
+                timestamp_increment,
+                encoded_payload,
+                index == 0,
+                source,
+            )
+            .await
+            .is_ok()
+            {
+                sent_any = true;
+            }
+        }
+
+        sent_any
+    }
+
+    async fn encode_generated_payload(
+        session: &Arc<MediaSession>,
+        codec: forge_core::AudioCodec,
+        samples: &[i16],
+    ) -> Option<bytes::Bytes> {
+        match codec {
+            forge_core::AudioCodec::PCMU => {
+                let encoded: Vec<u8> = samples
+                    .iter()
+                    .map(|&sample| forge_codecs::g711::encode_ulaw(sample))
+                    .collect();
+                Some(bytes::Bytes::from(encoded))
+            }
+            forge_core::AudioCodec::PCMA => {
+                let encoded: Vec<u8> = samples
+                    .iter()
+                    .map(|&sample| forge_codecs::g711::encode_alaw(sample))
+                    .collect();
+                Some(bytes::Bytes::from(encoded))
+            }
+            forge_core::AudioCodec::Opus => {
+                #[cfg(feature = "opus")]
+                {
+                    let mut encoder = session.opus_encoder().lock().await;
+                    match encoder.encode(samples) {
+                        Ok(encoded) => Some(bytes::Bytes::from(encoded)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to encode generated audio to Opus for session {}: {}",
+                                session.call_id().0,
+                                e
+                            );
+                            None
+                        }
+                    }
+                }
+                #[cfg(not(feature = "opus"))]
+                {
+                    tracing::warn!(
+                        "Cannot encode generated audio to Opus - opus feature not enabled"
+                    );
+                    None
+                }
+            }
+            forge_core::AudioCodec::G722 => {
+                #[cfg(feature = "g722")]
+                {
+                    let mut codec = forge_codecs::g722::G722Codec::default();
+                    match codec.encode(samples) {
+                        Ok(encoded) => Some(bytes::Bytes::from(encoded)),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to encode generated audio to G.722 for session {}: {}",
+                                session.call_id().0,
+                                e
+                            );
+                            None
+                        }
+                    }
+                }
+                #[cfg(not(feature = "g722"))]
+                {
+                    tracing::warn!(
+                        "Cannot encode generated audio to G.722 - g722 feature not enabled"
+                    );
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    async fn send_generated_rtp_packet(
+        session: &Arc<MediaSession>,
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        leg: ParticipantLabel,
+        remote_addr: std::net::SocketAddr,
+        payload_type: u8,
+        timestamp_increment: u32,
+        payload: bytes::Bytes,
+        marker: bool,
+        source: GeneratedAudioSource,
+    ) -> Result<()> {
+        let (sequence_number, timestamp, ssrc) = {
+            let state = session.generated_rtp_state(leg);
+            let mut state = state.lock().await;
+            let sequence_number = state.next_sequence;
+            let timestamp = state.next_timestamp;
+            let ssrc = state.ssrc;
+            state.next_sequence = state.next_sequence.wrapping_add(1);
+            state.next_timestamp = state.next_timestamp.wrapping_add(timestamp_increment);
+            (sequence_number, timestamp, ssrc)
+        };
+
+        let packet = forge_rtp::RtpPacket::build(
+            payload_type,
+            sequence_number,
+            timestamp,
+            ssrc,
+            payload,
+            marker,
+        );
+
+        let packet_bytes = packet.to_bytes();
+        let srtp_ctx = match leg {
+            ParticipantLabel::A => session.srtp_a().clone(),
+            ParticipantLabel::B => session.srtp_b().clone(),
+        };
+        let send_data = {
+            let mut ctx = srtp_ctx.lock().await;
+            ctx.protect_rtp(&packet_bytes)
+                .map_err(|e| ForgeError::Srtp(e.to_string()))?
+        };
+
+        sockets
+            .send_rtp_to(&send_data, remote_addr)
+            .await
+            .map_err(|e| ForgeError::Network(e.to_string()))?;
+
+        let packet_len = send_data.len() as u64;
+        Self::update_stats(
+            &Side::from_label(leg),
+            participant_a,
+            participant_b,
+            packet_len,
+            false,
+        )
+        .await;
+        counter!(
+            "forge_generated_audio_packets_sent_total",
+            1,
+            "source" => source.as_label()
+        );
+        counter!(
+            "forge_generated_audio_bytes_sent_total",
+            packet_len,
+            "source" => source.as_label()
+        );
+        if matches!(source, GeneratedAudioSource::AI) {
+            counter!("forge_ai_audio_packets_sent_total", 1);
+            counter!("forge_ai_audio_bytes_sent_total", packet_len);
+        }
+
+        Ok(())
+    }
+
+    fn generated_frame_sample_count(
+        codec: forge_core::AudioCodec,
+        sample_rate: u32,
+    ) -> Option<usize> {
+        match codec {
+            forge_core::AudioCodec::PCMU
+            | forge_core::AudioCodec::PCMA
+            | forge_core::AudioCodec::Opus
+            | forge_core::AudioCodec::G722 => Some((sample_rate / 50) as usize),
+            _ => None,
+        }
+    }
+
+    fn codec_audio_sample_rate(codec: forge_core::AudioCodec, negotiated_clock_rate: u32) -> u32 {
+        match codec {
+            forge_core::AudioCodec::G722 => 16000,
+            _ => negotiated_clock_rate,
         }
     }
 
@@ -917,163 +1321,6 @@ impl ForwardingEngine {
         }
     }
 
-    /// Handle AI audio response and send to participants
-    async fn handle_ai_audio_response(
-        session: &Arc<MediaSession>,
-        sockets: &Arc<forge_rtp::RtpSocketPair>,
-        participant_a: &Arc<RwLock<Participant>>,
-        participant_b: &Arc<RwLock<Participant>>,
-        audio_response: crate::ai_integration::AIAudioResponse,
-    ) {
-        let call_id = session.call_id();
-
-        tracing::debug!(
-            "Processing AI audio response for session {}: {} samples @ {}Hz",
-            call_id.0,
-            audio_response.samples.len(),
-            audio_response.sample_rate
-        );
-
-        // AI SSRC (fixed value for AI-generated audio)
-        const AI_SSRC: u32 = 0xA1A1A1A1;
-
-        // Generate a random starting sequence number (would be better to track per session)
-        let base_seq_num: u16 = rand::random();
-
-        // Send AI audio to both participants
-        for (side, participant) in [(Side::A, participant_a), (Side::B, participant_b)] {
-            let p = participant.read().await;
-
-            // Skip if participant doesn't have a remote address yet
-            let Some(remote_addr) = p.remote_addr else {
-                tracing::debug!(
-                    "Skipping AI audio for participant {:?} - no remote address",
-                    side
-                );
-                continue;
-            };
-
-            let codec = p.codec_config.codec;
-            let payload_type = p.codec_config.payload_type;
-            let clock_rate = p.codec_config.clock_rate;
-
-            tracing::trace!(
-                "Encoding AI audio for participant {:?}: codec={:?}, pt={}, clock_rate={}",
-                side,
-                codec,
-                payload_type,
-                clock_rate
-            );
-
-            // Resample if needed
-            let resampled_samples = if audio_response.sample_rate != clock_rate {
-                Self::resample_audio(
-                    &audio_response.samples,
-                    audio_response.sample_rate,
-                    clock_rate,
-                )
-            } else {
-                audio_response.samples.clone()
-            };
-
-            // Encode audio to codec format
-            let encoded_payload = match codec {
-                forge_core::AudioCodec::PCMU => {
-                    // G.711 µ-law encoding
-                    use bytes::Bytes;
-                    let encoded: Vec<u8> = resampled_samples
-                        .iter()
-                        .map(|&sample| forge_codecs::g711::encode_ulaw(sample))
-                        .collect();
-                    Bytes::from(encoded)
-                }
-                forge_core::AudioCodec::PCMA => {
-                    // G.711 A-law encoding
-                    use bytes::Bytes;
-                    let encoded: Vec<u8> = resampled_samples
-                        .iter()
-                        .map(|&sample| forge_codecs::g711::encode_alaw(sample))
-                        .collect();
-                    Bytes::from(encoded)
-                }
-                forge_core::AudioCodec::Opus => {
-                    #[cfg(feature = "opus")]
-                    {
-                        // Opus encoding
-                        let mut encoder = session.opus_encoder().lock().await;
-                        match encoder.encode(&resampled_samples) {
-                            Ok(encoded) => bytes::Bytes::from(encoded),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to encode AI audio to Opus for session {}: {}",
-                                    call_id.0,
-                                    e
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                    #[cfg(not(feature = "opus"))]
-                    {
-                        tracing::warn!("Cannot encode AI audio to Opus - opus feature not enabled");
-                        continue;
-                    }
-                }
-                _ => {
-                    tracing::warn!("Unsupported codec for AI audio: {:?}", codec);
-                    continue;
-                }
-            };
-
-            // Calculate RTP timestamp (samples since start)
-            // For simplicity, we use a fixed base timestamp
-            let timestamp: u32 = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u32)
-                .wrapping_mul(clock_rate / 1000);
-
-            // Create RTP packet
-            let packet = forge_rtp::RtpPacket::build(
-                payload_type,
-                base_seq_num,
-                timestamp,
-                AI_SSRC,
-                encoded_payload.clone(),
-                false, // marker bit
-            );
-
-            // Serialize and send
-            let packet_bytes = packet.to_bytes();
-            let packet_len = packet_bytes.len();
-
-            if let Err(e) = sockets.send_rtp_to(&packet_bytes, remote_addr).await {
-                tracing::error!(
-                    "Failed to send AI audio RTP packet for session {}: {}",
-                    call_id.0,
-                    e
-                );
-            } else {
-                tracing::trace!(
-                    "Sent AI audio RTP packet for session {} to {:?}: {} bytes",
-                    call_id.0,
-                    side,
-                    packet_len
-                );
-
-                // Update statistics
-                drop(p); // Release read lock before acquiring write lock
-                let mut p = participant.write().await;
-                p.stats.packets_sent += 1;
-                p.stats.bytes_sent += packet_len as u64;
-
-                // Record metrics
-                counter!("forge_ai_audio_packets_sent_total", 1);
-                counter!("forge_ai_audio_bytes_sent_total", packet_len as u64);
-            }
-        }
-    }
-
     /// Simple audio resampling using linear interpolation
     fn resample_audio(samples: &[i16], from_rate: u32, to_rate: u32) -> Vec<i16> {
         if from_rate == to_rate {
@@ -1150,11 +1397,42 @@ impl ForwardingEngine {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedAudioSource {
+    AI,
+    MediaBridge,
+}
+
+impl GeneratedAudioSource {
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::AI => "ai",
+            Self::MediaBridge => "media_bridge",
+        }
+    }
+}
+
 /// Which side of the session (A or B)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
     A,
     B,
+}
+
+impl Side {
+    fn label(self) -> ParticipantLabel {
+        match self {
+            Self::A => ParticipantLabel::A,
+            Self::B => ParticipantLabel::B,
+        }
+    }
+
+    fn from_label(label: ParticipantLabel) -> Self {
+        match label {
+            ParticipantLabel::A => Self::A,
+            ParticipantLabel::B => Self::B,
+        }
+    }
 }
 
 /// Helper function to get codec name for logging

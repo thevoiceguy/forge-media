@@ -6,6 +6,7 @@ pub mod ai_integration;
 pub mod forwarding;
 pub mod injection;
 pub mod manager;
+pub mod media_bridge;
 pub mod persistence;
 pub mod session;
 
@@ -15,13 +16,16 @@ pub use injection::{
     AudioTarget, MixMode, PlaybackHandle, PlaybackId, PlaybackManager, PlaybackStatus,
 };
 pub use manager::{SessionManager, SessionManagerConfig};
+pub use media_bridge::{
+    InboundMediaFrame, MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundMediaFrame,
+};
 pub use persistence::{
     ConnectionState, PersistedAISession, PersistenceBackend, PersistenceBackendType,
     PersistenceConfig,
 };
 pub use session::{
-    MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig, ParticipantStats,
-    SessionState,
+    MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig, ParticipantLabel,
+    ParticipantMediaState, ParticipantMediaUpdate, ParticipantStats, SessionState,
 };
 
 #[cfg(feature = "xdp")]

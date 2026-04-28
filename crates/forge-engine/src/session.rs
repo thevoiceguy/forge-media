@@ -3,7 +3,9 @@
 use forge_core::{CallId, EventBus, ForgeError, ForgeEvent, ParticipantId, Result};
 use forge_rtp::srtp::SrtpContext;
 use forge_rtp::{PortPair, PortPool, RtpSocketConfig, RtpSocketPair};
-use std::net::SocketAddr;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -100,6 +102,102 @@ impl Default for ParticipantCodecConfig {
     }
 }
 
+/// Participant leg within a two-party media session
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ParticipantLabel {
+    /// Participant A (typically caller)
+    A,
+    /// Participant B (typically callee)
+    B,
+}
+
+impl ParticipantLabel {
+    /// Human-readable leg label for logs and APIs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "a",
+            Self::B => "b",
+        }
+    }
+}
+
+impl std::str::FromStr for ParticipantLabel {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "a" | "lega" | "participant_a" | "participant-a" => Ok(Self::A),
+            "b" | "legb" | "participant_b" | "participant-b" => Ok(Self::B),
+            _ => Err(format!(
+                "Invalid participant leg '{}'. Expected 'a' or 'b'",
+                value
+            )),
+        }
+    }
+}
+
+/// Partial runtime update for a participant's media configuration.
+#[derive(Debug, Clone, Default)]
+pub struct ParticipantMediaUpdate {
+    /// `None` = leave unchanged, `Some(None)` = clear, `Some(Some(addr))` = set.
+    pub remote_addr: Option<Option<SocketAddr>>,
+    /// Replace the participant codec configuration.
+    pub codec_config: Option<ParticipantCodecConfig>,
+    /// Update the negotiated telephone-event payload type for this leg.
+    pub telephone_event_payload_type: Option<u8>,
+    /// `None` = leave unchanged, `Some(None)` = clear, `Some(Some(set))` = set.
+    pub latch_allowed_ips: Option<Option<HashSet<IpAddr>>>,
+}
+
+/// Snapshot of a participant's runtime media configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantMediaState {
+    /// Participant leg (`a` or `b`)
+    pub leg: ParticipantLabel,
+    /// Participant identifier
+    pub participant_id: String,
+    /// Remote RTP endpoint if explicitly configured or learned
+    pub remote_rtp_addr: Option<SocketAddr>,
+    /// RTP payload type for this leg
+    pub payload_type: u8,
+    /// Negotiated audio codec
+    pub codec: forge_core::AudioCodec,
+    /// Codec clock rate (Hz)
+    pub clock_rate: u32,
+    /// Telephone-event payload type for DTMF
+    pub telephone_event_payload_type: u8,
+    /// Allowed source IPs for symmetric RTP latching, if configured
+    pub latch_allowed_ips: Option<Vec<IpAddr>>,
+}
+
+impl ParticipantMediaState {
+    fn from_participant(
+        leg: ParticipantLabel,
+        participant: &Participant,
+        telephone_event_payload_type: u8,
+    ) -> Self {
+        let mut latch_allowed_ips = participant
+            .latch_allowed_ips
+            .as_ref()
+            .map(|allowed| allowed.iter().copied().collect::<Vec<_>>());
+        if let Some(ref mut ips) = latch_allowed_ips {
+            ips.sort_by_key(|ip| ip.to_string());
+        }
+
+        Self {
+            leg,
+            participant_id: participant.id.0.clone(),
+            remote_rtp_addr: participant.remote_addr,
+            payload_type: participant.codec_config.payload_type,
+            codec: participant.codec_config.codec,
+            clock_rate: participant.codec_config.clock_rate,
+            telephone_event_payload_type,
+            latch_allowed_ips,
+        }
+    }
+}
+
 /// Participant in a media session
 #[derive(Debug, Clone)]
 pub struct Participant {
@@ -120,7 +218,7 @@ pub struct Participant {
     /// populated — typically from the SDP `c=` line or an explicit operator
     /// policy — the forwarding engine drops packets whose source IP is not in
     /// the set, defeating off-path latching attacks (audit finding C3).
-    pub latch_allowed_ips: Option<std::collections::HashSet<std::net::IpAddr>>,
+    pub latch_allowed_ips: Option<HashSet<IpAddr>>,
 }
 
 /// Statistics for a participant
@@ -138,6 +236,24 @@ pub struct ParticipantStats {
     pub packets_lost: u64,
     /// Last packet received timestamp
     pub last_packet_at: Option<Instant>,
+}
+
+/// RTP state for generated audio injected into a participant leg.
+#[derive(Debug)]
+pub(crate) struct GeneratedRtpState {
+    pub ssrc: u32,
+    pub next_sequence: u16,
+    pub next_timestamp: u32,
+}
+
+impl Default for GeneratedRtpState {
+    fn default() -> Self {
+        Self {
+            ssrc: rand::random(),
+            next_sequence: rand::random(),
+            next_timestamp: rand::random(),
+        }
+    }
 }
 
 /// State of a media session
@@ -223,6 +339,12 @@ pub struct MediaSession {
     xdp_active: Arc<AtomicBool>,
     /// AI session manager for AI integration (optional, uses interior mutability)
     ai_manager: Arc<RwLock<Option<Arc<crate::ai_integration::AISessionManager>>>>,
+    /// Generic media bridge manager for bidirectional PCM streaming.
+    media_bridge_manager: Arc<RwLock<Option<Arc<crate::media_bridge::MediaBridgeManager>>>>,
+    /// RTP sequencing state for generated audio sent toward participant A.
+    generated_rtp_state_a: Arc<Mutex<GeneratedRtpState>>,
+    /// RTP sequencing state for generated audio sent toward participant B.
+    generated_rtp_state_b: Arc<Mutex<GeneratedRtpState>>,
     /// Audio recorder for call recording (optional)
     pub(crate) recorder: Arc<RwLock<Option<forge_recorder::AudioRecorder>>>,
     /// Small mixer to combine both call legs before writing to the recorder
@@ -337,6 +459,9 @@ impl MediaSession {
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
             ai_manager: Arc::new(RwLock::new(None)),
+            media_bridge_manager: Arc::new(RwLock::new(None)),
+            generated_rtp_state_a: Arc::new(Mutex::new(GeneratedRtpState::default())),
+            generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
         };
@@ -498,6 +623,9 @@ impl MediaSession {
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
             ai_manager: Arc::new(RwLock::new(None)),
+            media_bridge_manager: Arc::new(RwLock::new(None)),
+            generated_rtp_state_a: Arc::new(Mutex::new(GeneratedRtpState::default())),
+            generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
         };
@@ -701,6 +829,9 @@ impl MediaSession {
             xdp_manager,
             xdp_active: Arc::new(AtomicBool::new(false)),
             ai_manager: Arc::new(RwLock::new(None)),
+            media_bridge_manager: Arc::new(RwLock::new(None)),
+            generated_rtp_state_a: Arc::new(Mutex::new(GeneratedRtpState::default())),
+            generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
         };
@@ -1195,6 +1326,82 @@ impl MediaSession {
         &self.participant_b
     }
 
+    fn participant_lock(&self, leg: ParticipantLabel) -> &Arc<RwLock<Participant>> {
+        match leg {
+            ParticipantLabel::A => &self.participant_a,
+            ParticipantLabel::B => &self.participant_b,
+        }
+    }
+
+    fn telephone_event_pt_for_leg(&self, leg: ParticipantLabel) -> u8 {
+        match leg {
+            ParticipantLabel::A => self.telephone_event_pt_a(),
+            ParticipantLabel::B => self.telephone_event_pt_b(),
+        }
+    }
+
+    /// Get the runtime media configuration for a participant leg.
+    pub async fn participant_media_state(&self, leg: ParticipantLabel) -> ParticipantMediaState {
+        let participant = self.participant_lock(leg).read().await;
+        ParticipantMediaState::from_participant(
+            leg,
+            &participant,
+            self.telephone_event_pt_for_leg(leg),
+        )
+    }
+
+    /// Apply a runtime media update to a participant leg.
+    ///
+    /// This is primarily intended for signaling controllers that already know
+    /// the negotiated remote RTP endpoint and codec mapping, such as a SIP
+    /// B2BUA built on top of `siphon-rs`.
+    pub async fn update_participant_media(
+        &self,
+        leg: ParticipantLabel,
+        update: ParticipantMediaUpdate,
+    ) -> Result<ParticipantMediaState> {
+        if let Some(Some(remote_addr)) = update.remote_addr {
+            tracing::info!(
+                "Setting remote RTP endpoint for session {} leg {}: {}",
+                self.call_id.0,
+                leg.as_str(),
+                remote_addr
+            );
+        } else if matches!(update.remote_addr, Some(None)) {
+            tracing::info!(
+                "Clearing remote RTP endpoint for session {} leg {}",
+                self.call_id.0,
+                leg.as_str()
+            );
+        }
+
+        {
+            let mut participant = self.participant_lock(leg).write().await;
+
+            if let Some(remote_addr) = update.remote_addr {
+                participant.remote_addr = remote_addr;
+            }
+
+            if let Some(codec_config) = update.codec_config {
+                participant.payload_type = codec_config.payload_type;
+                participant.codec_config = codec_config;
+            }
+
+            if let Some(latch_allowed_ips) = update.latch_allowed_ips {
+                participant.latch_allowed_ips = latch_allowed_ips;
+            }
+        }
+
+        if let Some(telephone_event_pt) = update.telephone_event_payload_type {
+            match leg {
+                ParticipantLabel::A => self.set_telephone_event_pt_a(telephone_event_pt),
+                ParticipantLabel::B => self.set_telephone_event_pt_b(telephone_event_pt),
+            }
+        }
+
+        Ok(self.participant_media_state(leg).await)
+    }
+
     /// Get associated SDP (if any)
     pub fn sdp(&self) -> Option<&str> {
         self.sdp.as_deref()
@@ -1258,6 +1465,32 @@ impl MediaSession {
     /// Set the AI session manager
     pub async fn set_ai_manager(&self, manager: Arc<crate::ai_integration::AISessionManager>) {
         *self.ai_manager.write().await = Some(manager);
+    }
+
+    /// Get a copy of the generic media bridge manager (if set).
+    pub async fn media_bridge_manager(
+        &self,
+    ) -> Option<Arc<crate::media_bridge::MediaBridgeManager>> {
+        self.media_bridge_manager.read().await.clone()
+    }
+
+    /// Set the generic media bridge manager.
+    pub async fn set_media_bridge_manager(
+        &self,
+        manager: Arc<crate::media_bridge::MediaBridgeManager>,
+    ) {
+        *self.media_bridge_manager.write().await = Some(manager);
+    }
+
+    /// RTP sequencing state for generated audio toward a participant leg.
+    pub(crate) fn generated_rtp_state(
+        &self,
+        leg: ParticipantLabel,
+    ) -> Arc<Mutex<GeneratedRtpState>> {
+        match leg {
+            ParticipantLabel::A => Arc::clone(&self.generated_rtp_state_a),
+            ParticipantLabel::B => Arc::clone(&self.generated_rtp_state_b),
+        }
     }
 
     /// Get the recorder mixer used for call recordings
@@ -1619,6 +1852,9 @@ impl MediaSession {
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(state.xdp_active)),
             ai_manager: Arc::new(RwLock::new(None)),
+            media_bridge_manager: Arc::new(RwLock::new(None)),
+            generated_rtp_state_a: Arc::new(Mutex::new(GeneratedRtpState::default())),
+            generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
             relay_rfc2833: AtomicBool::new(false),
@@ -2155,5 +2391,76 @@ mod tests {
             Some(96),
             "Should support custom Opus payload types"
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_participant_media() {
+        let config = PortPoolConfig::new(20200, 20400).unwrap();
+        let port_pool = Arc::new(PortPool::new(config));
+
+        let session = MediaSession::new(
+            CallId::generate(),
+            ParticipantId::new("alice"),
+            ParticipantId::new("bob"),
+            &port_pool,
+            MediaSessionConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut latch_allowed_ips = HashSet::new();
+        latch_allowed_ips.insert("203.0.113.10".parse::<IpAddr>().unwrap());
+
+        let updated = session
+            .update_participant_media(
+                ParticipantLabel::A,
+                ParticipantMediaUpdate {
+                    remote_addr: Some(Some("203.0.113.10:4000".parse().unwrap())),
+                    codec_config: Some(ParticipantCodecConfig {
+                        payload_type: 111,
+                        codec: forge_core::AudioCodec::Opus,
+                        clock_rate: 48000,
+                    }),
+                    telephone_event_payload_type: Some(110),
+                    latch_allowed_ips: Some(Some(latch_allowed_ips)),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(updated.leg, ParticipantLabel::A);
+        assert_eq!(updated.participant_id, "alice");
+        assert_eq!(
+            updated.remote_rtp_addr,
+            Some("203.0.113.10:4000".parse().unwrap())
+        );
+        assert_eq!(updated.payload_type, 111);
+        assert_eq!(updated.codec, forge_core::AudioCodec::Opus);
+        assert_eq!(updated.clock_rate, 48000);
+        assert_eq!(updated.telephone_event_payload_type, 110);
+        assert_eq!(
+            updated.latch_allowed_ips,
+            Some(vec!["203.0.113.10".parse::<IpAddr>().unwrap()])
+        );
+
+        let cleared = session
+            .update_participant_media(
+                ParticipantLabel::A,
+                ParticipantMediaUpdate {
+                    remote_addr: Some(None),
+                    codec_config: None,
+                    telephone_event_payload_type: None,
+                    latch_allowed_ips: Some(None),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cleared.remote_rtp_addr, None);
+        assert_eq!(cleared.latch_allowed_ips, None);
     }
 }

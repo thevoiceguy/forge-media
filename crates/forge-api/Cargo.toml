@@ -1,6 +1,6 @@
 [package]
 name = "forge-api"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -32,6 +32,7 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = "0.21"
 
 # Logging and Observability
 tracing = { workspace = true }

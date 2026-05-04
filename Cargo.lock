@@ -3594,7 +3594,7 @@ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "sip-auth"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3616,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "sip-core"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "bytes",
  "httpdate",
@@ -3679,7 +3679,7 @@ dependencies = [
 
 [[package]]
 name = "sip-sdp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "nom",
  "smol_str",
@@ -3687,7 +3687,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transaction"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3706,7 +3706,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transport"
-version = "0.2.10"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bytes",

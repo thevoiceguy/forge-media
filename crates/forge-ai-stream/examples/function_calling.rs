@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Send the result back to the AI
                     connector
-                        .send_function_response(&call.call_id, result)
+                        .send_function_response(call.call_id.clone(), result)
                         .await?;
                     println!("  ✓ Response sent to AI");
                 }

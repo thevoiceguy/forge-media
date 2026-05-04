@@ -39,6 +39,17 @@ impl MediaTarget {
     }
 }
 
+/// How newly queued audio should interact with any existing queued playout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayoutMode {
+    /// Append behind any already queued audio for the target leg(s).
+    #[default]
+    Append,
+    /// Drop any queued playout for the target leg(s) before enqueueing.
+    Replace,
+}
+
 /// Decoded inbound audio frame emitted by the forwarding engine.
 #[derive(Debug, Clone)]
 pub struct InboundMediaFrame {
@@ -57,11 +68,38 @@ pub struct OutboundMediaFrame {
     pub target: MediaTarget,
     pub sample_rate: u32,
     pub samples: Vec<i16>,
+    pub playback_id: Option<String>,
+    pub mode: PlayoutMode,
+}
+
+/// RFC 2833 DTMF request to inject into one or both legs.
+#[derive(Debug, Clone)]
+pub struct OutboundDtmfRequest {
+    pub target: MediaTarget,
+    pub digit: forge_dtmf::DtmfDigit,
+    pub duration_ms: u32,
+    pub playback_id: Option<String>,
+    pub mode: PlayoutMode,
+}
+
+/// Outbound request flowing from the application into the media engine.
+#[derive(Debug, Clone)]
+pub enum OutboundMediaRequest {
+    Audio(OutboundMediaFrame),
+    Dtmf(OutboundDtmfRequest),
+    Flush {
+        target: Option<MediaTarget>,
+        playback_id: Option<String>,
+    },
+    Stop {
+        target: Option<MediaTarget>,
+        playback_id: Option<String>,
+    },
 }
 
 struct MediaBridgeSession {
     inbound_tx: mpsc::Sender<InboundMediaFrame>,
-    outbound_rx: Mutex<mpsc::Receiver<OutboundMediaFrame>>,
+    outbound_rx: Mutex<mpsc::Receiver<OutboundMediaRequest>>,
 }
 
 /// Handle owned by the application-facing side of a media bridge.
@@ -69,7 +107,7 @@ pub struct MediaBridgeHandle {
     call_id: CallId,
     manager: Arc<MediaBridgeManager>,
     inbound_rx: mpsc::Receiver<InboundMediaFrame>,
-    outbound_tx: mpsc::Sender<OutboundMediaFrame>,
+    outbound_tx: mpsc::Sender<OutboundMediaRequest>,
     detached: bool,
 }
 
@@ -80,7 +118,7 @@ impl MediaBridgeHandle {
     }
 
     /// Cloneable sender for queuing outbound PCM audio.
-    pub fn outbound_sender(&self) -> mpsc::Sender<OutboundMediaFrame> {
+    pub fn outbound_sender(&self) -> mpsc::Sender<OutboundMediaRequest> {
         self.outbound_tx.clone()
     }
 
@@ -92,9 +130,47 @@ impl MediaBridgeHandle {
     /// Queue PCM audio for outbound playout into the call.
     pub async fn send_audio(&self, frame: OutboundMediaFrame) -> Result<()> {
         self.outbound_tx
-            .send(frame)
+            .send(OutboundMediaRequest::Audio(frame))
             .await
             .map_err(|e| ForgeError::Internal(format!("Failed to queue outbound media: {}", e)))
+    }
+
+    /// Queue an RFC 2833 DTMF digit for outbound playout into the call.
+    pub async fn send_dtmf(&self, request: OutboundDtmfRequest) -> Result<()> {
+        self.outbound_tx
+            .send(OutboundMediaRequest::Dtmf(request))
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to queue outbound DTMF: {}", e)))
+    }
+
+    /// Clear any queued playout for the target leg(s).
+    pub async fn flush(
+        &self,
+        target: Option<MediaTarget>,
+        playback_id: Option<String>,
+    ) -> Result<()> {
+        self.outbound_tx
+            .send(OutboundMediaRequest::Flush {
+                target,
+                playback_id,
+            })
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to queue flush request: {}", e)))
+    }
+
+    /// Stop queued playout for the target leg(s).
+    pub async fn stop(
+        &self,
+        target: Option<MediaTarget>,
+        playback_id: Option<String>,
+    ) -> Result<()> {
+        self.outbound_tx
+            .send(OutboundMediaRequest::Stop {
+                target,
+                playback_id,
+            })
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to queue stop request: {}", e)))
     }
 
     /// Detach the bridge from the call.
@@ -203,7 +279,10 @@ impl MediaBridgeManager {
     }
 
     /// Pull the next outbound frame queued by the application, if any.
-    pub async fn try_recv_outbound_frame(&self, call_id: &CallId) -> Option<OutboundMediaFrame> {
+    pub async fn try_recv_outbound_request(
+        &self,
+        call_id: &CallId,
+    ) -> Option<OutboundMediaRequest> {
         let entry = self.sessions.get(call_id)?;
         let mut outbound_rx = entry.outbound_rx.lock().await;
         outbound_rx.try_recv().ok()
@@ -247,14 +326,23 @@ mod tests {
                 target: MediaTarget::B,
                 sample_rate: 16000,
                 samples: vec![10, 20, 30],
+                playback_id: Some("play-1".to_string()),
+                mode: PlayoutMode::Append,
             })
             .await
             .unwrap();
 
-        let outbound = manager.try_recv_outbound_frame(&call_id).await.unwrap();
-        assert_eq!(outbound.target, MediaTarget::B);
-        assert_eq!(outbound.sample_rate, 16000);
-        assert_eq!(outbound.samples, vec![10, 20, 30]);
+        let outbound = manager.try_recv_outbound_request(&call_id).await.unwrap();
+        match outbound {
+            OutboundMediaRequest::Audio(frame) => {
+                assert_eq!(frame.target, MediaTarget::B);
+                assert_eq!(frame.sample_rate, 16000);
+                assert_eq!(frame.samples, vec![10, 20, 30]);
+                assert_eq!(frame.playback_id.as_deref(), Some("play-1"));
+                assert_eq!(frame.mode, PlayoutMode::Append);
+            }
+            other => panic!("unexpected outbound request: {:?}", other),
+        }
 
         drop(handle);
         assert!(!manager.has_bridge(&call_id));

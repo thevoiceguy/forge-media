@@ -318,6 +318,9 @@ impl AIConnector for OpenAIConnector {
         session.set_state(AISessionState::Active);
         self.session = Some(session);
 
+        // Caller is responsible for pushing the desired SessionConfig via update_config()
+        // once they have constructed it (see forge-engine::AISession::new). Sending one
+        // here would queue a redundant session.update right before the real one.
         Ok(session_id)
     }
 
@@ -400,11 +403,7 @@ impl AIConnector for OpenAIConnector {
         }
     }
 
-    async fn send_function_response(
-        &mut self,
-        call_id: impl Into<String> + Send,
-        output: impl Into<String> + Send,
-    ) -> Result<()> {
+    async fn send_function_response(&mut self, call_id: String, output: String) -> Result<()> {
         let ws = self
             .ws
             .as_mut()
@@ -414,8 +413,8 @@ impl AIConnector for OpenAIConnector {
             "type": "conversation.item.create",
             "item": {
                 "type": "function_call_output",
-                "call_id": call_id.into(),
-                "output": output.into()
+                "call_id": call_id,
+                "output": output
             }
         });
 
@@ -451,9 +450,62 @@ impl AIConnector for OpenAIConnector {
 
     async fn update_config(&mut self, config: SessionConfig) -> Result<()> {
         if let Some(session) = &mut self.session {
-            session.config = config;
+            session.config = config.clone();
         }
+
+        if let Some(ws) = self.ws.as_mut() {
+            // Only emit fields the caller actually set. OpenAI treats explicit `null` as
+            // "clear this setting", so serializing every Option as null on a partial
+            // update would wipe instructions/voice/etc. that were set on a previous turn.
+            // tools is always sent because it's a Vec; an empty list explicitly clears tools.
+            let mut session = serde_json::Map::new();
+            session.insert("input_audio_format".into(), json!("pcm16"));
+            session.insert("output_audio_format".into(), json!("pcm16"));
+            session.insert("tools".into(), json!(config.tools));
+            if let Some(instructions) = &config.instructions {
+                session.insert("instructions".into(), json!(instructions));
+            }
+            if let Some(voice) = &config.voice {
+                session.insert("voice".into(), json!(voice));
+            }
+            if let Some(temperature) = config.temperature {
+                session.insert("temperature".into(), json!(temperature));
+            }
+            if let Some(max_tokens) = config.max_tokens {
+                session.insert("max_response_output_tokens".into(), json!(max_tokens));
+            }
+            if let Some(turn_detection) = &config.turn_detection {
+                session.insert("turn_detection".into(), json!(turn_detection));
+            }
+
+            let msg = json!({
+                "type": "session.update",
+                "session": session,
+            });
+
+            ws.send(Message::Text(msg.to_string()))
+                .await
+                .map_err(|e: tungstenite::Error| {
+                    AIStreamError::Connection(format!("Failed to update session config: {}", e))
+                })?;
+
+            self.stats.events_sent += 1;
+        }
+
         Ok(())
+    }
+
+    async fn send_labeled_audio(
+        &mut self,
+        participant_id: &str,
+        audio_data: &[i16],
+        sample_rate: u32,
+    ) -> Result<()> {
+        OpenAIConnector::send_labeled_audio(self, participant_id, audio_data, sample_rate).await
+    }
+
+    async fn send_dtmf_event(&mut self, digit: char, detection_method: &str) -> Result<()> {
+        OpenAIConnector::send_dtmf_event(self, digit, detection_method).await
     }
 
     fn session(&self) -> Option<&AISession> {

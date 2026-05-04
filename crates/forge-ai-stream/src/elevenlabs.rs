@@ -278,17 +278,10 @@ impl AIConnector for ElevenLabsConnector {
         Ok(None)
     }
 
-    async fn send_function_response(
-        &mut self,
-        call_id: impl Into<String> + Send,
-        output: impl Into<String> + Send,
-    ) -> Result<()> {
+    async fn send_function_response(&mut self, call_id: String, output: String) -> Result<()> {
         if self.session.is_none() {
             return Err(AIStreamError::Session("Not connected".to_string()));
         }
-
-        let call_id = call_id.into();
-        let output = output.into();
 
         // TODO: Implement function response sending
         // ElevenLabs may support tool/function calling through their agent system

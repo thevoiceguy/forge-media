@@ -4,10 +4,17 @@
 //! allowing real-time audio streaming to AI services like OpenAI Realtime API.
 
 use dashmap::DashMap;
-use forge_ai_stream::{AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, OpenAIConnector};
-use forge_core::{CallId, ForgeError, Result, SecureString};
+use forge_ai_stream::{
+    AIConnector, AIConnectorConfig, AIConnectorType, AIEvent, AnthropicConnector,
+    DeepgramConnector, ElevenLabsConnector, OpenAIConnector, SessionConfig, TurnDetectionMode,
+};
+use forge_core::{CallId, EventBus, ForgeError, ForgeEvent, Result, SecureString};
 use serde::{Deserialize, Serialize};
-use std::{env, sync::Arc};
+use std::{
+    env,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
@@ -102,20 +109,86 @@ pub struct AIAudioResponse {
     pub sample_rate: u32,
 }
 
+const AI_AUDIO_QUEUE_CAPACITY: usize = 64;
+const AI_AUDIO_RESPONSE_QUEUE_CAPACITY: usize = 32;
+
+type SharedConnector = Arc<Mutex<Box<dyn AIConnector>>>;
+
+// Labels every AIConnectorType variant for telemetry; only OpenAI / Anthropic /
+// ElevenLabs / Deepgram have a working factory in create_connector below — the
+// remaining variants exist on the type so SessionConfig can round-trip them, but
+// constructing a session with them returns Config(...).
+fn connector_type_label(connector_type: AIConnectorType) -> &'static str {
+    match connector_type {
+        AIConnectorType::OpenAI => "openai",
+        AIConnectorType::Anthropic => "anthropic",
+        AIConnectorType::ElevenLabs => "elevenlabs",
+        AIConnectorType::Deepgram => "deepgram",
+        AIConnectorType::Dialogflow => "dialogflow",
+        AIConnectorType::Lex => "lex",
+        AIConnectorType::Azure => "azure",
+        AIConnectorType::Custom => "custom",
+    }
+}
+
+fn build_session_config(config: &AISessionConfig) -> SessionConfig {
+    let turn_detection = if config.enable_vad {
+        Some(TurnDetectionMode::ServerVad {
+            threshold: 0.5,
+            prefix_padding_ms: 200,
+            silence_duration_ms: 500,
+        })
+    } else {
+        Some(TurnDetectionMode::None)
+    };
+
+    SessionConfig {
+        model: config.model.clone(),
+        voice: config.voice.clone(),
+        temperature: config.temperature,
+        max_tokens: Some(4096),
+        instructions: config.instructions.clone(),
+        turn_detection,
+        tools: Vec::new(),
+    }
+}
+
+async fn create_connector(config: AIConnectorConfig) -> Result<Box<dyn AIConnector>> {
+    match config.connector_type {
+        AIConnectorType::OpenAI => OpenAIConnector::new(config)
+            .await
+            .map(|connector| Box::new(connector) as Box<dyn AIConnector>),
+        AIConnectorType::Anthropic => AnthropicConnector::new(config)
+            .await
+            .map(|connector| Box::new(connector) as Box<dyn AIConnector>),
+        AIConnectorType::ElevenLabs => ElevenLabsConnector::new(config)
+            .await
+            .map(|connector| Box::new(connector) as Box<dyn AIConnector>),
+        AIConnectorType::Deepgram => DeepgramConnector::new(config)
+            .await
+            .map(|connector| Box::new(connector) as Box<dyn AIConnector>),
+        other => Err(forge_ai_stream::AIStreamError::Config(format!(
+            "Connector type {:?} is not supported by forge-engine",
+            other
+        ))),
+    }
+    .map_err(|e| ForgeError::Internal(format!("Failed to create AI connector: {}", e)))
+}
+
 /// An active AI session attached to a media session
 pub struct AISession {
     /// Associated call ID
     call_id: CallId,
-    /// AI connector (OpenAI connector)
-    connector: Arc<Mutex<OpenAIConnector>>,
+    /// AI connector
+    connector: SharedConnector,
     /// Current state
     state: Arc<Mutex<AISessionState>>,
     /// Audio sample rate
     _sample_rate: u32,
     /// Channel for sending audio to AI
-    audio_tx: mpsc::UnboundedSender<Vec<i16>>,
+    audio_tx: mpsc::Sender<Vec<i16>>,
     /// Channel for receiving audio responses from AI
-    audio_response_rx: Arc<Mutex<mpsc::UnboundedReceiver<AIAudioResponse>>>,
+    audio_response_rx: Arc<Mutex<mpsc::Receiver<AIAudioResponse>>>,
     /// Event processing task
     event_task: Option<JoinHandle<()>>,
     /// Audio routing task
@@ -132,6 +205,8 @@ impl AISession {
         event_bus: Option<Arc<forge_core::EventBus>>,
     ) -> Result<Self> {
         let call_id_clone = call_id.clone();
+        let provider = connector_type_label(config.connector_type).to_string();
+        let session_config = build_session_config(&config);
         // Convert AISessionConfig to AIConnectorConfig
         let connector_config = AIConnectorConfig {
             connector_type: config.connector_type,
@@ -149,10 +224,7 @@ impl AISession {
             request_timeout: std::time::Duration::from_secs(60),
         };
 
-        // Create OpenAI connector
-        let mut connector = OpenAIConnector::new(connector_config)
-            .await
-            .map_err(|e| ForgeError::Internal(format!("Failed to create AI connector: {}", e)))?;
+        let mut connector = create_connector(connector_config).await?;
 
         // Connect to AI service
         let session_id = connector
@@ -160,20 +232,34 @@ impl AISession {
             .await
             .map_err(|e| ForgeError::Internal(format!("AI connection failed: {}", e)))?;
 
+        connector
+            .update_config(session_config)
+            .await
+            .map_err(|e| ForgeError::Internal(format!("Failed to configure AI session: {}", e)))?;
+
         tracing::info!(
             "AI session connected for call {}: session_id={}",
             call_id.0,
             session_id
         );
 
+        if let Some(bus) = event_bus.as_ref() {
+            let _ = bus.publish(ForgeEvent::AiSessionStarted {
+                call_id: call_id.clone(),
+                provider: provider.clone(),
+                timestamp: chrono::Utc::now(),
+            });
+        }
+
         let connector = Arc::new(Mutex::new(connector));
         let state = Arc::new(Mutex::new(AISessionState::Active));
 
         // Create audio channel for sending audio to AI
-        let (audio_tx, audio_rx) = mpsc::unbounded_channel();
+        let (audio_tx, audio_rx) = mpsc::channel(AI_AUDIO_QUEUE_CAPACITY);
 
         // Create audio response channel for receiving audio from AI
-        let (audio_response_tx, audio_response_rx) = mpsc::unbounded_channel();
+        let (audio_response_tx, audio_response_rx) =
+            mpsc::channel(AI_AUDIO_RESPONSE_QUEUE_CAPACITY);
 
         let session = Self {
             call_id: call_id.clone(),
@@ -193,6 +279,8 @@ impl AISession {
             Arc::clone(&connector),
             Arc::clone(&state),
             audio_response_tx,
+            event_bus.clone(),
+            provider,
         ));
 
         // Start audio routing task
@@ -234,8 +322,17 @@ impl AISession {
     /// Send audio samples to AI
     pub async fn send_audio(&self, samples: &[i16]) -> Result<()> {
         self.audio_tx
-            .send(samples.to_vec())
-            .map_err(|e| ForgeError::Internal(format!("Failed to send audio to AI: {}", e)))?;
+            .try_send(samples.to_vec())
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => ForgeError::ResourceLimit(format!(
+                    "AI audio queue full for call {}",
+                    self.call_id.0
+                )),
+                mpsc::error::TrySendError::Closed(_) => ForgeError::Internal(format!(
+                    "AI audio queue closed for call {}",
+                    self.call_id.0
+                )),
+            })?;
         Ok(())
     }
 
@@ -243,7 +340,7 @@ impl AISession {
     pub async fn send_function_response(&self, call_id: &str, output: String) -> Result<()> {
         let mut connector = self.connector.lock().await;
         connector
-            .send_function_response(call_id, output)
+            .send_function_response(call_id.to_string(), output)
             .await
             .map_err(|e| ForgeError::Internal(format!("Failed to send function response: {}", e)))
     }
@@ -285,17 +382,37 @@ impl AISession {
     /// Process AI events (transcripts, audio responses, errors, etc.)
     async fn process_events(
         call_id: CallId,
-        connector: Arc<Mutex<OpenAIConnector>>,
+        connector: SharedConnector,
         state: Arc<Mutex<AISessionState>>,
-        audio_response_tx: mpsc::UnboundedSender<AIAudioResponse>,
+        audio_response_tx: mpsc::Sender<AIAudioResponse>,
+        event_bus: Option<Arc<EventBus>>,
+        provider: String,
     ) {
+        // If no AudioResponse arrives for this long, consider the AI done speaking and
+        // flip the state back to Active so callers (UI, recordings, gating) don't get stuck.
+        // OpenAI's stream emits a steady run of audio chunks during speech, so a quiet
+        // gap > this threshold is a reliable "done" signal even when the upstream
+        // connector doesn't translate response.done into an AIEvent.
+        const SPEAKING_IDLE_TIMEOUT: Duration = Duration::from_millis(600);
+        let mut last_audio_response_at: Option<Instant> = None;
+
         loop {
             let event = {
                 let mut conn = connector.lock().await;
                 match conn.next_event().await {
                     Ok(Some(event)) => event,
                     Ok(None) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        if let Some(at) = last_audio_response_at {
+                            if at.elapsed() >= SPEAKING_IDLE_TIMEOUT {
+                                let mut s = state.lock().await;
+                                if matches!(*s, AISessionState::Speaking) {
+                                    *s = AISessionState::Active;
+                                }
+                                last_audio_response_at = None;
+                            }
+                        }
+                        drop(conn);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                         continue;
                     }
                     Err(e) => {
@@ -307,18 +424,34 @@ impl AISession {
 
             match event {
                 AIEvent::Transcript { segment } => {
+                    *state.lock().await = AISessionState::Active;
+                    last_audio_response_at = None;
                     tracing::info!(
                         "AI transcript for call {}: {:?}: {}",
                         call_id.0,
                         segment.role,
                         segment.text
                     );
+
+                    if matches!(segment.role, forge_ai_stream::events::TranscriptRole::User) {
+                        if let Some(bus) = event_bus.as_ref() {
+                            let _ = bus.publish(ForgeEvent::TranscriptionResult {
+                                call_id: call_id.clone(),
+                                text: segment.text,
+                                confidence: segment.confidence.unwrap_or(1.0),
+                                is_final: segment.is_final,
+                                timestamp: chrono::Utc::now(),
+                            });
+                        }
+                    }
                 }
                 AIEvent::AudioResponse {
                     audio_data,
                     sample_rate,
                     ..
                 } => {
+                    *state.lock().await = AISessionState::Speaking;
+                    last_audio_response_at = Some(Instant::now());
                     tracing::debug!(
                         "AI audio response for call {}: {} samples @ {}Hz",
                         call_id.0,
@@ -327,7 +460,7 @@ impl AISession {
                     );
 
                     // Send audio response through channel
-                    if let Err(e) = audio_response_tx.send(AIAudioResponse {
+                    if let Err(e) = audio_response_tx.try_send(AIAudioResponse {
                         samples: audio_data,
                         sample_rate,
                     }) {
@@ -345,7 +478,14 @@ impl AISession {
                         call.name,
                         call.call_id
                     );
-                    // TODO: Emit event to application layer for handling
+                    if let Some(bus) = event_bus.as_ref() {
+                        let _ = bus.publish(ForgeEvent::AiToolCall {
+                            call_id: call_id.clone(),
+                            tool_name: call.name,
+                            arguments: call.arguments.to_string(),
+                            timestamp: chrono::Utc::now(),
+                        });
+                    }
                 }
                 AIEvent::VadStateChange {
                     is_speech,
@@ -357,6 +497,10 @@ impl AISession {
                         if is_speech { "SPEECH" } else { "SILENCE" },
                         confidence
                     );
+                    if is_speech {
+                        *state.lock().await = AISessionState::Active;
+                        last_audio_response_at = None;
+                    }
                 }
                 AIEvent::BargeIn { response_id } => {
                     tracing::info!(
@@ -365,11 +509,14 @@ impl AISession {
                         response_id
                     );
                     *state.lock().await = AISessionState::Active;
+                    last_audio_response_at = None;
                 }
                 AIEvent::Error { message, .. } => {
                     tracing::error!("AI error for call {}: {}", call_id.0, message);
                 }
                 AIEvent::Connected { session_id } => {
+                    *state.lock().await = AISessionState::Active;
+                    last_audio_response_at = None;
                     tracing::info!(
                         "AI connected for call {}: session={}",
                         call_id.0,
@@ -396,12 +543,19 @@ impl AISession {
         }
 
         *state.lock().await = AISessionState::Terminated;
+        if let Some(bus) = event_bus.as_ref() {
+            let _ = bus.publish(ForgeEvent::AiSessionEnded {
+                call_id,
+                timestamp: chrono::Utc::now(),
+            });
+        }
+        tracing::debug!("AI event processor stopped for provider {}", provider);
     }
 
     /// Process audio samples and send to AI
     async fn process_audio(
-        connector: Arc<Mutex<OpenAIConnector>>,
-        mut audio_rx: mpsc::UnboundedReceiver<Vec<i16>>,
+        connector: SharedConnector,
+        mut audio_rx: mpsc::Receiver<Vec<i16>>,
         target_sample_rate: u32,
     ) {
         while let Some(samples) = audio_rx.recv().await {
@@ -416,7 +570,7 @@ impl AISession {
     /// Process DTMF events from EventBus and send to AI
     async fn process_dtmf_events(
         call_id: CallId,
-        connector: Arc<Mutex<OpenAIConnector>>,
+        connector: SharedConnector,
         event_bus: Arc<forge_core::EventBus>,
     ) {
         use forge_core::{DtmfEventKind, ForgeEvent};

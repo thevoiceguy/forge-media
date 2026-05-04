@@ -4,7 +4,7 @@ use forge_core::{CallId, EventBus, ForgeError, ForgeEvent, ParticipantId, Result
 use forge_rtp::srtp::SrtpContext;
 use forge_rtp::{PortPair, PortPool, RtpSocketConfig, RtpSocketPair};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -256,6 +256,153 @@ impl Default for GeneratedRtpState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScheduledPlayoutSource {
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
+    AI,
+    MediaBridgeAudio,
+    MediaBridgeDtmf,
+}
+
+impl ScheduledPlayoutSource {
+    pub(crate) fn as_label(self) -> &'static str {
+        match self {
+            Self::AI => "ai",
+            Self::MediaBridgeAudio => "media_bridge_audio",
+            Self::MediaBridgeDtmf => "media_bridge_dtmf",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum ScheduledPlayoutKind {
+    Audio {
+        codec: forge_core::AudioCodec,
+        payload_type: u8,
+        samples: Vec<i16>,
+    },
+    Dtmf {
+        payload_type: u8,
+        payload: Vec<u8>,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct ScheduledPlayoutItem {
+    pub due_at: Instant,
+    pub playback_id: Option<String>,
+    pub marker: bool,
+    pub timestamp: u32,
+    pub stream_cursor_after: u32,
+    pub kind: ScheduledPlayoutKind,
+    pub source: ScheduledPlayoutSource,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ScheduledPlayoutQueue {
+    items: VecDeque<ScheduledPlayoutItem>,
+    next_due_at: Option<Instant>,
+    next_rtp_timestamp: Option<u32>,
+}
+
+enum StatefulCodec {
+    #[cfg(feature = "opus")]
+    Opus(forge_codecs::opus::OpusCodec),
+    #[cfg(feature = "g722")]
+    G722(forge_codecs::g722::G722Codec),
+}
+
+impl StatefulCodec {
+    fn new(codec: forge_core::AudioCodec) -> Result<Option<Self>> {
+        match codec {
+            #[cfg(feature = "opus")]
+            forge_core::AudioCodec::Opus => {
+                let opus_config = forge_codecs::opus::OpusConfig {
+                    sample_rate: 48000,
+                    channels: 1,
+                    application: forge_codecs::opus::OpusApplication::Voip,
+                    bitrate: 24000,
+                    frame_duration_ms: 20,
+                };
+                let codec =
+                    forge_codecs::opus::OpusCodec::with_config(opus_config).map_err(|e| {
+                        ForgeError::Codec(format!("Failed to create Opus codec: {}", e))
+                    })?;
+                Ok(Some(Self::Opus(codec)))
+            }
+            #[cfg(not(feature = "opus"))]
+            forge_core::AudioCodec::Opus => Err(ForgeError::Codec(
+                "Opus support not enabled in forge-engine".to_string(),
+            )),
+            #[cfg(feature = "g722")]
+            forge_core::AudioCodec::G722 => {
+                Ok(Some(Self::G722(forge_codecs::g722::G722Codec::default())))
+            }
+            #[cfg(not(feature = "g722"))]
+            forge_core::AudioCodec::G722 => Err(ForgeError::Codec(
+                "G.722 support not enabled in forge-engine".to_string(),
+            )),
+            _ => Ok(None),
+        }
+    }
+
+    fn decode(&mut self, payload: &[u8]) -> Result<Vec<i16>> {
+        use forge_codecs::AudioCodec as _;
+
+        match self {
+            #[cfg(feature = "opus")]
+            Self::Opus(codec) => codec
+                .decode(payload)
+                .map_err(|e| ForgeError::Codec(format!("Opus decode failed: {}", e))),
+            #[cfg(feature = "g722")]
+            Self::G722(codec) => codec
+                .decode(payload)
+                .map_err(|e| ForgeError::Codec(format!("G.722 decode failed: {}", e))),
+        }
+    }
+
+    fn encode(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
+        use forge_codecs::AudioCodec as _;
+
+        match self {
+            #[cfg(feature = "opus")]
+            Self::Opus(codec) => codec
+                .encode(samples)
+                .map_err(|e| ForgeError::Codec(format!("Opus encode failed: {}", e))),
+            #[cfg(feature = "g722")]
+            Self::G722(codec) => codec
+                .encode(samples)
+                .map_err(|e| ForgeError::Codec(format!("G.722 encode failed: {}", e))),
+        }
+    }
+}
+
+struct ParticipantCodecRuntime {
+    inbound_codec: forge_core::AudioCodec,
+    outbound_codec: forge_core::AudioCodec,
+    inbound: Option<StatefulCodec>,
+    outbound: Option<StatefulCodec>,
+}
+
+impl ParticipantCodecRuntime {
+    fn new(codec: forge_core::AudioCodec) -> Result<Self> {
+        Ok(Self {
+            inbound_codec: codec,
+            outbound_codec: codec,
+            inbound: StatefulCodec::new(codec)?,
+            outbound: StatefulCodec::new(codec)?,
+        })
+    }
+
+    fn reset(&mut self, codec: forge_core::AudioCodec) -> Result<()> {
+        self.inbound_codec = codec;
+        self.outbound_codec = codec;
+        self.inbound = StatefulCodec::new(codec)?;
+        self.outbound = StatefulCodec::new(codec)?;
+        Ok(())
+    }
+}
+
 /// State of a media session
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -303,12 +450,6 @@ pub struct MediaSession {
     inband_detector: Arc<Mutex<forge_dtmf::GoertzelDetector>>,
     /// DTMF event deduplicator
     dtmf_dedup: Arc<Mutex<forge_dtmf::DtmfDeduplicator>>,
-    /// Opus decoder for inband DTMF detection
-    #[cfg(feature = "opus")]
-    opus_decoder: Arc<Mutex<forge_codecs::opus::OpusCodec>>,
-    /// Opus encoder for AI audio responses
-    #[cfg(feature = "opus")]
-    opus_encoder: Arc<Mutex<forge_codecs::opus::OpusCodec>>,
     /// Transcoder for A → B direction (optional, created when needed)
     transcoder_a_to_b: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
     /// Transcoder for B → A direction (optional, created when needed)
@@ -338,9 +479,18 @@ pub struct MediaSession {
     #[cfg(all(target_os = "linux", feature = "xdp"))]
     xdp_active: Arc<AtomicBool>,
     /// AI session manager for AI integration (optional, uses interior mutability)
+    #[cfg(feature = "ai")]
     ai_manager: Arc<RwLock<Option<Arc<crate::ai_integration::AISessionManager>>>>,
     /// Generic media bridge manager for bidirectional PCM streaming.
     media_bridge_manager: Arc<RwLock<Option<Arc<crate::media_bridge::MediaBridgeManager>>>>,
+    /// Per-leg codec runtime state for inbound/outbound encoding and decoding.
+    codec_runtime_a: Arc<Mutex<ParticipantCodecRuntime>>,
+    /// Per-leg codec runtime state for inbound/outbound encoding and decoding.
+    codec_runtime_b: Arc<Mutex<ParticipantCodecRuntime>>,
+    /// Scheduled playout queue for participant A.
+    playout_queue_a: Arc<Mutex<ScheduledPlayoutQueue>>,
+    /// Scheduled playout queue for participant B.
+    playout_queue_b: Arc<Mutex<ScheduledPlayoutQueue>>,
     /// RTP sequencing state for generated audio sent toward participant A.
     generated_rtp_state_a: Arc<Mutex<GeneratedRtpState>>,
     /// RTP sequencing state for generated audio sent toward participant B.
@@ -397,6 +547,8 @@ impl MediaSession {
             stats: ParticipantStats::default(),
             latch_allowed_ips: None,
         };
+        let participant_a_codec = participant_a.codec_config.codec;
+        let participant_b_codec = participant_b.codec_config.codec;
 
         let now = Instant::now();
 
@@ -416,33 +568,6 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
-            #[cfg(feature = "opus")]
-            opus_decoder: Arc::new(Mutex::new({
-                let opus_config = forge_codecs::opus::OpusConfig {
-                    sample_rate: 48000,
-                    channels: 1,
-                    application: forge_codecs::opus::OpusApplication::Voip,
-                    bitrate: 24000,
-                    frame_duration_ms: 20,
-                };
-                forge_codecs::opus::OpusCodec::with_config(opus_config)
-                    .expect("Failed to create Opus decoder for DTMF detection")
-            })),
-            #[cfg(feature = "opus")]
-            opus_encoder: Arc::new(Mutex::new({
-                // 48kHz/24kbps Opus encoder for AI-generated audio responses
-                // Matches decoder sample rate for symmetric operation
-                // VoIP application mode optimized for voice/speech
-                let opus_config = forge_codecs::opus::OpusConfig {
-                    sample_rate: 48000,
-                    channels: 1,
-                    application: forge_codecs::opus::OpusApplication::Voip,
-                    bitrate: 24000,
-                    frame_duration_ms: 20,
-                };
-                forge_codecs::opus::OpusCodec::with_config(opus_config)
-                    .expect("Failed to create Opus encoder for AI audio")
-            })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -458,8 +583,17 @@ impl MediaSession {
             xdp_manager: None,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "ai")]
             ai_manager: Arc::new(RwLock::new(None)),
             media_bridge_manager: Arc::new(RwLock::new(None)),
+            codec_runtime_a: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
+                participant_a_codec,
+            )?)),
+            codec_runtime_b: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
+                participant_b_codec,
+            )?)),
+            playout_queue_a: Arc::new(Mutex::new(ScheduledPlayoutQueue::default())),
+            playout_queue_b: Arc::new(Mutex::new(ScheduledPlayoutQueue::default())),
             generated_rtp_state_a: Arc::new(Mutex::new(GeneratedRtpState::default())),
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
@@ -561,6 +695,8 @@ impl MediaSession {
             stats: ParticipantStats::default(),
             latch_allowed_ips: None,
         };
+        let participant_a_codec = participant_a.codec_config.codec;
+        let participant_b_codec = participant_b.codec_config.codec;
 
         let now = Instant::now();
 
@@ -580,33 +716,6 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
-            #[cfg(feature = "opus")]
-            opus_decoder: Arc::new(Mutex::new({
-                let opus_config = forge_codecs::opus::OpusConfig {
-                    sample_rate: 48000,
-                    channels: 1,
-                    application: forge_codecs::opus::OpusApplication::Voip,
-                    bitrate: 24000,
-                    frame_duration_ms: 20,
-                };
-                forge_codecs::opus::OpusCodec::with_config(opus_config)
-                    .expect("Failed to create Opus decoder for DTMF detection")
-            })),
-            #[cfg(feature = "opus")]
-            opus_encoder: Arc::new(Mutex::new({
-                // 48kHz/24kbps Opus encoder for AI-generated audio responses
-                // Matches decoder sample rate for symmetric operation
-                // VoIP application mode optimized for voice/speech
-                let opus_config = forge_codecs::opus::OpusConfig {
-                    sample_rate: 48000,
-                    channels: 1,
-                    application: forge_codecs::opus::OpusApplication::Voip,
-                    bitrate: 24000,
-                    frame_duration_ms: 20,
-                };
-                forge_codecs::opus::OpusCodec::with_config(opus_config)
-                    .expect("Failed to create Opus encoder for AI audio")
-            })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -622,8 +731,17 @@ impl MediaSession {
             xdp_manager: None,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "ai")]
             ai_manager: Arc::new(RwLock::new(None)),
             media_bridge_manager: Arc::new(RwLock::new(None)),
+            codec_runtime_a: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
+                participant_a_codec,
+            )?)),
+            codec_runtime_b: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
+                participant_b_codec,
+            )?)),
+            playout_queue_a: Arc::new(Mutex::new(ScheduledPlayoutQueue::default())),
+            playout_queue_b: Arc::new(Mutex::new(ScheduledPlayoutQueue::default())),
             generated_rtp_state_a: Arc::new(Mutex::new(GeneratedRtpState::default())),
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
@@ -769,6 +887,8 @@ impl MediaSession {
             stats: ParticipantStats::default(),
             latch_allowed_ips: None,
         };
+        let participant_a_codec = participant_a.codec_config.codec;
+        let participant_b_codec = participant_b.codec_config.codec;
 
         let now = Instant::now();
 
@@ -788,33 +908,6 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
-            #[cfg(feature = "opus")]
-            opus_decoder: Arc::new(Mutex::new({
-                let opus_config = forge_codecs::opus::OpusConfig {
-                    sample_rate: 48000,
-                    channels: 1,
-                    application: forge_codecs::opus::OpusApplication::Voip,
-                    bitrate: 24000,
-                    frame_duration_ms: 20,
-                };
-                forge_codecs::opus::OpusCodec::with_config(opus_config)
-                    .expect("Failed to create Opus decoder for DTMF detection")
-            })),
-            #[cfg(feature = "opus")]
-            opus_encoder: Arc::new(Mutex::new({
-                // 48kHz/24kbps Opus encoder for AI-generated audio responses
-                // Matches decoder sample rate for symmetric operation
-                // VoIP application mode optimized for voice/speech
-                let opus_config = forge_codecs::opus::OpusConfig {
-                    sample_rate: 48000,
-                    channels: 1,
-                    application: forge_codecs::opus::OpusApplication::Voip,
-                    bitrate: 24000,
-                    frame_duration_ms: 20,
-                };
-                forge_codecs::opus::OpusCodec::with_config(opus_config)
-                    .expect("Failed to create Opus encoder for AI audio")
-            })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -828,8 +921,17 @@ impl MediaSession {
             to_tag,
             xdp_manager,
             xdp_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "ai")]
             ai_manager: Arc::new(RwLock::new(None)),
             media_bridge_manager: Arc::new(RwLock::new(None)),
+            codec_runtime_a: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
+                participant_a_codec,
+            )?)),
+            codec_runtime_b: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
+                participant_b_codec,
+            )?)),
+            playout_queue_a: Arc::new(Mutex::new(ScheduledPlayoutQueue::default())),
+            playout_queue_b: Arc::new(Mutex::new(ScheduledPlayoutQueue::default())),
             generated_rtp_state_a: Arc::new(Mutex::new(GeneratedRtpState::default())),
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
@@ -910,18 +1012,6 @@ impl MediaSession {
     /// Get the DTMF configuration
     pub fn dtmf_config(&self) -> &DtmfConfig {
         &self.config.dtmf_config
-    }
-
-    /// Get the Opus decoder for inband DTMF detection
-    #[cfg(feature = "opus")]
-    pub fn opus_decoder(&self) -> &Arc<Mutex<forge_codecs::opus::OpusCodec>> {
-        &self.opus_decoder
-    }
-
-    /// Get the Opus encoder for AI audio responses
-    #[cfg(feature = "opus")]
-    pub fn opus_encoder(&self) -> &Arc<Mutex<forge_codecs::opus::OpusCodec>> {
-        &self.opus_encoder
     }
 
     /// Get the transcoding configuration
@@ -1340,6 +1430,400 @@ impl MediaSession {
         }
     }
 
+    fn codec_runtime_lock(&self, leg: ParticipantLabel) -> &Arc<Mutex<ParticipantCodecRuntime>> {
+        match leg {
+            ParticipantLabel::A => &self.codec_runtime_a,
+            ParticipantLabel::B => &self.codec_runtime_b,
+        }
+    }
+
+    fn playout_queue_lock(&self, leg: ParticipantLabel) -> &Arc<Mutex<ScheduledPlayoutQueue>> {
+        match leg {
+            ParticipantLabel::A => &self.playout_queue_a,
+            ParticipantLabel::B => &self.playout_queue_b,
+        }
+    }
+
+    pub(crate) fn codec_audio_sample_rate(
+        codec: forge_core::AudioCodec,
+        negotiated_clock_rate: u32,
+    ) -> u32 {
+        match codec {
+            forge_core::AudioCodec::G722 => 16000,
+            _ => negotiated_clock_rate,
+        }
+    }
+
+    pub(crate) fn frame_samples_for_codec(
+        codec: forge_core::AudioCodec,
+        sample_rate: u32,
+    ) -> Option<usize> {
+        match codec {
+            forge_core::AudioCodec::PCMU
+            | forge_core::AudioCodec::PCMA
+            | forge_core::AudioCodec::Opus
+            | forge_core::AudioCodec::G722 => Some((sample_rate / 50) as usize),
+            _ => None,
+        }
+    }
+
+    pub(crate) async fn decode_with_codec_runtime(
+        &self,
+        leg: ParticipantLabel,
+        codec: forge_core::AudioCodec,
+        payload: &[u8],
+    ) -> Result<Vec<i16>> {
+        match codec {
+            forge_core::AudioCodec::PCMU => Ok(payload
+                .iter()
+                .map(|&byte| forge_codecs::g711::decode_ulaw(byte))
+                .collect()),
+            forge_core::AudioCodec::PCMA => Ok(payload
+                .iter()
+                .map(|&byte| forge_codecs::g711::decode_alaw(byte))
+                .collect()),
+            forge_core::AudioCodec::Opus | forge_core::AudioCodec::G722 => {
+                let mut runtime = self.codec_runtime_lock(leg).lock().await;
+                if runtime.inbound_codec != codec {
+                    runtime.reset(codec)?;
+                }
+                runtime
+                    .inbound
+                    .as_mut()
+                    .ok_or_else(|| {
+                        ForgeError::Codec(format!("No inbound codec runtime for {:?}", codec))
+                    })?
+                    .decode(payload)
+            }
+            other => Err(ForgeError::Codec(format!(
+                "Inbound decode not supported for codec {:?}",
+                other
+            ))),
+        }
+    }
+
+    pub(crate) async fn encode_with_codec_runtime(
+        &self,
+        leg: ParticipantLabel,
+        codec: forge_core::AudioCodec,
+        samples: &[i16],
+    ) -> Result<Vec<u8>> {
+        match codec {
+            forge_core::AudioCodec::PCMU => Ok(samples
+                .iter()
+                .map(|&sample| forge_codecs::g711::encode_ulaw(sample))
+                .collect()),
+            forge_core::AudioCodec::PCMA => Ok(samples
+                .iter()
+                .map(|&sample| forge_codecs::g711::encode_alaw(sample))
+                .collect()),
+            forge_core::AudioCodec::Opus | forge_core::AudioCodec::G722 => {
+                let mut runtime = self.codec_runtime_lock(leg).lock().await;
+                if runtime.outbound_codec != codec {
+                    runtime.reset(codec)?;
+                }
+                runtime
+                    .outbound
+                    .as_mut()
+                    .ok_or_else(|| {
+                        ForgeError::Codec(format!("No outbound codec runtime for {:?}", codec))
+                    })?
+                    .encode(samples)
+            }
+            other => Err(ForgeError::Codec(format!(
+                "Outbound encode not supported for codec {:?}",
+                other
+            ))),
+        }
+    }
+
+    pub(crate) async fn reset_codec_runtime(
+        &self,
+        leg: ParticipantLabel,
+        codec: forge_core::AudioCodec,
+    ) -> Result<()> {
+        self.codec_runtime_lock(leg).lock().await.reset(codec)
+    }
+
+    pub(crate) async fn schedule_audio_playout(
+        &self,
+        target: crate::media_bridge::MediaTarget,
+        sample_rate: u32,
+        samples: &[i16],
+        playback_id: Option<String>,
+        mode: crate::media_bridge::PlayoutMode,
+        source: ScheduledPlayoutSource,
+    ) -> Result<()> {
+        for leg in [ParticipantLabel::A, ParticipantLabel::B] {
+            if !target.includes(leg) {
+                continue;
+            }
+            self.schedule_audio_playout_for_leg(
+                leg,
+                sample_rate,
+                samples,
+                playback_id.clone(),
+                mode,
+                source,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn schedule_audio_playout_for_leg(
+        &self,
+        leg: ParticipantLabel,
+        sample_rate: u32,
+        samples: &[i16],
+        playback_id: Option<String>,
+        mode: crate::media_bridge::PlayoutMode,
+        source: ScheduledPlayoutSource,
+    ) -> Result<()> {
+        let codec_config = self.participant_lock(leg).read().await.codec_config.clone();
+        let audio_sample_rate =
+            Self::codec_audio_sample_rate(codec_config.codec, codec_config.clock_rate);
+        let frame_samples = Self::frame_samples_for_codec(codec_config.codec, audio_sample_rate)
+            .ok_or_else(|| {
+                ForgeError::Codec(format!(
+                    "Unsupported playout codec {:?} for leg {}",
+                    codec_config.codec,
+                    leg.as_str()
+                ))
+            })?;
+
+        let resampled_samples = if sample_rate != audio_sample_rate {
+            crate::forwarding::ForwardingEngine::resample_audio(
+                samples,
+                sample_rate,
+                audio_sample_rate,
+            )
+        } else {
+            samples.to_vec()
+        };
+
+        if mode == crate::media_bridge::PlayoutMode::Replace {
+            self.clear_scheduled_playout_for_leg(leg, playback_id.as_deref())
+                .await;
+        }
+
+        // Snapshot the RTP cursor before taking the queue lock so we don't nest locks.
+        let rtp_cursor_fallback = self.generated_rtp_state(leg).lock().await.next_timestamp;
+
+        let now = Instant::now();
+        let mut queue = self.playout_queue_lock(leg).lock().await;
+        let mut due_at = queue.next_due_at.unwrap_or(now);
+        if due_at < now {
+            due_at = now;
+        }
+        let mut stream_cursor = queue.next_rtp_timestamp.unwrap_or(rtp_cursor_fallback);
+        let timestamp_increment = codec_config.clock_rate / 50;
+
+        for (index, chunk) in resampled_samples.chunks(frame_samples).enumerate() {
+            let mut frame = chunk.to_vec();
+            if frame.len() < frame_samples {
+                frame.resize(frame_samples, 0);
+            }
+
+            let timestamp = stream_cursor;
+            stream_cursor = stream_cursor.wrapping_add(timestamp_increment);
+
+            queue.items.push_back(ScheduledPlayoutItem {
+                due_at,
+                playback_id: playback_id.clone(),
+                marker: index == 0,
+                timestamp,
+                stream_cursor_after: stream_cursor,
+                kind: ScheduledPlayoutKind::Audio {
+                    codec: codec_config.codec,
+                    payload_type: codec_config.payload_type,
+                    samples: frame,
+                },
+                source,
+            });
+            due_at += Duration::from_millis(20);
+        }
+
+        queue.next_due_at = Some(due_at);
+        queue.next_rtp_timestamp = Some(stream_cursor);
+        Ok(())
+    }
+
+    pub(crate) async fn schedule_dtmf_playout(
+        &self,
+        target: crate::media_bridge::MediaTarget,
+        digit: forge_dtmf::DtmfDigit,
+        duration_ms: u32,
+        playback_id: Option<String>,
+        mode: crate::media_bridge::PlayoutMode,
+        source: ScheduledPlayoutSource,
+    ) -> Result<()> {
+        for leg in [ParticipantLabel::A, ParticipantLabel::B] {
+            if !target.includes(leg) {
+                continue;
+            }
+            self.schedule_dtmf_playout_for_leg(
+                leg,
+                digit,
+                duration_ms,
+                playback_id.clone(),
+                mode,
+                source,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn schedule_dtmf_playout_for_leg(
+        &self,
+        leg: ParticipantLabel,
+        digit: forge_dtmf::DtmfDigit,
+        duration_ms: u32,
+        playback_id: Option<String>,
+        mode: crate::media_bridge::PlayoutMode,
+        source: ScheduledPlayoutSource,
+    ) -> Result<()> {
+        let clock_rate = self
+            .participant_lock(leg)
+            .read()
+            .await
+            .codec_config
+            .clock_rate;
+        let payload_type = self.telephone_event_pt_for_leg(leg);
+        let packet_interval_ms = 20u32;
+        let duration_ms = duration_ms.max(packet_interval_ms);
+        let mut generator = forge_dtmf::Rfc2833Generator::new(clock_rate, packet_interval_ms);
+
+        let mut events = vec![generator.start_digit(digit)];
+        while generator.current_duration_ms() + packet_interval_ms < duration_ms {
+            if let Some(event) = generator.continue_digit() {
+                events.push(event);
+            }
+        }
+        if let Some(mut end_packets) = generator.end_digit() {
+            events.append(&mut end_packets);
+        }
+
+        if mode == crate::media_bridge::PlayoutMode::Replace {
+            self.clear_scheduled_playout_for_leg(leg, playback_id.as_deref())
+                .await;
+        }
+
+        // Snapshot the RTP cursor before taking the queue lock so we don't nest locks.
+        let rtp_cursor_fallback = self.generated_rtp_state(leg).lock().await.next_timestamp;
+
+        let now = Instant::now();
+        let mut queue = self.playout_queue_lock(leg).lock().await;
+        let base_timestamp = queue.next_rtp_timestamp.unwrap_or(rtp_cursor_fallback);
+        let mut due_at = queue.next_due_at.unwrap_or(now);
+        if due_at < now {
+            due_at = now;
+        }
+
+        let final_cursor = base_timestamp.wrapping_add(
+            events
+                .last()
+                .map(|event| event.duration() as u32)
+                .unwrap_or(0),
+        );
+
+        for (index, event) in events.into_iter().enumerate() {
+            let stream_cursor_after = if event.is_end() {
+                final_cursor
+            } else {
+                base_timestamp
+            };
+            queue.items.push_back(ScheduledPlayoutItem {
+                due_at,
+                playback_id: playback_id.clone(),
+                marker: index == 0,
+                timestamp: base_timestamp,
+                stream_cursor_after,
+                kind: ScheduledPlayoutKind::Dtmf {
+                    payload_type,
+                    payload: event.to_bytes(),
+                },
+                source,
+            });
+            due_at += Duration::from_millis(packet_interval_ms as u64);
+        }
+
+        queue.next_due_at = Some(due_at);
+        queue.next_rtp_timestamp = Some(final_cursor);
+        Ok(())
+    }
+
+    pub(crate) async fn clear_scheduled_playout(
+        &self,
+        target: Option<crate::media_bridge::MediaTarget>,
+        playback_id: Option<&str>,
+    ) -> usize {
+        let mut removed = 0;
+
+        for leg in [ParticipantLabel::A, ParticipantLabel::B] {
+            if target.map(|t| t.includes(leg)).unwrap_or(true) {
+                removed += self.clear_scheduled_playout_for_leg(leg, playback_id).await;
+            }
+        }
+
+        removed
+    }
+
+    async fn clear_scheduled_playout_for_leg(
+        &self,
+        leg: ParticipantLabel,
+        playback_id: Option<&str>,
+    ) -> usize {
+        let mut queue = self.playout_queue_lock(leg).lock().await;
+        let original_len = queue.items.len();
+        // playback_id = Some(id): drop only items tagged with that id (replace one playback,
+        // keep concurrent ones). playback_id = None: drop everything queued for this leg
+        // (codec/PT change, full barge-in).
+        queue.items.retain(|item| {
+            !playback_id
+                .map(|id| item.playback_id.as_deref() == Some(id))
+                .unwrap_or(true)
+        });
+        let removed = original_len.saturating_sub(queue.items.len());
+        Self::recompute_playout_queue_state(&mut queue);
+        removed
+    }
+
+    fn recompute_playout_queue_state(queue: &mut ScheduledPlayoutQueue) {
+        if let Some(last) = queue.items.back() {
+            queue.next_due_at = Some(last.due_at + Duration::from_millis(20));
+            queue.next_rtp_timestamp = Some(last.stream_cursor_after);
+        } else {
+            queue.next_due_at = None;
+            queue.next_rtp_timestamp = None;
+        }
+    }
+
+    pub(crate) async fn take_due_playout_items(
+        &self,
+        leg: ParticipantLabel,
+        now: Instant,
+    ) -> Vec<ScheduledPlayoutItem> {
+        let mut queue = self.playout_queue_lock(leg).lock().await;
+        let mut due = Vec::new();
+        while queue
+            .items
+            .front()
+            .map(|item| item.due_at <= now)
+            .unwrap_or(false)
+        {
+            if let Some(item) = queue.items.pop_front() {
+                due.push(item);
+            }
+        }
+        if queue.items.is_empty() {
+            queue.next_due_at = None;
+            queue.next_rtp_timestamp = None;
+        }
+        due
+    }
+
     /// Get the runtime media configuration for a participant leg.
     pub async fn participant_media_state(&self, leg: ParticipantLabel) -> ParticipantMediaState {
         let participant = self.participant_lock(leg).read().await;
@@ -1360,6 +1844,9 @@ impl MediaSession {
         leg: ParticipantLabel,
         update: ParticipantMediaUpdate,
     ) -> Result<ParticipantMediaState> {
+        let codec_update = update.codec_config.clone();
+        let telephone_event_pt_update = update.telephone_event_payload_type;
+
         if let Some(Some(remote_addr)) = update.remote_addr {
             tracing::info!(
                 "Setting remote RTP endpoint for session {} leg {}: {}",
@@ -1392,11 +1879,32 @@ impl MediaSession {
             }
         }
 
-        if let Some(telephone_event_pt) = update.telephone_event_payload_type {
+        if let Some(telephone_event_pt) = telephone_event_pt_update {
             match leg {
                 ParticipantLabel::A => self.set_telephone_event_pt_a(telephone_event_pt),
                 ParticipantLabel::B => self.set_telephone_event_pt_b(telephone_event_pt),
             }
+        }
+
+        if let Some(codec_config) = codec_update {
+            self.reset_codec_runtime(leg, codec_config.codec).await?;
+            self.clear_scheduled_playout(
+                Some(match leg {
+                    ParticipantLabel::A => crate::media_bridge::MediaTarget::A,
+                    ParticipantLabel::B => crate::media_bridge::MediaTarget::B,
+                }),
+                None,
+            )
+            .await;
+        } else if telephone_event_pt_update.is_some() {
+            self.clear_scheduled_playout(
+                Some(match leg {
+                    ParticipantLabel::A => crate::media_bridge::MediaTarget::A,
+                    ParticipantLabel::B => crate::media_bridge::MediaTarget::B,
+                }),
+                None,
+            )
+            .await;
         }
 
         Ok(self.participant_media_state(leg).await)
@@ -1458,11 +1966,13 @@ impl MediaSession {
     }
 
     /// Get a copy of the AI session manager (if set)
+    #[cfg(feature = "ai")]
     pub async fn ai_manager(&self) -> Option<Arc<crate::ai_integration::AISessionManager>> {
         self.ai_manager.read().await.clone()
     }
 
     /// Set the AI session manager
+    #[cfg(feature = "ai")]
     pub async fn set_ai_manager(&self, manager: Arc<crate::ai_integration::AISessionManager>) {
         *self.ai_manager.write().await = Some(manager);
     }
@@ -1678,11 +2188,14 @@ impl MediaSession {
         let xdp_active = false;
 
         // Get AI session ID if present
+        #[cfg(feature = "ai")]
         let ai_session_id = if self.ai_manager.read().await.is_some() {
             Some(self.call_id.0.to_string())
         } else {
             None
         };
+        #[cfg(not(feature = "ai"))]
+        let ai_session_id: Option<String> = None;
 
         forge_ha::SessionState {
             call_id: self.call_id.0.to_string(),
@@ -1781,6 +2294,8 @@ impl MediaSession {
             },
             latch_allowed_ips: None,
         };
+        let participant_a_codec = participant_a.codec_config.codec;
+        let participant_b_codec = participant_b.codec_config.codec;
 
         // Parse session state
         let session_state = match state.state.as_str() {
@@ -1812,33 +2327,6 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
-            #[cfg(feature = "opus")]
-            opus_decoder: Arc::new(Mutex::new({
-                let opus_config = forge_codecs::opus::OpusConfig {
-                    sample_rate: 48000,
-                    channels: 1,
-                    application: forge_codecs::opus::OpusApplication::Voip,
-                    bitrate: 24000,
-                    frame_duration_ms: 20,
-                };
-                forge_codecs::opus::OpusCodec::with_config(opus_config)
-                    .expect("Failed to create Opus decoder for DTMF detection")
-            })),
-            #[cfg(feature = "opus")]
-            opus_encoder: Arc::new(Mutex::new({
-                // 48kHz/24kbps Opus encoder for AI-generated audio responses
-                // Matches decoder sample rate for symmetric operation
-                // VoIP application mode optimized for voice/speech
-                let opus_config = forge_codecs::opus::OpusConfig {
-                    sample_rate: 48000,
-                    channels: 1,
-                    application: forge_codecs::opus::OpusApplication::Voip,
-                    bitrate: 24000,
-                    frame_duration_ms: 20,
-                };
-                forge_codecs::opus::OpusCodec::with_config(opus_config)
-                    .expect("Failed to create Opus encoder for AI audio")
-            })),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -1851,8 +2339,17 @@ impl MediaSession {
             xdp_manager: None,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(state.xdp_active)),
+            #[cfg(feature = "ai")]
             ai_manager: Arc::new(RwLock::new(None)),
             media_bridge_manager: Arc::new(RwLock::new(None)),
+            codec_runtime_a: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
+                participant_a_codec,
+            )?)),
+            codec_runtime_b: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
+                participant_b_codec,
+            )?)),
+            playout_queue_a: Arc::new(Mutex::new(ScheduledPlayoutQueue::default())),
+            playout_queue_b: Arc::new(Mutex::new(ScheduledPlayoutQueue::default())),
             generated_rtp_state_a: Arc::new(Mutex::new(GeneratedRtpState::default())),
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
@@ -2421,9 +2918,9 @@ mod tests {
                 ParticipantMediaUpdate {
                     remote_addr: Some(Some("203.0.113.10:4000".parse().unwrap())),
                     codec_config: Some(ParticipantCodecConfig {
-                        payload_type: 111,
-                        codec: forge_core::AudioCodec::Opus,
-                        clock_rate: 48000,
+                        payload_type: 9,
+                        codec: forge_core::AudioCodec::G722,
+                        clock_rate: 8000,
                     }),
                     telephone_event_payload_type: Some(110),
                     latch_allowed_ips: Some(Some(latch_allowed_ips)),
@@ -2438,9 +2935,9 @@ mod tests {
             updated.remote_rtp_addr,
             Some("203.0.113.10:4000".parse().unwrap())
         );
-        assert_eq!(updated.payload_type, 111);
-        assert_eq!(updated.codec, forge_core::AudioCodec::Opus);
-        assert_eq!(updated.clock_rate, 48000);
+        assert_eq!(updated.payload_type, 9);
+        assert_eq!(updated.codec, forge_core::AudioCodec::G722);
+        assert_eq!(updated.clock_rate, 8000);
         assert_eq!(updated.telephone_event_payload_type, 110);
         assert_eq!(
             updated.latch_allowed_ips,
@@ -2462,5 +2959,267 @@ mod tests {
 
         assert_eq!(cleared.remote_rtp_addr, None);
         assert_eq!(cleared.latch_allowed_ips, None);
+    }
+
+    async fn make_test_session(start_port: u16) -> Arc<MediaSession> {
+        let config = PortPoolConfig::new(start_port, start_port + 200).unwrap();
+        let port_pool = Arc::new(PortPool::new(config));
+        Arc::new(
+            MediaSession::new(
+                CallId::generate(),
+                ParticipantId::new("alice"),
+                ParticipantId::new("bob"),
+                &port_pool,
+                MediaSessionConfig::default(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    fn count_audio_frames(items: &[ScheduledPlayoutItem]) -> usize {
+        items
+            .iter()
+            .filter(|i| matches!(i.kind, ScheduledPlayoutKind::Audio { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn test_schedule_audio_playout_creates_paced_frames() {
+        let session = make_test_session(40000).await;
+        // 320 samples @ 8kHz PCMU → 2 frames (160 samples each), 20ms apart.
+        let samples = vec![0i16; 320];
+        session
+            .schedule_audio_playout(
+                crate::media_bridge::MediaTarget::A,
+                8000,
+                &samples,
+                Some("p1".to_string()),
+                crate::media_bridge::PlayoutMode::Append,
+                ScheduledPlayoutSource::AI,
+            )
+            .await
+            .unwrap();
+
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        assert_eq!(queue.items.len(), 2);
+        // Marker only on the first frame in the burst.
+        assert!(queue.items[0].marker);
+        assert!(!queue.items[1].marker);
+        // 8kHz / 50fps = 160-tick increment per frame.
+        let t0 = queue.items[0].timestamp;
+        assert_eq!(queue.items[1].timestamp, t0.wrapping_add(160));
+        // due_at separated by 20ms.
+        assert_eq!(
+            queue.items[1].due_at - queue.items[0].due_at,
+            Duration::from_millis(20)
+        );
+        // Nothing went to leg B.
+        let queue_b = session.playout_queue_lock(ParticipantLabel::B).lock().await;
+        assert!(queue_b.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_audio_playout_append_continues_rtp_cursor() {
+        let session = make_test_session(40300).await;
+        let samples = vec![0i16; 320]; // 2 frames
+        session
+            .schedule_audio_playout(
+                crate::media_bridge::MediaTarget::A,
+                8000,
+                &samples,
+                None,
+                crate::media_bridge::PlayoutMode::Append,
+                ScheduledPlayoutSource::MediaBridgeAudio,
+            )
+            .await
+            .unwrap();
+        session
+            .schedule_audio_playout(
+                crate::media_bridge::MediaTarget::A,
+                8000,
+                &samples,
+                None,
+                crate::media_bridge::PlayoutMode::Append,
+                ScheduledPlayoutSource::MediaBridgeAudio,
+            )
+            .await
+            .unwrap();
+
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        assert_eq!(queue.items.len(), 4);
+        // Frame 3 must continue from frame 2's stream cursor, not reset.
+        assert_eq!(queue.items[2].timestamp, queue.items[1].stream_cursor_after);
+        assert_eq!(
+            queue.items[3].timestamp,
+            queue.items[2].timestamp.wrapping_add(160)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_replace_mode_with_id_keeps_other_playbacks() {
+        let session = make_test_session(40600).await;
+        let samples = vec![0i16; 320];
+        for id in ["a", "b"] {
+            session
+                .schedule_audio_playout(
+                    crate::media_bridge::MediaTarget::A,
+                    8000,
+                    &samples,
+                    Some(id.to_string()),
+                    crate::media_bridge::PlayoutMode::Append,
+                    ScheduledPlayoutSource::MediaBridgeAudio,
+                )
+                .await
+                .unwrap();
+        }
+        // Replace "a" — should drop only items tagged "a".
+        let one_frame = vec![0i16; 160];
+        session
+            .schedule_audio_playout(
+                crate::media_bridge::MediaTarget::A,
+                8000,
+                &one_frame,
+                Some("a".to_string()),
+                crate::media_bridge::PlayoutMode::Replace,
+                ScheduledPlayoutSource::MediaBridgeAudio,
+            )
+            .await
+            .unwrap();
+
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        // Two "b" frames remain plus one "a" replacement.
+        assert_eq!(queue.items.len(), 3);
+        let b_count = queue
+            .items
+            .iter()
+            .filter(|i| i.playback_id.as_deref() == Some("b"))
+            .count();
+        let a_count = queue
+            .items
+            .iter()
+            .filter(|i| i.playback_id.as_deref() == Some("a"))
+            .count();
+        assert_eq!(b_count, 2);
+        assert_eq!(a_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_replace_mode_without_id_clears_leg() {
+        let session = make_test_session(40900).await;
+        let samples = vec![0i16; 320];
+        for id in ["a", "b"] {
+            session
+                .schedule_audio_playout(
+                    crate::media_bridge::MediaTarget::A,
+                    8000,
+                    &samples,
+                    Some(id.to_string()),
+                    crate::media_bridge::PlayoutMode::Append,
+                    ScheduledPlayoutSource::MediaBridgeAudio,
+                )
+                .await
+                .unwrap();
+        }
+        let one_frame = vec![0i16; 160];
+        session
+            .schedule_audio_playout(
+                crate::media_bridge::MediaTarget::A,
+                8000,
+                &one_frame,
+                None,
+                crate::media_bridge::PlayoutMode::Replace,
+                ScheduledPlayoutSource::MediaBridgeAudio,
+            )
+            .await
+            .unwrap();
+
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        // Replace with id=None drops everything before scheduling, leaving only the new item.
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].playback_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_take_due_playout_items_returns_in_order_and_updates_cursor() {
+        let session = make_test_session(41200).await;
+        let samples = vec![0i16; 480]; // 3 frames
+        session
+            .schedule_audio_playout(
+                crate::media_bridge::MediaTarget::A,
+                8000,
+                &samples,
+                None,
+                crate::media_bridge::PlayoutMode::Append,
+                ScheduledPlayoutSource::AI,
+            )
+            .await
+            .unwrap();
+
+        // Wait past the second frame's due_at to claim 2 items.
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let now = Instant::now();
+        let due = session
+            .take_due_playout_items(ParticipantLabel::A, now)
+            .await;
+        assert_eq!(due.len(), 2);
+        assert_eq!(count_audio_frames(&due), 2);
+        // One item left and queue cursor still points at the trailing item.
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        assert_eq!(queue.items.len(), 1);
+        assert!(queue.next_rtp_timestamp.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_codec_change_clears_scheduled_playout() {
+        let session = make_test_session(41500).await;
+        let samples = vec![0i16; 320];
+        session
+            .schedule_audio_playout(
+                crate::media_bridge::MediaTarget::A,
+                8000,
+                &samples,
+                Some("p".to_string()),
+                crate::media_bridge::PlayoutMode::Append,
+                ScheduledPlayoutSource::AI,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            session
+                .playout_queue_lock(ParticipantLabel::A)
+                .lock()
+                .await
+                .items
+                .len(),
+            2
+        );
+
+        // Switching codec must drop any frames already encoded under the old codec/PT.
+        session
+            .update_participant_media(
+                ParticipantLabel::A,
+                ParticipantMediaUpdate {
+                    remote_addr: None,
+                    codec_config: Some(ParticipantCodecConfig {
+                        payload_type: 8,
+                        codec: forge_core::AudioCodec::PCMA,
+                        clock_rate: 8000,
+                    }),
+                    telephone_event_payload_type: None,
+                    latch_allowed_ips: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        assert!(queue.items.is_empty());
+        assert!(queue.next_due_at.is_none());
+        assert!(queue.next_rtp_timestamp.is_none());
     }
 }

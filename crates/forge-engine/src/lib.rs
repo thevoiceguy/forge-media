@@ -2,23 +2,29 @@
 //!
 //! This crate provides the main media session management and RTP forwarding engine.
 
+#[cfg(feature = "ai")]
 pub mod ai_integration;
 pub mod forwarding;
 pub mod injection;
 pub mod manager;
 pub mod media_bridge;
+#[cfg(feature = "ai")]
 pub mod persistence;
 pub mod session;
 
+#[cfg(feature = "ai")]
 pub use ai_integration::{AISession, AISessionConfig, AISessionManager, AISessionState};
+pub use forge_dtmf::DtmfDigit;
 pub use forwarding::ForwardingEngine;
 pub use injection::{
     AudioTarget, MixMode, PlaybackHandle, PlaybackId, PlaybackManager, PlaybackStatus,
 };
 pub use manager::{SessionManager, SessionManagerConfig};
 pub use media_bridge::{
-    InboundMediaFrame, MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundMediaFrame,
+    InboundMediaFrame, MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundDtmfRequest,
+    OutboundMediaFrame, OutboundMediaRequest, PlayoutMode,
 };
+#[cfg(feature = "ai")]
 pub use persistence::{
     ConnectionState, PersistedAISession, PersistenceBackend, PersistenceBackendType,
     PersistenceConfig,

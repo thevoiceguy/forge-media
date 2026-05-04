@@ -1,6 +1,6 @@
 [package]
 name = "forge-engine"
-version = "0.3.3"
+version = "0.4.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,7 +12,7 @@ forge-rtp = { path = "../forge-rtp" }
 forge-dtmf = { path = "../forge-dtmf" }
 forge-codecs = { path = "../forge-codecs" }
 forge-transcoder = { path = "../forge-transcoder" }
-forge-ai-stream = { path = "../forge-ai-stream" }
+forge-ai-stream = { path = "../forge-ai-stream", optional = true }
 forge-recorder = { path = "../forge-recorder" }
 forge-injection = { path = "../forge-injection" }
 forge-ha = { path = "../forge-ha", optional = true }
@@ -40,9 +40,15 @@ uuid = { workspace = true }
 redis = { version = "0.24", features = ["tokio-comp", "connection-manager"], optional = true }
 
 [features]
-default = ["g722"]
+default = ["g722", "ai"]
 xdp = ["forge-kernel"]
 opus = ["forge-codecs/opus"]
 g722 = ["forge-codecs/g722", "forge-transcoder/g722"]
-persistence-redis = ["redis"]
+# AI streaming integration (OpenAI Realtime, Anthropic, Deepgram, ElevenLabs).
+# Disabling this drops the `forge-ai-stream` dep, the `ai_integration` and
+# `persistence` modules, and the `ai_manager` accessors on `MediaSession` —
+# useful for AI-neutral consumers of the media engine.
+ai = ["dep:forge-ai-stream"]
+# AI session persistence implies the AI module that defines `PersistedAISession`.
+persistence-redis = ["ai", "redis"]
 ha = ["forge-ha", "forge-rtp/ha"]

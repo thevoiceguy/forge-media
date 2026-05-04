@@ -1190,7 +1190,7 @@ name = "forge-ai-stream"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "base64 0.21.7",
+ "base64 0.22.1",
  "bytes",
  "dashmap",
  "dasp",
@@ -1213,7 +1213,7 @@ version = "0.4.0"
 dependencies = [
  "axum",
  "axum-server",
- "base64 0.21.7",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "dashmap",
@@ -1531,7 +1531,7 @@ dependencies = [
 name = "forge-siprec"
 version = "0.2.1"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "dashmap",

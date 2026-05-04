@@ -258,6 +258,7 @@ impl Default for GeneratedRtpState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScheduledPlayoutSource {
+    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
     AI,
     MediaBridgeAudio,
     MediaBridgeDtmf,
@@ -478,6 +479,7 @@ pub struct MediaSession {
     #[cfg(all(target_os = "linux", feature = "xdp"))]
     xdp_active: Arc<AtomicBool>,
     /// AI session manager for AI integration (optional, uses interior mutability)
+    #[cfg(feature = "ai")]
     ai_manager: Arc<RwLock<Option<Arc<crate::ai_integration::AISessionManager>>>>,
     /// Generic media bridge manager for bidirectional PCM streaming.
     media_bridge_manager: Arc<RwLock<Option<Arc<crate::media_bridge::MediaBridgeManager>>>>,
@@ -581,6 +583,7 @@ impl MediaSession {
             xdp_manager: None,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "ai")]
             ai_manager: Arc::new(RwLock::new(None)),
             media_bridge_manager: Arc::new(RwLock::new(None)),
             codec_runtime_a: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
@@ -728,6 +731,7 @@ impl MediaSession {
             xdp_manager: None,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "ai")]
             ai_manager: Arc::new(RwLock::new(None)),
             media_bridge_manager: Arc::new(RwLock::new(None)),
             codec_runtime_a: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
@@ -917,6 +921,7 @@ impl MediaSession {
             to_tag,
             xdp_manager,
             xdp_active: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "ai")]
             ai_manager: Arc::new(RwLock::new(None)),
             media_bridge_manager: Arc::new(RwLock::new(None)),
             codec_runtime_a: Arc::new(Mutex::new(ParticipantCodecRuntime::new(
@@ -1961,11 +1966,13 @@ impl MediaSession {
     }
 
     /// Get a copy of the AI session manager (if set)
+    #[cfg(feature = "ai")]
     pub async fn ai_manager(&self) -> Option<Arc<crate::ai_integration::AISessionManager>> {
         self.ai_manager.read().await.clone()
     }
 
     /// Set the AI session manager
+    #[cfg(feature = "ai")]
     pub async fn set_ai_manager(&self, manager: Arc<crate::ai_integration::AISessionManager>) {
         *self.ai_manager.write().await = Some(manager);
     }
@@ -2181,11 +2188,14 @@ impl MediaSession {
         let xdp_active = false;
 
         // Get AI session ID if present
+        #[cfg(feature = "ai")]
         let ai_session_id = if self.ai_manager.read().await.is_some() {
             Some(self.call_id.0.to_string())
         } else {
             None
         };
+        #[cfg(not(feature = "ai"))]
+        let ai_session_id: Option<String> = None;
 
         forge_ha::SessionState {
             call_id: self.call_id.0.to_string(),
@@ -2329,6 +2339,7 @@ impl MediaSession {
             xdp_manager: None,
             #[cfg(all(target_os = "linux", feature = "xdp"))]
             xdp_active: Arc::new(AtomicBool::new(state.xdp_active)),
+            #[cfg(feature = "ai")]
             ai_manager: Arc::new(RwLock::new(None)),
             media_bridge_manager: Arc::new(RwLock::new(None)),
             codec_runtime_a: Arc::new(Mutex::new(ParticipantCodecRuntime::new(

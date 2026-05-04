@@ -173,6 +173,7 @@ impl ForwardingEngine {
                         break;
                     }
 
+                    #[cfg(feature = "ai")]
                     Self::drain_ai_audio_responses(
                         &session,
                         &sockets,
@@ -307,6 +308,7 @@ impl ForwardingEngine {
             }
 
             // Audio tap for AI integration
+            #[cfg(feature = "ai")]
             if let Some(ai_manager) = session.ai_manager().await {
                 if ai_manager.has_ai(call_id) {
                     // Send audio samples to AI
@@ -487,6 +489,7 @@ impl ForwardingEngine {
         }
     }
 
+    #[cfg(feature = "ai")]
     async fn drain_ai_audio_responses(
         session: &Arc<MediaSession>,
         _sockets: &Arc<forge_rtp::RtpSocketPair>,

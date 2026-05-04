@@ -168,7 +168,7 @@ fn test_direction_sendrecv_to_sendrecv() {
         .unwrap()
         .add_rtpmap(0, "PCMU", 8000, None)
         .unwrap()
-        .direction("sendrecv")
+        .with_direction("sendrecv")
         .unwrap();
     let offer = sip_sdp::builder::SessionDescriptionBuilder::new()
         .origin("alice", "1", "192.168.1.100")
@@ -203,7 +203,7 @@ fn test_direction_sendonly_to_recvonly() {
         .unwrap()
         .add_rtpmap(0, "PCMU", 8000, None)
         .unwrap()
-        .direction("sendonly")
+        .with_direction("sendonly")
         .unwrap();
     let offer = sip_sdp::builder::SessionDescriptionBuilder::new()
         .origin("alice", "1", "192.168.1.100")
@@ -222,7 +222,7 @@ fn test_direction_sendonly_to_recvonly() {
         .unwrap()
         .add_rtpmap(0, "PCMU", 8000, None)
         .unwrap()
-        .direction("sendrecv")
+        .with_direction("sendrecv")
         .unwrap();
     let local_caps = sip_sdp::builder::SessionDescriptionBuilder::new()
         .origin("bob", "1", "10.0.0.1")

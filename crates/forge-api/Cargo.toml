@@ -32,7 +32,7 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-base64 = "0.21"
+base64 = "0.22"
 
 # Logging and Observability
 tracing = { workspace = true }

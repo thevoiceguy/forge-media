@@ -1,5 +1,6 @@
 //! Media session management for two-party calls
 
+use chrono::{DateTime, Utc};
 use forge_core::{CallId, EventBus, ForgeError, ForgeEvent, ParticipantId, Result};
 use forge_rtp::srtp::SrtpContext;
 use forge_rtp::{PortPair, PortPool, RtpSocketConfig, RtpSocketPair};
@@ -26,6 +27,25 @@ pub struct DtmfConfig {
     pub enable_dedup: bool,
     /// Opus payload type for inband detection (dynamic, typically 111)
     pub opus_payload_type: Option<u8>,
+}
+
+/// Voice-activity detection configuration. Defaults to enabled with
+/// `forge_vad::VadConfig::default()` thresholds. Disable via
+/// `enabled = false` on session-config-time deployments that don't
+/// want speech events on the `EventBus`.
+#[derive(Debug, Clone)]
+pub struct VadConfig {
+    pub enabled: bool,
+    pub detector: forge_vad::VadConfig,
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            detector: forge_vad::VadConfig::default(),
+        }
+    }
 }
 
 /// Transcoding configuration
@@ -66,6 +86,8 @@ pub struct MediaSessionConfig {
     pub session_timeout: Duration,
     /// DTMF detection configuration
     pub dtmf_config: DtmfConfig,
+    /// Voice-activity detection configuration
+    pub vad_config: VadConfig,
     /// Transcoding configuration
     pub transcoding_config: TranscodingConfig,
 }
@@ -76,6 +98,7 @@ impl Default for MediaSessionConfig {
             socket_config: RtpSocketConfig::default(),
             session_timeout: Duration::from_secs(300), // 5 minutes
             dtmf_config: DtmfConfig::default(),
+            vad_config: VadConfig::default(),
             transcoding_config: TranscodingConfig::default(),
         }
     }
@@ -450,6 +473,17 @@ pub struct MediaSession {
     inband_detector: Arc<Mutex<forge_dtmf::GoertzelDetector>>,
     /// DTMF event deduplicator
     dtmf_dedup: Arc<Mutex<forge_dtmf::DtmfDeduplicator>>,
+    /// Voice-activity detector for this session's inbound audio.
+    /// One state machine per call; the forwarding loop runs it on
+    /// every decoded PCM frame and publishes
+    /// `ForgeEvent::SpeechStarted` / `SpeechStopped` on state
+    /// transitions. Initialised from `MediaSessionConfig.vad_config`.
+    vad_detector: Arc<Mutex<forge_vad::VadDetector>>,
+    /// Wallclock the most recent `SpeechStarted` was emitted at;
+    /// used to compute `duration_ms` for the matching
+    /// `SpeechStopped`. `None` before the first speech transition,
+    /// or after each `SpeechStopped` clears it.
+    speech_started_at: Arc<Mutex<Option<DateTime<Utc>>>>,
     /// Transcoder for A → B direction (optional, created when needed)
     transcoder_a_to_b: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
     /// Transcoder for B → A direction (optional, created when needed)
@@ -552,6 +586,10 @@ impl MediaSession {
 
         let now = Instant::now();
 
+        // VAD config is cloned out before `config` is moved into the
+        // struct literal below.
+        let vad_detector_config = config.vad_config.detector.clone();
+
         let session = Self {
             call_id: call_id.clone(),
             state: Arc::new(RwLock::new(SessionState::Initializing)),
@@ -568,6 +606,8 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            vad_detector: Arc::new(Mutex::new(forge_vad::VadDetector::new(vad_detector_config))),
+            speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -700,6 +740,10 @@ impl MediaSession {
 
         let now = Instant::now();
 
+        // VAD config is cloned out before `config` is moved into the
+        // struct literal below.
+        let vad_detector_config = config.vad_config.detector.clone();
+
         let session = Self {
             call_id: call_id.clone(),
             state: Arc::new(RwLock::new(SessionState::Initializing)),
@@ -716,6 +760,8 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            vad_detector: Arc::new(Mutex::new(forge_vad::VadDetector::new(vad_detector_config))),
+            speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -892,6 +938,10 @@ impl MediaSession {
 
         let now = Instant::now();
 
+        // VAD config is cloned out before `config` is moved into the
+        // struct literal below.
+        let vad_detector_config = config.vad_config.detector.clone();
+
         let session = Self {
             call_id: call_id.clone(),
             state: Arc::new(RwLock::new(SessionState::Initializing)),
@@ -908,6 +958,8 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            vad_detector: Arc::new(Mutex::new(forge_vad::VadDetector::new(vad_detector_config))),
+            speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -1012,6 +1064,22 @@ impl MediaSession {
     /// Get the DTMF configuration
     pub fn dtmf_config(&self) -> &DtmfConfig {
         &self.config.dtmf_config
+    }
+
+    /// Get the voice-activity detector for this session.
+    pub fn vad_detector(&self) -> &Arc<Mutex<forge_vad::VadDetector>> {
+        &self.vad_detector
+    }
+
+    /// `speech_started_at` bookkeeping used by the forwarding loop
+    /// to compute `duration_ms` on `SpeechStopped`.
+    pub fn speech_started_at(&self) -> &Arc<Mutex<Option<DateTime<Utc>>>> {
+        &self.speech_started_at
+    }
+
+    /// Get the VAD configuration.
+    pub fn vad_config(&self) -> &VadConfig {
+        &self.config.vad_config
     }
 
     /// Get the transcoding configuration
@@ -2311,6 +2379,10 @@ impl MediaSession {
 
         let now = Instant::now();
 
+        // VAD config is cloned out before `config` is moved into the
+        // struct literal below.
+        let vad_detector_config = config.vad_config.detector.clone();
+
         let session = Self {
             call_id,
             state: Arc::new(RwLock::new(session_state)),
@@ -2327,6 +2399,8 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            vad_detector: Arc::new(Mutex::new(forge_vad::VadDetector::new(vad_detector_config))),
+            speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),

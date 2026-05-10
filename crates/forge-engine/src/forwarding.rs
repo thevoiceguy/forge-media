@@ -2,7 +2,7 @@
 
 use crate::media_bridge::{InboundMediaFrame, OutboundMediaRequest};
 use crate::session::{MediaSession, Participant, ParticipantLabel, RecordingSide, SessionState};
-use forge_core::{ForgeError, Result};
+use forge_core::{ForgeError, ForgeEvent, Result};
 use forge_rtp::rtcp::RtcpPacket;
 use metrics::{counter, histogram};
 use std::sync::Arc;
@@ -342,6 +342,59 @@ impl ForwardingEngine {
                         call_id.0,
                         e
                     );
+                }
+            }
+
+            // Voice-activity detection. Drives `SpeechStarted` /
+            // `SpeechStopped` events on the EventBus when the per-
+            // session detector flips state under hysteresis. Runs on
+            // every audio packet when `vad_config().enabled` is true;
+            // skipped entirely when disabled so consumers paying the
+            // call-quality cost (a cheap RMS + ZCR per frame) opt in.
+            if session.vad_config().enabled {
+                use forge_vad::VadState;
+                let mut detector = session.vad_detector().lock().await;
+                let prev = detector.state();
+                let _ = detector.process(&pcm_samples);
+                let new = detector.state();
+                drop(detector);
+                if new != prev {
+                    let now = chrono::Utc::now();
+                    let mut started_guard = session.speech_started_at().lock().await;
+                    match new {
+                        VadState::Speech => {
+                            *started_guard = Some(now);
+                            drop(started_guard);
+                            if let Some(bus) = session.event_bus() {
+                                let _ = bus.publish(ForgeEvent::SpeechStarted {
+                                    call_id: call_id.clone(),
+                                    timestamp: now,
+                                });
+                            }
+                        }
+                        VadState::Silence => {
+                            let started_at = started_guard.take();
+                            drop(started_guard);
+                            let duration_ms = started_at
+                                .map(|t| {
+                                    (now - t)
+                                        .to_std()
+                                        .map(|d| d.as_millis() as u64)
+                                        .unwrap_or(0)
+                                })
+                                .unwrap_or(0);
+                            if let Some(bus) = session.event_bus() {
+                                let _ = bus.publish(ForgeEvent::SpeechStopped {
+                                    call_id: call_id.clone(),
+                                    timestamp: now,
+                                    duration_ms,
+                                });
+                            }
+                        }
+                        VadState::Unknown => {
+                            // Hysteresis says we don't fire yet.
+                        }
+                    }
                 }
             }
 

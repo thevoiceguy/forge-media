@@ -142,6 +142,26 @@ pub enum ForgeEvent {
         timestamp: DateTime<Utc>,
     },
 
+    /// Voice-activity detector flipped to the speech state for this
+    /// call. Published once per `Silence`→`Speech` transition (the
+    /// detector's hysteresis filters out per-frame jitter; see
+    /// `forge_vad::VadConfig::min_speech_duration_ms`). Subscribers
+    /// typically pair this with [`Self::SpeechStopped`] to bracket
+    /// utterances.
+    SpeechStarted {
+        call_id: CallId,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// Voice-activity detector flipped back to silence. `duration_ms`
+    /// is the wall-clock time since the matching `SpeechStarted` for
+    /// the same `call_id`.
+    SpeechStopped {
+        call_id: CallId,
+        timestamp: DateTime<Utc>,
+        duration_ms: u64,
+    },
+
     // Quality events
     QualityDegraded {
         call_id: CallId,
@@ -227,6 +247,8 @@ impl ForgeEvent {
             | Self::MediaTimeout { timestamp, .. }
             | Self::MediaActive { timestamp, .. }
             | Self::DtmfDigitDetected { timestamp, .. }
+            | Self::SpeechStarted { timestamp, .. }
+            | Self::SpeechStopped { timestamp, .. }
             | Self::QualityDegraded { timestamp, .. }
             | Self::QualityRestored { timestamp, .. }
             | Self::TranscriptionStarted { timestamp, .. }
@@ -264,6 +286,8 @@ impl ForgeEvent {
             Self::MediaTimeout { .. } => "media_timeout",
             Self::MediaActive { .. } => "media_active",
             Self::DtmfDigitDetected { .. } => "dtmf_digit_detected",
+            Self::SpeechStarted { .. } => "speech_started",
+            Self::SpeechStopped { .. } => "speech_stopped",
             Self::QualityDegraded { .. } => "quality_degraded",
             Self::QualityRestored { .. } => "quality_restored",
             Self::TranscriptionStarted { .. } => "transcription_started",

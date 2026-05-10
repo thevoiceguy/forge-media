@@ -10,6 +10,7 @@ license.workspace = true
 forge-core = { path = "../forge-core" }
 forge-rtp = { path = "../forge-rtp" }
 forge-dtmf = { path = "../forge-dtmf" }
+forge-vad = { path = "../forge-vad" }
 forge-codecs = { path = "../forge-codecs" }
 forge-transcoder = { path = "../forge-transcoder" }
 forge-ai-stream = { path = "../forge-ai-stream", optional = true }

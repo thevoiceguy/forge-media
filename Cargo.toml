@@ -7,6 +7,7 @@ members = [
     "crates/forge-engine",
     "crates/forge-kernel",
     "crates/forge-dtmf",
+    "crates/forge-vad",
     "crates/forge-transcription",
     "crates/forge-injection",
     "crates/forge-webrtc",
@@ -131,6 +132,7 @@ forge-engine = { path = "crates/forge-engine", features = [] }
 forge-api = { path = "crates/forge-api", optional = false }
 forge-recorder = { path = "crates/forge-recorder", optional = true }
 forge-dtmf = { path = "crates/forge-dtmf", optional = true }
+forge-vad = { path = "crates/forge-vad" }
 forge-transcription = { path = "crates/forge-transcription", optional = true }
 forge-injection = { path = "crates/forge-injection", optional = true }
 forge-webrtc = { path = "crates/forge-webrtc", optional = true }

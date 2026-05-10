@@ -120,6 +120,10 @@ pub enum AIStreamError {
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// VAD detector error (re-exported from forge-vad).
+    #[error(transparent)]
+    Vad(#[from] forge_vad::VadError),
 }
 
 /// Result type for AI streaming operations

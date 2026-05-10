@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
+forge-vad = { path = "../forge-vad" }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }

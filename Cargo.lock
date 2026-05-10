@@ -1195,6 +1195,7 @@ dependencies = [
  "dashmap",
  "dasp",
  "forge-core",
+ "forge-vad",
  "futures-util",
  "reqwest 0.11.27",
  "serde",
@@ -1323,6 +1324,7 @@ dependencies = [
  "forge-recorder",
  "forge-rtp",
  "forge-transcoder",
+ "forge-vad",
  "metrics 0.21.1",
  "parking_lot",
  "rand 0.8.5",
@@ -1420,6 +1422,7 @@ dependencies = [
  "forge-siprec",
  "forge-transcoder",
  "forge-transcription",
+ "forge-vad",
  "forge-webrtc",
  "tokio",
  "toml",
@@ -1593,6 +1596,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "forge-vad"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
 ]
 
 [[package]]

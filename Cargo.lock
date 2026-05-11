@@ -3679,6 +3679,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sip-hep"
+version = "0.0.1"
+dependencies = [
+ "bytes",
+ "hep-rs",
+ "once_cell",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "sip-observe"
 version = "0.2.1"
 dependencies = [
@@ -3746,9 +3757,11 @@ dependencies = [
  "bytes",
  "dashmap",
  "futures-util",
+ "hep-rs",
  "memchr",
  "rustls",
  "rustls-pki-types",
+ "sip-hep",
  "sip-observe",
  "socket2 0.5.10",
  "tempfile",

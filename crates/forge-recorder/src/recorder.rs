@@ -102,7 +102,7 @@ enum RecorderWriter {
         encoder: OpusEncoder,
         frame_buffer: Vec<i16>,
         frame_size: usize,
-        ogg_stream: ogg::PacketWriter<BufWriter<File>>,
+        ogg_stream: ogg::PacketWriter<'static, BufWriter<File>>,
         stream_serial: u32,
         granule_pos: u64,
         effective_sample_rate: u32,
@@ -383,7 +383,7 @@ impl AudioRecorder {
         &self,
         encoder: &mut OpusEncoder,
         frame: &[i16],
-        ogg_stream: &mut ogg::PacketWriter<BufWriter<File>>,
+        ogg_stream: &mut ogg::PacketWriter<'static, BufWriter<File>>,
         stream_serial: u32,
         granule_pos: &mut u64,
     ) -> Result<()> {
@@ -405,7 +405,7 @@ impl AudioRecorder {
         // Write as Ogg packet
         ogg_stream
             .write_packet(
-                output.into_boxed_slice(),
+                output,
                 stream_serial,
                 ogg::PacketWriteEndInfo::NormalPacket,
                 packet_granule,
@@ -531,7 +531,7 @@ impl AudioRecorder {
                     // Finalize Ogg stream
                     ogg_stream
                         .write_packet(
-                            Vec::new().into_boxed_slice(),
+                            Vec::<u8>::new(),
                             stream_serial,
                             ogg::PacketWriteEndInfo::EndStream,
                             granule_pos,
@@ -581,7 +581,7 @@ impl AudioRecorder {
 impl AudioRecorder {
     #[cfg(feature = "opus")]
     fn write_opus_headers(
-        ogg_stream: &mut ogg::PacketWriter<BufWriter<File>>,
+        ogg_stream: &mut ogg::PacketWriter<'static, BufWriter<File>>,
         stream_serial: u32,
         channels: u16,
         sample_rate: u32,
@@ -622,7 +622,7 @@ impl AudioRecorder {
 
         ogg_stream
             .write_packet(
-                opus_head.into_boxed_slice(),
+                opus_head,
                 stream_serial,
                 ogg::PacketWriteEndInfo::EndPage,
                 0,
@@ -655,7 +655,7 @@ impl AudioRecorder {
 
         ogg_stream
             .write_packet(
-                opus_tags.into_boxed_slice(),
+                opus_tags,
                 stream_serial,
                 ogg::PacketWriteEndInfo::EndPage,
                 0,

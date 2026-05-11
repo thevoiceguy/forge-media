@@ -4,7 +4,7 @@
 //! Ports are allocated in pairs (even for RTP, odd for RTCP) as per RFC 3550.
 
 use forge_core::{ForgeError, Result};
-use rand::{seq::SliceRandom, thread_rng, Rng};
+use rand::{seq::SliceRandom, Rng};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -104,7 +104,7 @@ impl PortPool {
         let mut ports: Vec<u16> = (config.min_port..config.max_port)
             .filter(|p| p % 2 == 0)
             .collect();
-        ports.shuffle(&mut thread_rng());
+        ports.shuffle(&mut rand::rng());
 
         Self {
             config,
@@ -144,7 +144,7 @@ impl PortPool {
         let mut available: Vec<u16> = (config.min_port..config.max_port)
             .filter(|p| p % 2 == 0 && !allocated_ports.contains(p))
             .collect();
-        available.shuffle(&mut thread_rng());
+        available.shuffle(&mut rand::rng());
 
         tracing::info!(
             "Created port pool with {} pre-allocated ports, {} available",
@@ -174,7 +174,7 @@ impl PortPool {
         }
 
         // Choose a random available port to reduce predictability
-        let idx = thread_rng().gen_range(0..state.available.len());
+        let idx = rand::rng().random_range(0..state.available.len());
         let rtp_port = state.available.swap_remove(idx);
         state.allocated.insert(rtp_port);
 

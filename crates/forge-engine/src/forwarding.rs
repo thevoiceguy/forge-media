@@ -149,6 +149,28 @@ impl ForwardingEngine {
                                 }
                             };
 
+                            // HEP3 capture (chunk 0x05 = RTCP). Hook
+                            // after SRTCP unprotect so Homer sees the
+                            // plaintext payload. No-op (one atomic
+                            // load + null-check) when no emitter is
+                            // installed. Local-addr lookup goes
+                            // through the cached SocketPair handle so
+                            // we don't pay a syscall per RTCP packet
+                            // beyond what `local_rtcp_addr()` already
+                            // does internally on the cached socket.
+                            if let Some(emitter) = forge_hep::forge_hep() {
+                                if let Ok(local) = sockets.local_rtcp_addr() {
+                                    emitter.emit_rtcp(
+                                        forge_hep::Direction::Inbound,
+                                        forge_hep::IpProto::Udp,
+                                        source_addr,
+                                        local,
+                                        &plain_data,
+                                        Some(&call_id.0),
+                                    );
+                                }
+                            }
+
                             Self::handle_rtcp_packet(
                                 &session,
                                 &sockets,
@@ -1138,12 +1160,14 @@ impl ForwardingEngine {
                         // Process reception report blocks
                         for block in &sr.report_blocks {
                             Self::record_report_block_metrics(block);
+                            Self::emit_qos_report(sockets, source_addr, &call_id.0, block);
                         }
                     }
                     forge_rtp::rtcp::RtcpPacket::ReceiverReport(rr) => {
                         // Process reception report blocks
                         for block in &rr.report_blocks {
                             Self::record_report_block_metrics(block);
+                            Self::emit_qos_report(sockets, source_addr, &call_id.0, block);
                         }
                     }
                     _ => {
@@ -1263,6 +1287,22 @@ impl ForwardingEngine {
                 // Record sent metrics
                 counter!("forge_rtcp_packets_sent_total", 1);
                 counter!("forge_rtcp_bytes_sent_total", data.len() as u64);
+
+                // HEP3 capture (chunk 0x05 = RTCP). Emit the plaintext
+                // bytes (`data`) so Homer shows the SR/RR contents
+                // rather than the SRTCP-protected blob.
+                if let Some(emitter) = forge_hep::forge_hep() {
+                    if let Ok(local) = sockets.local_rtcp_addr() {
+                        emitter.emit_rtcp(
+                            forge_hep::Direction::Outbound,
+                            forge_hep::IpProto::Udp,
+                            local,
+                            addr,
+                            data,
+                            Some(&call_id.0),
+                        );
+                    }
+                }
             }
         } else {
             tracing::trace!(
@@ -1325,6 +1365,38 @@ impl ForwardingEngine {
             p.stats.packets_sent += 1;
             p.stats.bytes_sent += packet_len;
         }
+    }
+
+    /// Build and emit one [`forge_hep::RtpQosReport`] from an RR/SR
+    /// reception block. No-op when no emitter is installed. Best-
+    /// effort — failures (e.g., can't read local_rtcp_addr) are
+    /// silently dropped: this is observability, not call control.
+    fn emit_qos_report(
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        source_addr: std::net::SocketAddr,
+        correlation_id: &str,
+        block: &forge_rtp::rtcp::ReceptionReportBlock,
+    ) {
+        let Some(emitter) = forge_hep::forge_hep() else {
+            return;
+        };
+        let Ok(local) = sockets.local_rtcp_addr() else {
+            return;
+        };
+        let report = forge_hep::RtpQosReport {
+            ssrc: Some(block.ssrc),
+            fraction_lost: Some((block.fraction_lost as f64) / 256.0),
+            packets_lost: Some(block.cumulative_lost),
+            jitter: Some(block.jitter),
+            ..Default::default()
+        };
+        emitter.emit_rtp_qos(
+            forge_hep::IpProto::Udp,
+            source_addr,
+            local,
+            &report,
+            Some(correlation_id),
+        );
     }
 
     /// Record metrics from RTCP reception report block

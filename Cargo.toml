@@ -88,12 +88,7 @@ aes-gcm = "0.10"
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
-# rand 0.9 broke OsRng's RngCore impl (now TryRngCore-only) and moved
-# `rand::distributions` to `rand::distr`. forge-ice and the siphon-rs
-# submodule (sip-auth, sip-core) still use the 0.8 API. Pin to 0.8
-# until those callers are migrated; same pattern as the aes 0.8 pin
-# above.
-rand = "0.8"
+rand = "0.9"
 subtle = "2.5"
 
 # Utilities

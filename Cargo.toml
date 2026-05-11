@@ -68,7 +68,7 @@ thiserror = "2.0"
 # Logging and Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-metrics = "0.21"
+metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
 
 # HTTP/API

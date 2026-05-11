@@ -1231,7 +1231,7 @@ dependencies = [
  "forge-storage",
  "forge-webrtc",
  "lazy_static",
- "metrics 0.21.1",
+ "metrics",
  "metrics-exporter-prometheus",
  "reqwest 0.12.28",
  "serde",
@@ -1270,7 +1270,7 @@ dependencies = [
  "forge-mixer",
  "forge-recorder",
  "hound",
- "metrics 0.21.1",
+ "metrics",
  "parking_lot",
  "serde",
  "tempfile",
@@ -1326,7 +1326,7 @@ dependencies = [
  "forge-rtp",
  "forge-transcoder",
  "forge-vad",
- "metrics 0.21.1",
+ "metrics",
  "parking_lot",
  "rand 0.9.3",
  "redis",
@@ -1497,7 +1497,7 @@ dependencies = [
  "hex",
  "hmac",
  "libc",
- "metrics 0.21.1",
+ "metrics",
  "openssl",
  "openssl-sys",
  "rand 0.9.3",
@@ -2439,17 +2439,6 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "metrics"
-version = "0.21.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fde3af1a009ed76a778cb84fdef9e7dbbdf5775ae3e4cc1f434a6a307f6f76c5"
-dependencies = [
- "ahash",
- "metrics-macros",
- "portable-atomic",
-]
-
-[[package]]
-name = "metrics"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56d05972e8cbac2671e85aa9d04d9160d193f8bebd1a5c1a2f4542c62e65d1d0"
@@ -2469,23 +2458,12 @@ dependencies = [
  "hyper-tls 0.5.0",
  "indexmap",
  "ipnet",
- "metrics 0.22.4",
+ "metrics",
  "metrics-util",
  "quanta",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "metrics-macros"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38b4faf00617defe497754acde3024865bc143d44a86799b24e191ecff91354f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -2497,7 +2475,7 @@ dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
  "hashbrown 0.14.5",
- "metrics 0.22.4",
+ "metrics",
  "num_cpus",
  "quanta",
  "sketches-ddsketch",

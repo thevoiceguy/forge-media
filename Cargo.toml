@@ -54,7 +54,7 @@ socket2 = { version = "0.6", features = ["all"] }
 
 # Concurrency
 parking_lot = "0.12"
-dashmap = "5.5"
+dashmap = "6.1"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

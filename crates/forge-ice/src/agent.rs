@@ -5,7 +5,7 @@ use crate::checks::{perform_checks, IceAuthContext};
 use crate::gather::{gather_host_candidates, gather_server_reflexive_candidates};
 use forge_core::Result;
 use rand::rngs::OsRng;
-use rand::{Rng, RngCore};
+use rand::TryRngCore;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tracing::{debug, info};
@@ -49,7 +49,11 @@ impl IceAgent {
     /// * `stun_servers` - List of STUN server addresses (e.g., "stun.l.google.com:19302")
     pub fn new(component: u16, local_port: u16, stun_servers: Vec<String>) -> Self {
         let (ufrag, pwd) = Self::generate_credentials();
-        let tie_breaker = OsRng.gen();
+        let mut tie_breaker_bytes = [0u8; 8];
+        OsRng
+            .try_fill_bytes(&mut tie_breaker_bytes)
+            .expect("OS RNG must not fail");
+        let tie_breaker = u64::from_ne_bytes(tie_breaker_bytes);
 
         info!(
             "Created ICE Agent for component {} with ufrag={}",
@@ -80,8 +84,12 @@ impl IceAgent {
         let mut ufrag_bytes = [0u8; 16];
         let mut pwd_bytes = [0u8; 32];
 
-        OsRng.fill_bytes(&mut ufrag_bytes);
-        OsRng.fill_bytes(&mut pwd_bytes);
+        OsRng
+            .try_fill_bytes(&mut ufrag_bytes)
+            .expect("OS RNG must not fail");
+        OsRng
+            .try_fill_bytes(&mut pwd_bytes)
+            .expect("OS RNG must not fail");
 
         // Hex-encode to printable strings with full-byte entropy
         let ufrag = hex::encode(ufrag_bytes);

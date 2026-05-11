@@ -5,7 +5,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use forge_core::{ForgeError, Result};
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::TryRngCore;
 use sha1::Sha1;
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -123,7 +123,9 @@ impl StunMessage {
     /// outstanding transaction ID and forge a response.
     pub fn new_binding_request() -> Self {
         let mut transaction_id = [0u8; 12];
-        OsRng.fill_bytes(&mut transaction_id);
+        OsRng
+            .try_fill_bytes(&mut transaction_id)
+            .expect("OS RNG must not fail");
 
         Self {
             message_type: MessageType::BindingRequest,

@@ -1,0 +1,22 @@
+[package]
+name        = "forge-hep"
+description = "HEP3 (Homer) emission glue for forge-media — ships RTCP and RTP-QoS to a HepSink."
+version       = "0.0.1"
+edition.workspace      = true
+rust-version.workspace = true
+authors.workspace      = true
+license.workspace      = true
+
+[dependencies]
+bytes      = { workspace = true }
+tracing    = { workspace = true }
+once_cell  = { workspace = true }
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# hep-rs lives in its own repo (github.com/thevoiceguy/hep-rs).
+# Git-pinned for the dev cycle.
+hep-rs = { git = "https://github.com/thevoiceguy/hep-rs", branch = "main" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }

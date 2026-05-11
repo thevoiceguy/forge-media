@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
+forge-hep = { path = "../forge-hep" }
 forge-rtp = { path = "../forge-rtp" }
 forge-dtmf = { path = "../forge-dtmf" }
 forge-vad = { path = "../forge-vad" }

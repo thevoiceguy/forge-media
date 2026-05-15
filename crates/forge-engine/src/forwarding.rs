@@ -48,6 +48,22 @@ impl ForwardingEngine {
 
         tracing::debug!("Entering forwarding loop");
 
+        // 20 ms playout / housekeeping tick. Pinned across iterations
+        // and reset on fire so inbound-RTP traffic doesn't cancel it.
+        //
+        // Before this pin, the tick lived as a `sleep(20ms)` arm
+        // inside `tokio::select!`; whenever the RTP recv arm won the
+        // race, the sleep was dropped and re-created from zero on the
+        // next loop turn. At a steady 50 pps inbound that meant the
+        // playout drain branch effectively never fired — packets piled
+        // up in the scheduled-playout queue and got flushed in bursts
+        // (10–20 packets within microseconds) whenever a brief gap in
+        // inbound jitter let the sleep arm finally complete. The
+        // receiver's jitter buffer dropped most of the burst and the
+        // peer heard nothing intelligible.
+        let playout_tick = tokio::time::sleep(tokio::time::Duration::from_millis(20));
+        tokio::pin!(playout_tick);
+
         loop {
             // Check if session is still active
             let state = session.state().await;
@@ -186,8 +202,14 @@ impl ForwardingEngine {
                         }
                     }
                 }
-                // Timeout check and generated audio playout (run periodically)
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(20)) => {
+                // Timeout check and generated audio playout (run periodically).
+                // Tick is pinned outside the loop; reset on fire so it
+                // continues at a steady 20 ms cadence regardless of
+                // inbound RTP traffic.
+                _ = &mut playout_tick => {
+                    playout_tick
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + tokio::time::Duration::from_millis(20));
                     // Check for timeout
                     if session.is_timed_out().await {
                         tracing::info!("Session {} timed out, stopping forwarding", call_id.0);

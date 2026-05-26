@@ -36,6 +36,7 @@
 pub mod dtls;
 pub mod ice;
 pub mod profiles;
+pub mod sdes;
 
 use thiserror::Error;
 

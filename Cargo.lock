@@ -1515,9 +1515,12 @@ dependencies = [
 name = "forge-sdp"
 version = "0.2.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "forge-core",
  "forge-ice",
+ "forge-rtp",
+ "rand 0.9.3",
  "sip-sdp",
  "smol_str",
  "thiserror 2.0.18",

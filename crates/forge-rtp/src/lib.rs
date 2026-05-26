@@ -7,6 +7,7 @@ pub mod jitter;
 pub mod port_pool;
 pub mod rtcp;
 pub mod rtp;
+pub mod rtt;
 pub mod socket;
 pub mod srtp;
 
@@ -17,5 +18,6 @@ pub use jitter::*;
 pub use port_pool::*;
 pub use rtcp::*;
 pub use rtp::*;
+pub use rtt::{ntp_middle32, RttTracker};
 pub use socket::*;
 pub use srtp::*;

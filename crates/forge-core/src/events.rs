@@ -174,6 +174,36 @@ pub enum ForgeEvent {
         timestamp: DateTime<Utc>,
     },
 
+    /// Per-RR snapshot from a received RTCP Sender or Receiver Report.
+    ///
+    /// Fired on **every** received RR block, not just on threshold-based
+    /// quality changes — the cadence is whatever the remote endpoint's
+    /// RTCP send interval is (per RFC 3550 §6.2, typically every 5 s).
+    /// `[`QualityDegraded`] is reserved for threshold-driven semantics
+    /// that may layer on top of this stream later.
+    ///
+    /// All three RR-derived quality fields ride together so consumers
+    /// can update their state from one event rather than three.
+    RtcpReportReceived {
+        call_id: CallId,
+        /// Interarrival jitter in milliseconds, derived from the RR's
+        /// jitter field (RFC 3550 §6.4.1) converted to ms via the RTP
+        /// clock rate of the corresponding media stream.
+        jitter_ms: f32,
+        /// Cumulative-loss ratio in `[0.0, 1.0]`, derived from the RR's
+        /// `fraction_lost` field (8-bit fixed-point, RFC 3550 §6.4.1)
+        /// divided by 256.
+        packet_loss_ratio: f32,
+        /// Mean round-trip time in milliseconds, derived from RTCP
+        /// SR/RR exchanges per RFC 3550 §A.7. `None` until forge-engine
+        /// originates its own SRs (deferred to 0.3.1 per siphon-ai
+        /// DEV_PLAN_0.3.0.md §9 decision 10) — distinct from
+        /// `Some(0.0)` ("we measured an RTT of zero", degenerate in
+        /// practice).
+        rtt_ms: Option<f32>,
+        timestamp: DateTime<Utc>,
+    },
+
     // Transcription events
     TranscriptionStarted {
         call_id: CallId,
@@ -251,6 +281,7 @@ impl ForgeEvent {
             | Self::SpeechStopped { timestamp, .. }
             | Self::QualityDegraded { timestamp, .. }
             | Self::QualityRestored { timestamp, .. }
+            | Self::RtcpReportReceived { timestamp, .. }
             | Self::TranscriptionStarted { timestamp, .. }
             | Self::TranscriptionResult { timestamp, .. }
             | Self::TranscriptionStopped { timestamp, .. }
@@ -290,6 +321,7 @@ impl ForgeEvent {
             Self::SpeechStopped { .. } => "speech_stopped",
             Self::QualityDegraded { .. } => "quality_degraded",
             Self::QualityRestored { .. } => "quality_restored",
+            Self::RtcpReportReceived { .. } => "rtcp_report_received",
             Self::TranscriptionStarted { .. } => "transcription_started",
             Self::TranscriptionResult { .. } => "transcription_result",
             Self::TranscriptionStopped { .. } => "transcription_stopped",

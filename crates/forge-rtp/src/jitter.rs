@@ -233,17 +233,21 @@ mod tests {
 
     #[test]
     fn test_jitter_buffer_timing() {
-        let mut buffer = JitterBuffer::new(Duration::from_millis(10));
+        // 100 ms / 150 ms thresholds (not 10 / 15) so the "not yet ready"
+        // check stays robust under tarpaulin's ptrace instrumentation
+        // overhead, which can easily eat the 10ms window between
+        // `push` and `is_ready` on a busy runner.
+        let mut buffer = JitterBuffer::new(Duration::from_millis(100));
 
         buffer.push(1, 1000, vec![1, 2, 3]);
 
-        // Should not be ready immediately
+        // Should not be ready immediately.
         assert!(!buffer.is_ready());
 
-        // Wait for target delay
-        std::thread::sleep(Duration::from_millis(15));
+        // Wait past target delay.
+        std::thread::sleep(Duration::from_millis(150));
 
-        // Should be ready now
+        // Should be ready now.
         assert!(buffer.is_ready());
 
         let data = buffer.pop();

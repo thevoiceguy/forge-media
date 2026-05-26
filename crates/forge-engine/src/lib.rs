@@ -4,6 +4,8 @@
 
 #[cfg(feature = "ai")]
 pub mod ai_integration;
+#[cfg(feature = "dtls")]
+pub mod dtls_srtp;
 pub mod forwarding;
 pub mod injection;
 pub mod manager;
@@ -14,6 +16,11 @@ pub mod session;
 
 #[cfg(feature = "ai")]
 pub use ai_integration::{AISession, AISessionConfig, AISessionManager, AISessionState};
+#[cfg(feature = "dtls")]
+pub use dtls_srtp::{
+    install_keys as install_dtls_srtp_keys, is_dtls_packet, is_rtp_packet,
+    is_unsupported_first_byte, DtlsLeg, HandshakeOutcome,
+};
 pub use forge_dtmf::DtmfDigit;
 pub use forwarding::ForwardingEngine;
 pub use injection::{

@@ -275,17 +275,19 @@ impl DtlsContext {
             )
             .map_err(|e| ForgeError::Internal(format!("Failed to set SRTP profiles: {}", e)))?;
 
-        // Set verification mode
-        match role {
-            DtlsRole::Client => {
-                // Client verifies server certificate
-                builder.set_verify(SslVerifyMode::PEER);
-            }
-            DtlsRole::Server => {
-                // Server requests but doesn't require client certificate
-                builder.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-            }
-        }
+        // DTLS-SRTP peers present self-signed certificates (RFC 5763 §5).
+        // CA-chain verification is meaningless — identity is bound to a
+        // SHA-256 fingerprint exchanged in SDP (`a=fingerprint:`), which
+        // `DtlsConnection::verify_remote_fingerprint` checks *after* the
+        // handshake. So request the peer cert (we need its bytes to
+        // fingerprint it) but install a verify callback that accepts any
+        // chain. Without this override, OpenSSL's default chain check
+        // fails closed and the handshake never completes.
+        let mode = match role {
+            DtlsRole::Client => SslVerifyMode::PEER,
+            DtlsRole::Server => SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT,
+        };
+        builder.set_verify_callback(mode, |_chain_ok, _store_ctx| true);
 
         // Build the context
         let ssl_context = builder.build();

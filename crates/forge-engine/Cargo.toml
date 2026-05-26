@@ -54,3 +54,7 @@ ai = ["dep:forge-ai-stream"]
 # AI session persistence implies the AI module that defines `PersistedAISession`.
 persistence-redis = ["ai", "redis"]
 ha = ["forge-ha", "forge-rtp/ha"]
+# DTLS-SRTP on the SIP-side RTP socket (RFC 5763 / 5764). Enables the
+# packet demux in the recv loop and the per-leg DtlsConnection state.
+# Pulls in OpenSSL via forge-rtp's `dtls` feature.
+dtls = ["forge-rtp/dtls"]

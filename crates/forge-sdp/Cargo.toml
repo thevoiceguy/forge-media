@@ -8,10 +8,13 @@ license.workspace = true
 
 [dependencies]
 forge-core = { path = "../forge-core" }
+forge-rtp = { path = "../forge-rtp" }
 sip-sdp = { path = "../../external/siphon-rs/crates/sip-sdp" }
 smol_str = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+base64 = "0.22"
+rand = { workspace = true }
 forge-ice = { path = "../forge-ice", optional = true }
 
 [features]

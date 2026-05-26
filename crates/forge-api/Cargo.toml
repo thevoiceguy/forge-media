@@ -54,6 +54,12 @@ subtle = { workspace = true }
 [features]
 xdp = ["forge-engine/xdp"]
 ha = ["dep:forge-ha", "forge-engine/ha"]
+# Re-export forge-engine's opus feature so this package's own
+# transcoding tests (gated with `#[cfg(feature = "opus")]`) actually
+# compile and run when the workspace is built with `--all-features`.
+# Without this, the four opus-gated tests in
+# tests/transcoding_tests.rs were silently dead code.
+opus = ["forge-engine/opus"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt"] }

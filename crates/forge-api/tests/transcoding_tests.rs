@@ -302,6 +302,7 @@ async fn test_transcoding_disabled() {
 }
 
 #[tokio::test]
+#[cfg(feature = "opus")]
 async fn test_codec_config_stored() {
     // Verify codec configurations are properly stored in participants
     let config = SessionManagerConfig::default();

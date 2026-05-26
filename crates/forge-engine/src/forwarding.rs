@@ -1179,18 +1179,24 @@ impl ForwardingEngine {
                             sr.sender_octet_count as u64
                         );
 
-                        // Process reception report blocks
-                        for block in &sr.report_blocks {
-                            Self::record_report_block_metrics(block);
-                            Self::emit_qos_report(sockets, source_addr, &call_id.0, block);
-                        }
+                        Self::process_report_blocks(
+                            session,
+                            sockets,
+                            participant_a,
+                            source_addr,
+                            &sr.report_blocks,
+                        )
+                        .await;
                     }
                     forge_rtp::rtcp::RtcpPacket::ReceiverReport(rr) => {
-                        // Process reception report blocks
-                        for block in &rr.report_blocks {
-                            Self::record_report_block_metrics(block);
-                            Self::emit_qos_report(sockets, source_addr, &call_id.0, block);
-                        }
+                        Self::process_report_blocks(
+                            session,
+                            sockets,
+                            participant_a,
+                            source_addr,
+                            &rr.report_blocks,
+                        )
+                        .await;
                     }
                     _ => {
                         // Other RTCP packet types (SDES, BYE, etc.)
@@ -1386,6 +1392,62 @@ impl ForwardingEngine {
         } else {
             p.stats.packets_sent += 1;
             p.stats.bytes_sent += packet_len;
+        }
+    }
+
+    /// Drive every per-RR-block observability sink in one place:
+    /// Prometheus metrics, HEP QoS, and the [`ForgeEvent::RtcpReportReceived`]
+    /// bus event that siphon-ai's `RtpStatsTracker` consumes for the
+    /// `rtp_stats` WS event.
+    ///
+    /// The jitter→ms conversion needs an RTP clock rate; we read it
+    /// from `participant_a`. siphon-ai's bridge mode configures both
+    /// legs with the same codec, so this is the right value there.
+    /// A future refinement disambiguates by `source_addr` for true
+    /// B2BUA setups with mixed clock rates between legs.
+    async fn process_report_blocks(
+        session: &Arc<MediaSession>,
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        participant_a: &Arc<RwLock<Participant>>,
+        source_addr: std::net::SocketAddr,
+        blocks: &[forge_rtp::rtcp::ReceptionReportBlock],
+    ) {
+        let call_id = session.call_id();
+        let clock_rate = participant_a.read().await.codec_config.clock_rate;
+        let bus = session.event_bus().cloned();
+        for block in blocks {
+            Self::record_report_block_metrics(block);
+            Self::emit_qos_report(sockets, source_addr, &call_id.0, block);
+            if let Some(bus) = &bus {
+                let _ = bus.publish(Self::rtcp_report_event(call_id.clone(), block, clock_rate));
+            }
+        }
+    }
+
+    /// Translate one RTCP reception-report block into a
+    /// [`ForgeEvent::RtcpReportReceived`] payload, converting the RR's
+    /// timestamp-unit jitter into milliseconds using the supplied RTP
+    /// clock rate. `rtt_ms` is `None` until forge-engine originates its
+    /// own SRs (siphon-ai DEV_PLAN_0.3.0.md §9 decision 10 — 0.3.1
+    /// follow-up).
+    fn rtcp_report_event(
+        call_id: forge_core::CallId,
+        block: &forge_rtp::rtcp::ReceptionReportBlock,
+        clock_rate: u32,
+    ) -> ForgeEvent {
+        // `block.jitter` is in RTP timestamp units (1 / clock_rate
+        // seconds each). Convert to ms; treat a degenerate
+        // `clock_rate == 0` as the SIP default 8 kHz to avoid a
+        // panic/Inf — better an approximate value than a dropped event.
+        let cr = if clock_rate == 0 { 8000 } else { clock_rate };
+        let jitter_ms = (block.jitter as f32) / (cr as f32) * 1000.0;
+        let packet_loss_ratio = (block.fraction_lost as f32) / 256.0;
+        ForgeEvent::RtcpReportReceived {
+            call_id,
+            jitter_ms,
+            packet_loss_ratio,
+            rtt_ms: None,
+            timestamp: chrono::Utc::now(),
         }
     }
 
@@ -1647,5 +1709,79 @@ mod tests {
         assert_eq!(codec_name(AudioCodecType::PCMU), "G.711 µ-law");
         assert_eq!(codec_name(AudioCodecType::PCMA), "G.711 A-law");
         assert_eq!(codec_name(AudioCodecType::Opus), "Opus");
+    }
+
+    fn rr_block(jitter: u32, fraction_lost: u8) -> forge_rtp::rtcp::ReceptionReportBlock {
+        let mut block = forge_rtp::rtcp::ReceptionReportBlock::new(0xDEAD_BEEF);
+        block.jitter = jitter;
+        block.fraction_lost = fraction_lost;
+        block
+    }
+
+    #[test]
+    fn rtcp_report_event_converts_jitter_at_8khz() {
+        let call_id = CallId::generate();
+        // 80 ticks @ 8 kHz = 10 ms.
+        let block = rr_block(80, 0);
+        let event = ForwardingEngine::rtcp_report_event(call_id.clone(), &block, 8000);
+        match event {
+            ForgeEvent::RtcpReportReceived {
+                jitter_ms,
+                packet_loss_ratio,
+                rtt_ms,
+                call_id: cid,
+                ..
+            } => {
+                assert!((jitter_ms - 10.0).abs() < 1e-3);
+                assert_eq!(packet_loss_ratio, 0.0);
+                assert!(rtt_ms.is_none());
+                assert_eq!(cid, call_id);
+            }
+            other => panic!("expected RtcpReportReceived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rtcp_report_event_converts_jitter_at_48khz_opus() {
+        // 480 ticks @ 48 kHz = 10 ms.
+        let block = rr_block(480, 0);
+        let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 48000);
+        match event {
+            ForgeEvent::RtcpReportReceived { jitter_ms, .. } => {
+                assert!((jitter_ms - 10.0).abs() < 1e-3, "jitter_ms = {jitter_ms}");
+            }
+            other => panic!("expected RtcpReportReceived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rtcp_report_event_fraction_lost_to_ratio() {
+        // fraction_lost is 8-bit fixed-point: 64 / 256 = 0.25 (25% loss).
+        let block = rr_block(0, 64);
+        let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 8000);
+        match event {
+            ForgeEvent::RtcpReportReceived {
+                packet_loss_ratio, ..
+            } => {
+                assert!((packet_loss_ratio - 0.25).abs() < 1e-6);
+            }
+            other => panic!("expected RtcpReportReceived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rtcp_report_event_handles_zero_clock_rate() {
+        // Degenerate input — must not panic or produce Inf; fall back to
+        // the SIP default 8 kHz so the value is at least interpretable.
+        let block = rr_block(80, 0);
+        let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 0);
+        match event {
+            ForgeEvent::RtcpReportReceived { jitter_ms, .. } => {
+                assert!(jitter_ms.is_finite());
+                // 80 / 8000 * 1000 = 10 ms
+                assert!((jitter_ms - 10.0).abs() < 1e-3);
+            }
+            other => panic!("expected RtcpReportReceived, got {other:?}"),
+        }
     }
 }

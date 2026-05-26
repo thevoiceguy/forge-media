@@ -81,6 +81,30 @@ impl ForwardingEngine {
                 result = sockets.recv_rtp_raw() => {
                     match result {
                         Ok((raw_data, source_addr)) => {
+                            // RFC 5764 §5.1.2 demux: peek the first byte
+                            // to route DTLS handshake bytes away from the
+                            // SRTP/RTP path. DTLS packets would otherwise
+                            // crash `unprotect_rtp` with a parse error.
+                            #[cfg(feature = "dtls")]
+                            if let Some(first) = raw_data.first().copied() {
+                                if crate::dtls_srtp::is_dtls_packet(first) {
+                                    Self::handle_dtls_packet(
+                                        &session,
+                                        &sockets,
+                                        &participant_a,
+                                        &participant_b,
+                                        &raw_data,
+                                        source_addr,
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                                if crate::dtls_srtp::is_unsupported_first_byte(first) {
+                                    counter!("forge_rtp_unsupported_first_byte_total", 1);
+                                    continue;
+                                }
+                            }
+
                             // Determine which leg sent this packet for SRTP unprotect
                             let srtp_ctx = {
                                 let a = participant_a.read().await;
@@ -1403,6 +1427,105 @@ impl ForwardingEngine {
     /// The jitter→ms conversion needs an RTP clock rate; we read it
     /// from `participant_a`. siphon-ai's bridge mode configures both
     /// legs with the same codec, so this is the right value there.
+    /// Drive a DTLS-SRTP handshake step on the RTP socket. Called from
+    /// the recv-loop demux when the first byte falls in the RFC 5764
+    /// §5.1.2 DTLS range (20-63). Picks the leg by `source_addr`,
+    /// feeds the packet into the per-leg `DtlsLeg`, ships any
+    /// outgoing DTLS bytes back to the peer, and on handshake
+    /// completion installs the derived SRTP keys into the existing
+    /// `srtp_a`/`srtp_b` context so the next inbound SRTP packet
+    /// decodes cleanly.
+    ///
+    /// Best-effort: if no DTLS leg has been provisioned on either
+    /// side (`enable_dtls` not called), the packet is silently
+    /// dropped with a metric — we don't want a stray DTLS packet on
+    /// a plaintext call to break anything.
+    #[cfg(feature = "dtls")]
+    async fn handle_dtls_packet(
+        session: &Arc<MediaSession>,
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        raw_data: &[u8],
+        source_addr: std::net::SocketAddr,
+    ) {
+        use crate::dtls_srtp::HandshakeOutcome;
+
+        counter!("forge_dtls_packets_received_total", 1);
+
+        // Pick the side by source_addr. Same shape as the SRTP-context
+        // selection above. Default to A if neither participant has
+        // learned a remote_addr yet (very early in the call).
+        let (dtls_slot, srtp_ctx) = {
+            let a = participant_a.read().await;
+            let b = participant_b.read().await;
+            if a.remote_addr == Some(source_addr) {
+                (session.dtls_a().clone(), session.srtp_a().clone())
+            } else if b.remote_addr == Some(source_addr) {
+                (session.dtls_b().clone(), session.srtp_b().clone())
+            } else {
+                (session.dtls_a().clone(), session.srtp_a().clone())
+            }
+        };
+
+        let outcome = {
+            let mut guard = dtls_slot.lock().await;
+            let Some(leg) = guard.as_mut() else {
+                // No DTLS configured on this side. Could be a stale
+                // packet from a previous call, or misrouted traffic.
+                // Drop with a metric.
+                counter!("forge_dtls_packets_dropped_no_leg_total", 1);
+                return;
+            };
+            leg.feed(Some(raw_data))
+        };
+
+        // Ship any outgoing DTLS bytes back to the peer first — both
+        // InProgress and Complete may carry them.
+        let outgoing = match &outcome {
+            HandshakeOutcome::InProgress { outgoing }
+            | HandshakeOutcome::Complete { outgoing, .. } => outgoing.clone(),
+            HandshakeOutcome::Failed(_) => Vec::new(),
+        };
+        if !outgoing.is_empty() {
+            if let Err(e) = sockets.send_rtp_to(&outgoing, source_addr).await {
+                tracing::warn!(
+                    call_id = %session.call_id().0,
+                    error = %e,
+                    "failed to send outgoing DTLS bytes",
+                );
+                counter!("forge_dtls_send_errors_total", 1);
+            }
+        }
+
+        match outcome {
+            HandshakeOutcome::InProgress { .. } => {}
+            HandshakeOutcome::Complete {
+                local_srtp_key,
+                remote_srtp_key,
+                ..
+            } => {
+                counter!("forge_dtls_handshakes_completed_total", 1);
+                crate::dtls_srtp::install_keys(&srtp_ctx, local_srtp_key, remote_srtp_key).await;
+                tracing::info!(
+                    call_id = %session.call_id().0,
+                    "DTLS-SRTP handshake complete; SRTP keys installed",
+                );
+            }
+            HandshakeOutcome::Failed(e) => {
+                counter!("forge_dtls_handshakes_failed_total", 1);
+                tracing::warn!(
+                    call_id = %session.call_id().0,
+                    error = %e,
+                    "DTLS-SRTP handshake failed; clearing leg",
+                );
+                // Clear the leg so we don't keep retrying with a
+                // poisoned context.
+                *dtls_slot.lock().await = None;
+            }
+        }
+    }
+
     /// A future refinement disambiguates by `source_addr` for true
     /// B2BUA setups with mixed clock rates between legs.
     async fn process_report_blocks(

@@ -492,6 +492,14 @@ pub struct MediaSession {
     srtp_a: Arc<Mutex<SrtpContext>>,
     /// SRTP context for participant B (inbound: unprotect B→us, outbound: protect us→B)
     srtp_b: Arc<Mutex<SrtpContext>>,
+    /// DTLS-SRTP state for participant A. `None` until [`enable_dtls`]
+    /// installs a leg; once set, the RTP recv loop demuxes DTLS packets
+    /// from the A-side socket and drives the handshake.
+    #[cfg(feature = "dtls")]
+    dtls_a: Arc<Mutex<Option<crate::dtls_srtp::DtlsLeg>>>,
+    /// DTLS-SRTP state for participant B (same shape as `dtls_a`).
+    #[cfg(feature = "dtls")]
+    dtls_b: Arc<Mutex<Option<crate::dtls_srtp::DtlsLeg>>>,
     /// Whether to relay RFC 2833 telephone-event packets to the other leg
     relay_rfc2833: AtomicBool,
     /// Telephone-event payload type negotiated with participant A (default 101)
@@ -612,6 +620,10 @@ impl MediaSession {
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
+            #[cfg(feature = "dtls")]
+            dtls_a: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "dtls")]
+            dtls_b: Arc::new(Mutex::new(None)),
             relay_rfc2833: AtomicBool::new(false),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
@@ -766,6 +778,10 @@ impl MediaSession {
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
+            #[cfg(feature = "dtls")]
+            dtls_a: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "dtls")]
+            dtls_b: Arc::new(Mutex::new(None)),
             relay_rfc2833: AtomicBool::new(false),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
@@ -964,6 +980,10 @@ impl MediaSession {
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
+            #[cfg(feature = "dtls")]
+            dtls_a: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "dtls")]
+            dtls_b: Arc::new(Mutex::new(None)),
             relay_rfc2833: AtomicBool::new(false),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
@@ -2003,6 +2023,46 @@ impl MediaSession {
         &self.srtp_b
     }
 
+    /// DTLS-SRTP leg for participant A. `None` until [`enable_dtls`]
+    /// installs it. The RTP recv loop checks this on every packet and
+    /// demuxes DTLS bytes here when a leg is present.
+    #[cfg(feature = "dtls")]
+    pub fn dtls_a(&self) -> &Arc<Mutex<Option<crate::dtls_srtp::DtlsLeg>>> {
+        &self.dtls_a
+    }
+
+    /// DTLS-SRTP leg for participant B.
+    #[cfg(feature = "dtls")]
+    pub fn dtls_b(&self) -> &Arc<Mutex<Option<crate::dtls_srtp::DtlsLeg>>> {
+        &self.dtls_b
+    }
+
+    /// Install a DTLS-SRTP leg on `side`, with the supplied long-lived
+    /// certificate, DTLS role (`Server` for the SDP answerer /
+    /// `a=setup:passive`, `Client` for offerer / `a=setup:active`),
+    /// and the remote's SDP `a=fingerprint:` value (used to verify the
+    /// presented cert post-handshake per RFC 5763 §5).
+    ///
+    /// Replaces any prior leg on the same side — callers must guarantee
+    /// the previous leg is no longer in use (e.g., the session is being
+    /// re-INVITEd with new SDP).
+    #[cfg(feature = "dtls")]
+    pub async fn enable_dtls(
+        &self,
+        side: ParticipantLabel,
+        cert: Arc<forge_rtp::dtls::DtlsCertificate>,
+        role: forge_rtp::dtls::DtlsRole,
+        remote_fingerprint: String,
+    ) -> Result<()> {
+        let leg = crate::dtls_srtp::DtlsLeg::new(cert, role, remote_fingerprint)?;
+        let slot = match side {
+            ParticipantLabel::A => &self.dtls_a,
+            ParticipantLabel::B => &self.dtls_b,
+        };
+        *slot.lock().await = Some(leg);
+        Ok(())
+    }
+
     /// Whether RFC 2833 relay is enabled for this session
     pub fn relay_rfc2833(&self) -> bool {
         self.relay_rfc2833.load(Ordering::Relaxed)
@@ -2405,6 +2465,10 @@ impl MediaSession {
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
+            #[cfg(feature = "dtls")]
+            dtls_a: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "dtls")]
+            dtls_b: Arc::new(Mutex::new(None)),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
             sdp: state.sdp,
             from_tag: state.from_tag,

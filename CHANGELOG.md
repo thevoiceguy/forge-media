@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`forge-rtp`: SR/RR parsers now honour the `RC` count from the RTCP header**. Previously `SenderReport::parse` / `ReceiverReport::parse` greedily consumed 24-byte chunks until the input buffer ran out, treating bytes that actually belonged to the next sub-packet of a *compound* RTCP packet (RFC 3550 §6.1 — SR + SDES is the standard, not the exception) as phantom reception report blocks. The wrong bytes landed in `jitter`, `cumulative_lost`, `extended_highest_seq`, `last_sr`, and `dlsr`, silently corrupting every downstream QoS metric and event for every real peer (Twilio, FreeSWITCH, Asterisk, every WebRTC browser). Observed impact in siphon-ai: `siphon_ai_rtp_jitter_ms` averaged ~113,000,000 ms per RR — the formula `(block.jitter as f32) / 8000.0 * 1000.0` decoded ASCII CNAME bytes from the trailing SDES (e.g. `b"sipp"` → 0x73697070) and produced ~242M ms per "block." `SenderReport::parse` and `ReceiverReport::parse` now take an explicit `report_count: u8` argument (sourced from the RTCP common header's `RC` field by `RtcpPacket::parse`) and stop after exactly that many blocks, returning an error if the buffer is too short for the declared count instead of silently truncating. Five regression tests cover the compound SR+SDES (RC=0 and RC=N) and RR+SDES paths plus the malformed-too-short case. (No downstream callers outside `RtcpPacket::parse` were affected.)
+
 ## [0.2.0] - 2025-12-16 - Codec Enhancement
 
 ### Added - Comprehensive Codec Support

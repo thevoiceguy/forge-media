@@ -211,8 +211,21 @@ impl SenderReport {
         self.report_blocks.push(block);
     }
 
-    /// Parse SR from bytes
-    pub fn parse(data: &[u8]) -> Result<Self> {
+    /// Parse SR from bytes.
+    ///
+    /// `report_count` is the `RC` field from the RTCP common header
+    /// (RFC 3550 §6.4.1) and is the *only* authoritative source for
+    /// how many reception report blocks follow the sender info.
+    /// Trailing bytes beyond the declared blocks are ignored — they
+    /// belong to whatever sub-packet follows in a compound RTCP
+    /// packet (SR + SDES + ... — RFC 3550 §6.1 requires every
+    /// transmitted RTCP packet to be compounded with at least one
+    /// SDES, so this is the common case, not the exception).
+    ///
+    /// Caller-supplied `data` starts at the SR payload (the SSRC of
+    /// the sender), i.e. immediately after the 4-byte RTCP common
+    /// header.
+    pub fn parse(data: &[u8], report_count: u8) -> Result<Self> {
         if data.len() < 24 {
             return Err(ForgeError::Rtcp("SR packet too short".to_string()));
         }
@@ -226,9 +239,22 @@ impl SenderReport {
         let sender_packet_count = cursor.get_u32();
         let sender_octet_count = cursor.get_u32();
 
-        // Parse report blocks
-        let mut report_blocks = Vec::new();
-        while cursor.remaining() >= 24 {
+        // Parse exactly `report_count` reception report blocks — no
+        // more, no less. Previous behaviour greedily consumed 24-byte
+        // chunks until the buffer ran out, which silently treated
+        // trailing SDES bytes as bogus RR blocks for every Twilio /
+        // FreeSWITCH / Asterisk peer (i.e. nearly everyone, since RFC
+        // 3550 §6.1 mandates compound RTCP). The wrong bytes landed
+        // in `jitter` / `cumulative_lost` / `last_sr` and corrupted
+        // every downstream QoS metric and event.
+        let mut report_blocks = Vec::with_capacity(report_count as usize);
+        for _ in 0..report_count {
+            if cursor.remaining() < 24 {
+                return Err(ForgeError::Rtcp(format!(
+                    "SR declares RC={report_count} blocks but only {} bytes remain",
+                    cursor.remaining()
+                )));
+            }
             report_blocks.push(ReceptionReportBlock::parse(
                 &data[cursor.position() as usize..],
             )?);
@@ -288,8 +314,19 @@ impl ReceiverReport {
         self.report_blocks.push(block);
     }
 
-    /// Parse RR from bytes
-    pub fn parse(data: &[u8]) -> Result<Self> {
+    /// Parse RR from bytes.
+    ///
+    /// `report_count` is the `RC` field from the RTCP common header
+    /// (RFC 3550 §6.4.2) and bounds the number of reception report
+    /// blocks consumed. Trailing bytes beyond the declared blocks
+    /// belong to the next sub-packet in a compound RTCP packet and
+    /// MUST NOT be parsed as RR blocks — see [`SenderReport::parse`]
+    /// for the longer rationale.
+    ///
+    /// Caller-supplied `data` starts at the RR payload (the SSRC of
+    /// the packet sender), i.e. immediately after the 4-byte RTCP
+    /// common header.
+    pub fn parse(data: &[u8], report_count: u8) -> Result<Self> {
         if data.len() < 4 {
             return Err(ForgeError::Rtcp("RR packet too short".to_string()));
         }
@@ -297,8 +334,14 @@ impl ReceiverReport {
         let mut cursor = std::io::Cursor::new(data);
         let ssrc = cursor.get_u32();
 
-        let mut report_blocks = Vec::new();
-        while cursor.remaining() >= 24 {
+        let mut report_blocks = Vec::with_capacity(report_count as usize);
+        for _ in 0..report_count {
+            if cursor.remaining() < 24 {
+                return Err(ForgeError::Rtcp(format!(
+                    "RR declares RC={report_count} blocks but only {} bytes remain",
+                    cursor.remaining()
+                )));
+            }
             report_blocks.push(ReceptionReportBlock::parse(
                 &data[cursor.position() as usize..],
             )?);
@@ -731,11 +774,11 @@ impl RtcpPacket {
 
         match header.packet_type {
             RtcpPacketType::SR => {
-                let sr = SenderReport::parse(&data[4..])?;
+                let sr = SenderReport::parse(&data[4..], header.count)?;
                 Ok(RtcpPacket::SenderReport(sr))
             }
             RtcpPacketType::RR => {
-                let rr = ReceiverReport::parse(&data[4..])?;
+                let rr = ReceiverReport::parse(&data[4..], header.count)?;
                 Ok(RtcpPacket::ReceiverReport(rr))
             }
             RtcpPacketType::SDES => {
@@ -840,5 +883,200 @@ mod tests {
         let rr = ReceiverReport::new(0x87654321);
         assert_eq!(rr.ssrc, 0x87654321);
         assert_eq!(rr.report_blocks.len(), 0);
+    }
+
+    // ─── Compound-packet parsing (RFC 3550 §6.1) ─────────────────────
+    //
+    // Real SIP / WebRTC peers (Twilio, FreeSWITCH, Asterisk, every
+    // WebRTC browser) NEVER send a bare SR or RR — every transmitted
+    // RTCP packet MUST be compounded with at least one SDES per §6.1.
+    // The parser must therefore stop after exactly `RC` reception
+    // report blocks and ignore the trailing SDES (or BYE, or APP)
+    // bytes that follow. The pre-fix code greedily consumed 24-byte
+    // chunks until the buffer ran out, treating SDES bytes as bogus
+    // RR blocks — which corrupted `jitter`, `cumulative_lost`,
+    // `last_sr`, etc. by reading the wrong bytes.
+
+    /// Build the canonical 24-byte sender-info chunk (SSRC + NTP +
+    /// RTP timestamp + packet/octet counts) used by SR test packets.
+    fn sender_info_bytes() -> Vec<u8> {
+        let mut buf = Vec::with_capacity(24);
+        buf.extend_from_slice(&0x12345678u32.to_be_bytes()); // SSRC of sender
+        buf.extend_from_slice(&0xDEADBEEFu32.to_be_bytes()); // NTP msw
+        buf.extend_from_slice(&0xCAFEBABEu32.to_be_bytes()); // NTP lsw
+        buf.extend_from_slice(&0x00010000u32.to_be_bytes()); // RTP ts
+        buf.extend_from_slice(&100u32.to_be_bytes()); // sender pkt count
+        buf.extend_from_slice(&16000u32.to_be_bytes()); // sender octet count
+        buf
+    }
+
+    /// Build a canonical 4-byte RTCP common header with the given RC,
+    /// packet type, and length (in 32-bit words minus one).
+    fn rtcp_header(rc: u8, pt: u8, length_words_minus_one: u16) -> Vec<u8> {
+        let first = 0x80 | (rc & 0x1F); // V=2, P=0, RC
+        let len = length_words_minus_one.to_be_bytes();
+        vec![first, pt, len[0], len[1]]
+    }
+
+    /// Build a minimal SDES sub-packet with a single CNAME item for
+    /// the given SSRC. CNAME content deliberately looks like ASCII
+    /// (`"cname@host"`) so a buggy parser would extract a large
+    /// integer from its bytes — making the regression test sensitive
+    /// to exactly the pre-fix failure mode.
+    fn sdes_subpacket() -> Vec<u8> {
+        // SDES chunk: SSRC + CNAME item + null terminator + padding to
+        // 32-bit boundary.
+        let cname = b"alice@example.com"; // 17 bytes
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&0xABCD0001u32.to_be_bytes()); // chunk SSRC
+        chunk.push(1); // SDES item type: CNAME
+        chunk.push(cname.len() as u8);
+        chunk.extend_from_slice(cname);
+        chunk.push(0); // SDES item list terminator (type 0)
+                       // Pad chunk to multiple of 4 bytes.
+        while chunk.len() % 4 != 0 {
+            chunk.push(0);
+        }
+
+        let length_words_minus_one = ((4 + chunk.len()) / 4 - 1) as u16;
+        let mut buf = rtcp_header(
+            1,   /* SC=1 chunk */
+            202, /* SDES */
+            length_words_minus_one,
+        );
+        buf.extend_from_slice(&chunk);
+        buf
+    }
+
+    /// Build a single 24-byte reception report block with the given
+    /// jitter value. All other fields use distinctive sentinel values
+    /// so test assertions can distinguish "parsed from the right
+    /// bytes" vs "happened to land on the right offset".
+    fn report_block_bytes(jitter: u32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(24);
+        buf.extend_from_slice(&0x11111111u32.to_be_bytes()); // SSRC_1
+        buf.push(0x22); // fraction_lost
+        buf.extend_from_slice(&[0x00, 0x00, 0x03]); // cumulative_lost = 3
+        buf.extend_from_slice(&0x44444444u32.to_be_bytes()); // extended highest seq
+        buf.extend_from_slice(&jitter.to_be_bytes());
+        buf.extend_from_slice(&0x66666666u32.to_be_bytes()); // last_sr
+        buf.extend_from_slice(&0x77777777u32.to_be_bytes()); // dlsr
+        buf
+    }
+
+    #[test]
+    fn sender_report_ignores_trailing_compound_bytes() {
+        // Compound packet: SR (RC=0, no RR blocks) + SDES.
+        // Pre-fix the SR parser ate the SDES bytes as a fake RR block
+        // and produced garbage jitter/loss values. With RC=0 honoured,
+        // we get zero report blocks.
+        let mut packet = rtcp_header(0, 200, 6); // SR with no blocks, len = 6
+        packet.extend_from_slice(&sender_info_bytes());
+        let sdes_start = packet.len();
+        packet.extend_from_slice(&sdes_subpacket());
+        assert!(
+            packet.len() - sdes_start >= 24,
+            "test compound packet must have ≥24 trailing bytes to exercise the pre-fix greedy-consume bug",
+        );
+
+        let parsed = RtcpPacket::parse(&packet).expect("compound SR+SDES parses");
+        match parsed {
+            RtcpPacket::SenderReport(sr) => {
+                assert_eq!(sr.ssrc, 0x12345678);
+                assert!(
+                    sr.report_blocks.is_empty(),
+                    "RC=0 SR must have zero report blocks; got {} (trailing SDES misparsed)",
+                    sr.report_blocks.len(),
+                );
+            }
+            other => panic!("expected SenderReport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sender_report_parses_exactly_rc_blocks_then_stops() {
+        // SR with RC=2 followed by a third 24-byte chunk that is
+        // actually SDES bytes. The parser must take the first two
+        // RR blocks (recovering the sentinel jitter values) and stop
+        // — NOT slurp the SDES bytes as a phantom third block.
+        let length_words = ((4 + 24 + 24 * 2 + sdes_subpacket().len()) / 4 - 1) as u16;
+        // ^ deliberately wrong length to prove RC, not length, bounds the parse
+        let mut packet = rtcp_header(2, 200, length_words);
+        packet.extend_from_slice(&sender_info_bytes());
+        packet.extend_from_slice(&report_block_bytes(0x0000_0080)); // jitter = 128
+        packet.extend_from_slice(&report_block_bytes(0x0000_0140)); // jitter = 320
+        packet.extend_from_slice(&sdes_subpacket());
+
+        let parsed = RtcpPacket::parse(&packet).expect("compound SR (RC=2) + SDES parses");
+        match parsed {
+            RtcpPacket::SenderReport(sr) => {
+                assert_eq!(sr.report_blocks.len(), 2, "must stop after RC=2 blocks");
+                assert_eq!(sr.report_blocks[0].jitter, 128);
+                assert_eq!(sr.report_blocks[1].jitter, 320);
+                // Sanity: the sentinel SSRC proves we parsed the right bytes.
+                for block in &sr.report_blocks {
+                    assert_eq!(block.ssrc, 0x11111111);
+                    assert_eq!(block.fraction_lost, 0x22);
+                }
+            }
+            other => panic!("expected SenderReport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn receiver_report_ignores_trailing_compound_bytes() {
+        // RR with RC=0 + SDES. Same bug, same fix.
+        let mut packet = rtcp_header(0, 201, 1); // RR with just SSRC, len = 1
+        packet.extend_from_slice(&0x87654321u32.to_be_bytes());
+        packet.extend_from_slice(&sdes_subpacket());
+
+        let parsed = RtcpPacket::parse(&packet).expect("compound RR+SDES parses");
+        match parsed {
+            RtcpPacket::ReceiverReport(rr) => {
+                assert_eq!(rr.ssrc, 0x87654321);
+                assert!(
+                    rr.report_blocks.is_empty(),
+                    "RC=0 RR must have zero report blocks; got {} (trailing SDES misparsed)",
+                    rr.report_blocks.len(),
+                );
+            }
+            other => panic!("expected ReceiverReport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn receiver_report_parses_exactly_rc_blocks_then_stops() {
+        let mut packet = rtcp_header(1, 201, 7);
+        packet.extend_from_slice(&0x87654321u32.to_be_bytes());
+        packet.extend_from_slice(&report_block_bytes(0x0000_0040)); // jitter = 64
+        packet.extend_from_slice(&sdes_subpacket());
+
+        let parsed = RtcpPacket::parse(&packet).expect("compound RR (RC=1) + SDES parses");
+        match parsed {
+            RtcpPacket::ReceiverReport(rr) => {
+                assert_eq!(rr.report_blocks.len(), 1, "must stop after RC=1 block");
+                assert_eq!(rr.report_blocks[0].jitter, 64);
+                assert_eq!(rr.report_blocks[0].ssrc, 0x11111111);
+            }
+            other => panic!("expected ReceiverReport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sender_report_rejects_rc_count_exceeding_payload() {
+        // RC=5 declared, but only one block's worth of bytes provided.
+        // Better to surface the malformed packet as an error than to
+        // silently truncate and report fewer blocks than declared.
+        let mut packet = rtcp_header(5, 200, 18);
+        packet.extend_from_slice(&sender_info_bytes());
+        packet.extend_from_slice(&report_block_bytes(0));
+
+        let err = RtcpPacket::parse(&packet)
+            .expect_err("RC=5 with only 1 block of trailing data must error, not truncate");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("RC=5") && msg.contains("bytes remain"),
+            "error should describe the RC vs available-bytes mismatch; got: {msg}",
+        );
     }
 }

@@ -560,10 +560,13 @@ impl SrtpContext {
             iv[4 + i] ^= ssrc_bytes[i];
         }
 
-        // XOR with packet index (bytes 8-13, 48 bits)
+        // XOR with packet index at bytes 8-13 (48 bits, big-endian MSB at 8).
+        // Per RFC 3711 §4.1.1: IV = (k_s * 2^16) XOR (SSRC * 2^64) XOR (i * 2^16).
+        // i << 16 occupies bits 16..63 of the 128-bit IV, i.e. bytes 8..13
+        // (MSB at byte 8, LSB at byte 13) in big-endian byte order.
         let index_bytes = packet_index.to_be_bytes();
         for i in 0..6 {
-            iv[6 + i] ^= index_bytes[2 + i];
+            iv[8 + i] ^= index_bytes[2 + i];
         }
 
         // Encrypt payload using AES-CTR
@@ -841,9 +844,10 @@ impl SrtpContext {
             iv[4 + i] ^= ssrc_bytes[i];
         }
 
+        // Packet index at bytes 8-13 (RFC 3711 §4.1.1: i << 16 → bits 16..63).
         let index_bytes = packet_index.to_be_bytes();
         for i in 0..6 {
-            iv[6 + i] ^= index_bytes[2 + i];
+            iv[8 + i] ^= index_bytes[2 + i];
         }
 
         // Decrypt payload
@@ -1043,10 +1047,13 @@ impl SrtpContext {
             iv[4 + i] ^= ssrc_bytes[i];
         }
 
-        // XOR with SRTCP index (bytes 8-11)
+        // XOR with SRTCP index at bytes 10-13 (32 bits, big-endian MSB at 10).
+        // Per RFC 3711 §4.1.2: IV = (k_s * 2^16) XOR (SSRC * 2^64) XOR (i * 2^16).
+        // SRTCP index << 16 occupies bits 16..47 of the 128-bit IV, i.e.
+        // bytes 10..13 in big-endian byte order.
         let index_bytes = srtcp_index.to_be_bytes();
         for i in 0..4 {
-            iv[8 + i] ^= index_bytes[i];
+            iv[10 + i] ^= index_bytes[i];
         }
 
         // Encrypt payload (skip 8-byte header)
@@ -1303,9 +1310,10 @@ impl SrtpContext {
             iv[4 + i] ^= ssrc_bytes[i];
         }
 
+        // SRTCP index at bytes 10-13 (RFC 3711 §4.1.2: i << 16 → bits 16..47).
         let index_bytes = srtcp_index.to_be_bytes();
         for i in 0..4 {
-            iv[8 + i] ^= index_bytes[i];
+            iv[10 + i] ^= index_bytes[i];
         }
 
         // Decrypt payload (skip 8-byte header)
@@ -1697,6 +1705,133 @@ mod tests {
 
         // Should match original
         assert_eq!(decrypted, rtp_packet);
+    }
+
+    /// Cross-check AES-CM SRTP IV construction against RFC 3711 §4.1.1
+    /// (RTP) and §4.1.2 (SRTCP) by computing the IV independently
+    /// using u128 arithmetic that mirrors the spec's algebraic formula:
+    ///
+    /// ```text
+    /// IV = (k_s * 2^16) XOR (SSRC * 2^64) XOR (i * 2^16)
+    /// ```
+    ///
+    /// The existing round-trip tests cannot catch a symmetric off-by-N
+    /// in `iv[...]` indexing because the same wrong bytes are XOR'd on
+    /// both sides — wrong matches wrong, plaintext is recovered, test
+    /// passes, and the bug only surfaces against a spec-correct peer.
+    /// This test computes the expected keystream from first principles.
+    #[test]
+    fn test_srtp_aes_cm_iv_matches_rfc3711_spec() {
+        use aes::cipher::{BlockEncrypt, KeyInit};
+        use aes::Aes128;
+
+        let master_key = vec![0x2Bu8; 16];
+        let master_salt = vec![0xF0u8; 14];
+        let profile = SrtpProfile::Aes128CmHmacSha1_80;
+        let key_material = SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
+
+        let ssrc: u32 = 0xCAFE_BABE;
+        let packet_index: u64 = 0x0001_0203_0405;
+        let derived = key_material
+            .derive_srtp_session_keys(ssrc, packet_index)
+            .unwrap();
+
+        // Spec-literal IV: salt is 112 bits, IV is 128 bits, so
+        // (k_s * 2^16) left-aligns the salt in the IV.
+        let salt_u128: u128 = derived
+            .salt
+            .iter()
+            .fold(0u128, |acc, &b| (acc << 8) | b as u128);
+        let iv_u128: u128 =
+            (salt_u128 << 16) ^ ((ssrc as u128) << 64) ^ ((packet_index as u128) << 16);
+        let expected_iv: [u8; 16] = iv_u128.to_be_bytes();
+
+        // First keystream block under AES-CM.
+        let cipher = Aes128::new_from_slice(&derived.encryption_key).unwrap();
+        let mut block = aes::Block::clone_from_slice(&expected_iv);
+        cipher.encrypt_block(&mut block);
+        let expected_ks0: [u8; 16] = block.into();
+
+        // Drive protect_aes_cm directly with a 16-byte zero payload.
+        // XOR with zero leaves the keystream visible in the ciphertext.
+        let mut packet = vec![
+            0x80, 0x00, // V=2, P=0, X=0, CC=0, M=0, PT=0
+            0x04, 0x05, // sequence (matches packet_index low 16 bits)
+            0x00, 0x00, 0x00, 0x00, // timestamp (irrelevant for IV)
+        ];
+        packet.extend_from_slice(&ssrc.to_be_bytes());
+        packet.extend_from_slice(&[0u8; 16]); // 16 bytes of zero payload
+
+        let ctx = SrtpContext::new();
+        let out = ctx
+            .protect_aes_cm(
+                &packet,
+                12,
+                &derived,
+                ssrc,
+                0x0001_0203,
+                packet_index,
+                profile,
+            )
+            .unwrap();
+
+        // First 16 bytes of payload = AES-CM keystream (since plaintext is zero).
+        let ciphertext_ks0 = &out[12..28];
+        assert_eq!(
+            ciphertext_ks0, &expected_ks0,
+            "AES-CM keystream must match spec-literal IV; off-by-N in iv[...] \
+             indexing will fail this test against any spec-correct peer"
+        );
+    }
+
+    /// Cross-check AES-CM SRTCP IV construction against RFC 3711 §4.1.2.
+    /// SRTCP_INDEX is 32 bits → bits 16..47 of the IV → bytes 10-13.
+    #[test]
+    fn test_srtcp_aes_cm_iv_matches_rfc3711_spec() {
+        use aes::cipher::{BlockEncrypt, KeyInit};
+        use aes::Aes128;
+
+        let master_key = vec![0x3Cu8; 16];
+        let master_salt = vec![0xE1u8; 14];
+        let profile = SrtpProfile::Aes128CmHmacSha1_80;
+        let key_material = SrtpKeyMaterial::new(master_key, master_salt, profile).unwrap();
+
+        let ssrc: u32 = 0x1234_5678;
+        let srtcp_index: u32 = 0x0001_0203;
+        // SRTCP uses its own KDF labels; we exercise the same code path.
+        let derived = key_material
+            .derive_srtcp_session_keys(ssrc, srtcp_index as u64)
+            .unwrap();
+
+        let salt_u128: u128 = derived
+            .salt
+            .iter()
+            .fold(0u128, |acc, &b| (acc << 8) | b as u128);
+        let iv_u128: u128 =
+            (salt_u128 << 16) ^ ((ssrc as u128) << 64) ^ ((srtcp_index as u128) << 16);
+        let expected_iv: [u8; 16] = iv_u128.to_be_bytes();
+
+        let cipher = Aes128::new_from_slice(&derived.encryption_key).unwrap();
+        let mut block = aes::Block::clone_from_slice(&expected_iv);
+        cipher.encrypt_block(&mut block);
+        let expected_ks0: [u8; 16] = block.into();
+
+        // Minimal SR packet: 8-byte header + 16-byte zero payload.
+        let mut packet = vec![0x80, 0xC8, 0x00, 0x06]; // V=2, PT=SR(200), len
+        packet.extend_from_slice(&ssrc.to_be_bytes());
+        packet.extend_from_slice(&[0u8; 16]);
+
+        let ctx = SrtpContext::new();
+        let out = ctx
+            .protect_rtcp_aes_cm(&packet, &derived, ssrc, srtcp_index, profile)
+            .unwrap();
+
+        // SRTCP encrypts everything after the 8-byte header.
+        let ciphertext_ks0 = &out[8..24];
+        assert_eq!(
+            ciphertext_ks0, &expected_ks0,
+            "SRTCP AES-CM keystream must match spec-literal IV"
+        );
     }
 
     /// Test AES-GCM SRTP encryption/decryption

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`forge-rtp`: SRTCP key derivation now uses the spec-correct KDF labels (RFC 3711 §4.3.3)**. `derive_session_keys` always derived with the *SRTP* labels (`0x00` / `0x01` / `0x02`) regardless of which protocol was calling it. SRTCP requires labels `0x03` / `0x04` / `0x05` per §4.3.3 "List of Reserved Labels" — so every SRTCP packet from a spec-correct peer (Twilio, FreeSWITCH, every WebRTC stack) was discarded with "SRTCP authentication failed" because the peer's auth tag was computed against label `0x04` and ours against label `0x01`. Surfaced immediately in production once SDES SRTP shipped on the siphon-ai side and real carrier RTCP started arriving (DTLS-SRTP 0.3.0 test coverage was hand-driven and audio-focused; SRTCP wasn't exercised end-to-end). The function is now split into `derive_srtp_session_keys` and `derive_srtcp_session_keys`, both delegating to a private `derive_session_keys_with_labels` that takes the three labels as parameters. The four production call sites (`protect_rtp`, `unprotect_rtp`, `protect_rtcp`, `unprotect_rtcp`) point at the right variant. A new regression test pins that the two key sets are distinct — if a future refactor collapses them back, the test fails loudly with the wrong key bytes. SRTP path unchanged.
+
 ### Added
 
 - **`forge-engine::srtp_install::install_srtp_keys`** — exchange-agnostic SRTP key installer. Takes a pre-derived `SrtpKeyMaterial` pair (local + remote) and installs them into an existing `Arc<Mutex<SrtpContext>>`. Same wire behaviour as the existing `dtls_srtp::install_keys` helper, but lives outside the `dtls` feature gate so the SDES path (which doesn't need OpenSSL) can call it without pulling DTLS in. The DTLS install path now delegates to this helper, so existing callers see no behaviour change. Required for [thevoiceguy/siphon-ai's 0.3.1 SDES outbound wiring](https://github.com/thevoiceguy/siphon-ai) — `forge_sdp::sdes::answer_sdes()` already returns key material in the shape this helper expects, so the siphon-ai side is now pure plumbing.

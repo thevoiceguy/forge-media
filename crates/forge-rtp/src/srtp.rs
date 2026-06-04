@@ -114,16 +114,50 @@ impl SrtpKeyMaterial {
         })
     }
 
-    /// Derive session keys for RTP/RTCP encryption and authentication
+    /// Derive SRTP session keys (RFC 3711 §4.3.3 labels 0x00/0x01/0x02).
     ///
-    /// Implements RFC 3711 Section 4.3 key derivation function
-    fn derive_session_keys(&self, ssrc: u32, index: u64) -> Result<DerivedKeys> {
+    /// Use this for `protect_rtp` / `unprotect_rtp`. For SRTCP, call
+    /// [`Self::derive_srtcp_session_keys`] which uses the SRTCP-specific
+    /// labels (0x03/0x04/0x05). Using SRTP labels for SRTCP derives a
+    /// completely different (and wrong) auth key, so the peer's
+    /// auth-tag check fails on every SRTCP packet — that exact
+    /// production symptom is what motivated splitting the two.
+    fn derive_srtp_session_keys(&self, ssrc: u32, index: u64) -> Result<DerivedKeys> {
+        self.derive_session_keys_with_labels(
+            ssrc, index, /* enc */ 0x00, /* auth */ 0x01, /* salt */ 0x02,
+        )
+    }
+
+    /// Derive SRTCP session keys (RFC 3711 §4.3.3 labels 0x03/0x04/0x05).
+    ///
+    /// SRTCP shares the master_key + master_salt with SRTP but derives
+    /// distinct session keys via different KDF labels (per RFC 3711
+    /// §4.3.3 "List of Reserved Labels"). The session-encryption key
+    /// is unrelated to the SRTP one — using SRTP's would also encrypt,
+    /// but the auth tag the peer computes (correctly with SRTCP
+    /// labels) would never match ours.
+    fn derive_srtcp_session_keys(&self, ssrc: u32, index: u64) -> Result<DerivedKeys> {
+        self.derive_session_keys_with_labels(
+            ssrc, index, /* enc */ 0x03, /* auth */ 0x04, /* salt */ 0x05,
+        )
+    }
+
+    /// Common implementation for both SRTP and SRTCP — the two only
+    /// differ in which set of KDF labels they pass in.
+    fn derive_session_keys_with_labels(
+        &self,
+        ssrc: u32,
+        index: u64,
+        enc_label: u8,
+        auth_label: u8,
+        salt_label: u8,
+    ) -> Result<DerivedKeys> {
         match self.profile {
             SrtpProfile::Aes128CmHmacSha1_80 | SrtpProfile::Aes128CmHmacSha1_32 => {
                 // AES-CM with HMAC-SHA1
-                let enc_key = self.derive_key(0x00, ssrc, index, 16)?; // 128-bit encryption key
-                let auth_key = self.derive_key(0x01, ssrc, index, 20)?; // 160-bit auth key
-                let salt = self.derive_key(0x02, ssrc, index, 14)?; // 112-bit salt
+                let enc_key = self.derive_key(enc_label, ssrc, index, 16)?; // 128-bit encryption key
+                let auth_key = self.derive_key(auth_label, ssrc, index, 20)?; // 160-bit auth key
+                let salt = self.derive_key(salt_label, ssrc, index, 14)?; // 112-bit salt
 
                 Ok(DerivedKeys {
                     encryption_key: enc_key,
@@ -134,8 +168,8 @@ impl SrtpKeyMaterial {
             SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => {
                 // AES-GCM (AEAD - no separate auth key)
                 let key_len = self.profile.master_key_len();
-                let enc_key = self.derive_key(0x00, ssrc, index, key_len)?;
-                let salt = self.derive_key(0x02, ssrc, index, 12)?; // 96-bit salt for GCM
+                let enc_key = self.derive_key(enc_label, ssrc, index, key_len)?;
+                let salt = self.derive_key(salt_label, ssrc, index, 12)?; // 96-bit salt for GCM
 
                 Ok(DerivedKeys {
                     encryption_key: enc_key,
@@ -469,7 +503,7 @@ impl SrtpContext {
         let packet_index = self.local_roc.get_index(sequence);
 
         // Derive session keys
-        let derived_keys = key_material.derive_session_keys(ssrc, packet_index)?;
+        let derived_keys = key_material.derive_srtp_session_keys(ssrc, packet_index)?;
 
         // Encrypt payload based on profile
         let srtp_packet = match key_material.profile {
@@ -723,7 +757,7 @@ impl SrtpContext {
         }
 
         // Derive session keys
-        let derived_keys = key_material.derive_session_keys(ssrc, packet_index)?;
+        let derived_keys = key_material.derive_srtp_session_keys(ssrc, packet_index)?;
 
         // Decrypt based on profile
         let rtp_packet = match key_material.profile {
@@ -963,7 +997,7 @@ impl SrtpContext {
         self.local_srtcp_index = self.local_srtcp_index.wrapping_add(1) & 0x7FFF_FFFF;
 
         // Derive session keys using SRTCP index
-        let derived_keys = key_material.derive_session_keys(ssrc, srtcp_index as u64)?;
+        let derived_keys = key_material.derive_srtcp_session_keys(ssrc, srtcp_index as u64)?;
 
         // Encrypt based on profile
         let srtcp_packet = match key_material.profile {
@@ -1191,7 +1225,7 @@ impl SrtpContext {
         let ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
 
         // Derive session keys
-        let derived_keys = key_material.derive_session_keys(ssrc, srtcp_index as u64)?;
+        let derived_keys = key_material.derive_srtcp_session_keys(ssrc, srtcp_index as u64)?;
 
         // Decrypt based on profile
         let rtcp_packet = match key_material.profile {
@@ -1568,7 +1602,7 @@ mod tests {
         let ssrc = 0x00000000u32;
         let index = 0u64;
 
-        let keys = key_material.derive_session_keys(ssrc, index).unwrap();
+        let keys = key_material.derive_srtp_session_keys(ssrc, index).unwrap();
 
         // Expected cipher key from RFC 3711
         let expected_cipher_key = hex::decode("C61E7A93744F39EE10734AFE3FF7A087").unwrap();
@@ -1588,6 +1622,47 @@ mod tests {
         // Expected salt key from RFC 3711
         let expected_salt_key = hex::decode("30CBBC08863D8C85D49DB34A9AE1").unwrap();
         assert_eq!(keys.salt, expected_salt_key, "Salt derivation failed");
+    }
+
+    /// Regression test for the SRTCP-uses-SRTP-labels bug.
+    ///
+    /// RFC 3711 §4.3.3 defines distinct KDF labels for SRTP
+    /// (0x00/0x01/0x02) and SRTCP (0x03/0x04/0x05). The pre-fix
+    /// `derive_session_keys` always used the SRTP labels regardless
+    /// of which protocol was calling it — meaning every SRTCP packet
+    /// from a spec-correct peer (Twilio, FreeSWITCH, every WebRTC
+    /// stack) was discarded with "SRTCP authentication failed"
+    /// because their auth tag was computed against label 0x04 and
+    /// ours against label 0x01.
+    ///
+    /// This test pins that the two key sets are distinct. If a
+    /// future refactor collapses the two paths back to one set of
+    /// labels, this test fails loudly with the wrong key bytes.
+    #[test]
+    fn srtp_and_srtcp_session_keys_differ_by_label() {
+        let master_key = hex::decode("E1F97A0D3E018BE0D64FA32C06DE4139").unwrap();
+        let master_salt = hex::decode("0EC675AD498AFEEBB6960B3AABE6").unwrap();
+        let km = SrtpKeyMaterial::new(master_key, master_salt, SrtpProfile::Aes128CmHmacSha1_80)
+            .unwrap();
+
+        let srtp = km.derive_srtp_session_keys(0, 0).unwrap();
+        let srtcp = km.derive_srtcp_session_keys(0, 0).unwrap();
+
+        assert_ne!(
+            srtp.encryption_key, srtcp.encryption_key,
+            "SRTP and SRTCP encryption keys must differ — they're derived from \
+             the same master with different KDF labels (0x00 vs 0x03)"
+        );
+        assert_ne!(
+            srtp.authentication_key, srtcp.authentication_key,
+            "SRTP and SRTCP auth keys must differ — labels 0x01 vs 0x04. \
+             A peer's auth-tag check fails when both sides use different \
+             label sets, which is the production symptom this test exists to catch."
+        );
+        assert_ne!(
+            srtp.salt, srtcp.salt,
+            "SRTP and SRTCP salts must differ — labels 0x02 vs 0x05"
+        );
     }
 
     /// Test SRTP encryption/decryption round-trip
@@ -1794,7 +1869,7 @@ mod tests {
 
         // Verify key derivation works (this internally calls aes_cm_prf with 32-byte key)
         let derived = key_material
-            .derive_session_keys(0x12345678, 0)
+            .derive_srtp_session_keys(0x12345678, 0)
             .expect("Failed to derive session keys for AES-256-GCM");
 
         // Verify derived key lengths

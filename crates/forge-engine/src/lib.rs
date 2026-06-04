@@ -13,6 +13,7 @@ pub mod media_bridge;
 #[cfg(feature = "ai")]
 pub mod persistence;
 pub mod session;
+pub mod srtp_install;
 
 #[cfg(feature = "ai")]
 pub use ai_integration::{AISession, AISessionConfig, AISessionManager, AISessionState};

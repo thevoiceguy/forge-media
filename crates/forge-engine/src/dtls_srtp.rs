@@ -34,7 +34,7 @@ use forge_rtp::dtls::{DtlsCertificate, DtlsConnection, DtlsContext, DtlsRole, Dt
 use forge_rtp::srtp::{SrtpContext, SrtpKeyMaterial};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 /// First byte of an incoming UDP packet on the RTP port, per
 /// RFC 5764 §5.1.2 demultiplexing rules.
@@ -188,23 +188,22 @@ impl DtlsLeg {
     }
 }
 
-/// Install derived SRTP keys into an existing [`SrtpContext`].
+/// Install DTLS-derived SRTP keys into an existing [`SrtpContext`].
 ///
 /// `local_srtp_key` is used for *outgoing* packets (`set_local_key`),
 /// `remote_srtp_key` for *incoming* (`set_remote_key`). The caller
 /// owns the lifetime of the context.
+///
+/// Thin wrapper around [`crate::srtp_install::install_srtp_keys`],
+/// kept for source-compatibility with the existing DTLS callers
+/// that imported `forge_engine::dtls_srtp::install_keys` directly.
+/// New callers should use the exchange-agnostic helper.
 pub async fn install_keys(
     srtp_ctx: &Arc<Mutex<SrtpContext>>,
     local_srtp_key: SrtpKeyMaterial,
     remote_srtp_key: SrtpKeyMaterial,
 ) {
-    let mut ctx = srtp_ctx.lock().await;
-    ctx.set_local_key(local_srtp_key);
-    ctx.set_remote_key(remote_srtp_key);
-    debug!(
-        "DTLS-SRTP keys installed into SrtpContext (enabled: {})",
-        ctx.is_enabled()
-    );
+    crate::srtp_install::install_srtp_keys(srtp_ctx, local_srtp_key, remote_srtp_key).await
 }
 
 /// Spec-permitted byte range outside DTLS / RTP that the recv loop

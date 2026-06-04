@@ -321,11 +321,26 @@ pub(crate) struct ScheduledPlayoutItem {
     pub source: ScheduledPlayoutSource,
 }
 
+/// Minimum wall-clock silence between scheduled audio for the resuming
+/// frame to count as the start of a new talkspurt (and thus carry the RTP
+/// marker bit). Comfortably above normal playout jitter so a producer that
+/// merely falls a frame behind realtime does not spuriously re-mark, while
+/// still catching any genuine speech gap. See `schedule_audio_playout_for_leg`.
+const TALKSPURT_SILENCE_GAP: Duration = Duration::from_millis(60);
+
 #[derive(Debug, Default)]
 pub(crate) struct ScheduledPlayoutQueue {
     items: VecDeque<ScheduledPlayoutItem>,
     next_due_at: Option<Instant>,
     next_rtp_timestamp: Option<u32>,
+    /// Wall-clock instant the last-scheduled audio frame is due to finish.
+    /// Unlike `next_due_at`, this is **not** cleared when the queue drains
+    /// during normal playout — only updated on audio append and recomputed
+    /// on explicit clear. It lets us tell "audio resuming after silence"
+    /// (new talkspurt → marker bit) apart from "next frame of a stream the
+    /// pump happened to drain between deliveries" (no marker). DTMF
+    /// scheduling does not touch it.
+    audio_stream_end: Option<Instant>,
 }
 
 enum StatefulCodec {
@@ -1700,6 +1715,22 @@ impl MediaSession {
 
         let now = Instant::now();
         let mut queue = self.playout_queue_lock(leg).lock().await;
+
+        // RFC 3551 §4.1: the RTP marker bit flags the first packet of a
+        // talkspurt — audio resuming after a silence gap — not every packet.
+        // Streaming callers hand us one 20 ms frame per call and the playout
+        // pump drains the queue between frames, so "queue is empty" is *not*
+        // a usable signal (it almost always is). Instead compare `now` with
+        // when the previously scheduled audio was due to finish: if real time
+        // has run past it by more than `TALKSPURT_SILENCE_GAP`, the outbound
+        // stream underran (silence elapsed) and this frame opens a new
+        // talkspurt. A `Replace` (barge-in) always opens one too.
+        let starts_talkspurt = mode == crate::media_bridge::PlayoutMode::Replace
+            || match queue.audio_stream_end {
+                None => true,
+                Some(end) => now >= end + TALKSPURT_SILENCE_GAP,
+            };
+
         let mut due_at = queue.next_due_at.unwrap_or(now);
         if due_at < now {
             due_at = now;
@@ -1719,7 +1750,7 @@ impl MediaSession {
             queue.items.push_back(ScheduledPlayoutItem {
                 due_at,
                 playback_id: playback_id.clone(),
-                marker: index == 0,
+                marker: starts_talkspurt && index == 0,
                 timestamp,
                 stream_cursor_after: stream_cursor,
                 kind: ScheduledPlayoutKind::Audio {
@@ -1734,6 +1765,9 @@ impl MediaSession {
 
         queue.next_due_at = Some(due_at);
         queue.next_rtp_timestamp = Some(stream_cursor);
+        // Persist the stream end so the *next* append can tell continuation
+        // from a post-silence resume even after the pump drains the queue.
+        queue.audio_stream_end = Some(due_at);
         Ok(())
     }
 
@@ -1882,9 +1916,15 @@ impl MediaSession {
         if let Some(last) = queue.items.back() {
             queue.next_due_at = Some(last.due_at + Duration::from_millis(20));
             queue.next_rtp_timestamp = Some(last.stream_cursor_after);
+            queue.audio_stream_end = Some(last.due_at + Duration::from_millis(20));
         } else {
             queue.next_due_at = None;
             queue.next_rtp_timestamp = None;
+            // Queue was explicitly cleared (barge-in / codec change): the
+            // committed audio is gone, so the next append starts a fresh
+            // talkspurt. (Natural draining in `take_due_playout_items` does
+            // not call this and deliberately leaves `audio_stream_end` set.)
+            queue.audio_stream_end = None;
         }
     }
 
@@ -3159,6 +3199,124 @@ mod tests {
         // Nothing went to leg B.
         let queue_b = session.playout_queue_lock(ParticipantLabel::B).lock().await;
         assert!(queue_b.items.is_empty());
+    }
+
+    /// Streaming callers hand us one 20 ms frame per call. Back-to-back
+    /// appends with no intervening silence are a single talkspurt, so only
+    /// the very first packet may carry the marker bit. Regression test for
+    /// the marker-on-every-packet bug observed against Twilio (RFC 3551 §4.1).
+    #[tokio::test]
+    async fn test_streamed_frames_mark_only_first_packet() {
+        let session = make_test_session(40500).await;
+        let frame = vec![0i16; 160]; // exactly one 8kHz/20ms frame
+        for _ in 0..4 {
+            session
+                .schedule_audio_playout(
+                    crate::media_bridge::MediaTarget::A,
+                    8000,
+                    &frame,
+                    None,
+                    crate::media_bridge::PlayoutMode::Append,
+                    ScheduledPlayoutSource::MediaBridgeAudio,
+                )
+                .await
+                .unwrap();
+        }
+
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        assert_eq!(queue.items.len(), 4);
+        assert!(
+            queue.items[0].marker,
+            "first frame of a talkspurt is marked"
+        );
+        for (i, item) in queue.items.iter().enumerate().skip(1) {
+            assert!(
+                !item.marker,
+                "frame {i} continues the talkspurt and must not be marked"
+            );
+        }
+    }
+
+    /// After a real silence gap (the producer stops feeding for longer than
+    /// `TALKSPURT_SILENCE_GAP`), the resuming frame opens a new talkspurt and
+    /// must carry the marker bit again — even though the pump has long since
+    /// drained the queue.
+    #[tokio::test]
+    async fn test_talkspurt_resumes_after_silence_gap() {
+        let session = make_test_session(40700).await;
+        let frame = vec![0i16; 160];
+        let sched = |s: &Arc<MediaSession>, f: &[i16]| {
+            let s = Arc::clone(s);
+            let f = f.to_vec();
+            async move {
+                s.schedule_audio_playout(
+                    crate::media_bridge::MediaTarget::A,
+                    8000,
+                    &f,
+                    None,
+                    crate::media_bridge::PlayoutMode::Append,
+                    ScheduledPlayoutSource::MediaBridgeAudio,
+                )
+                .await
+                .unwrap();
+            }
+        };
+
+        sched(&session, &frame).await;
+        // Simulate the playout draining and a silence gap longer than the
+        // talkspurt threshold before the next frame arrives.
+        session
+            .take_due_playout_items(ParticipantLabel::A, Instant::now() + Duration::from_secs(1))
+            .await;
+        tokio::time::sleep(TALKSPURT_SILENCE_GAP + Duration::from_millis(40)).await;
+        sched(&session, &frame).await;
+
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        assert_eq!(queue.items.len(), 1, "first frame already drained");
+        assert!(
+            queue.items[0].marker,
+            "frame resuming after a silence gap starts a new talkspurt"
+        );
+    }
+
+    /// A `Replace` (barge-in) always opens a new talkspurt, even when audio
+    /// is still queued and no wall-clock gap has elapsed.
+    #[tokio::test]
+    async fn test_replace_marks_new_talkspurt() {
+        let session = make_test_session(40900).await;
+        let frame = vec![0i16; 160];
+        // Existing playback under a different id — stays queued so no drain
+        // and no gap; `audio_stream_end` remains in the future.
+        session
+            .schedule_audio_playout(
+                crate::media_bridge::MediaTarget::A,
+                8000,
+                &frame,
+                Some("greeting".to_string()),
+                crate::media_bridge::PlayoutMode::Append,
+                ScheduledPlayoutSource::AI,
+            )
+            .await
+            .unwrap();
+        session
+            .schedule_audio_playout(
+                crate::media_bridge::MediaTarget::A,
+                8000,
+                &frame,
+                Some("barge-in".to_string()),
+                crate::media_bridge::PlayoutMode::Replace,
+                ScheduledPlayoutSource::AI,
+            )
+            .await
+            .unwrap();
+
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        let barge = queue
+            .items
+            .iter()
+            .find(|i| i.playback_id.as_deref() == Some("barge-in"))
+            .expect("barge-in frame queued");
+        assert!(barge.marker, "Replace opens a new talkspurt → marker set");
     }
 
     #[tokio::test]

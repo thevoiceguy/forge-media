@@ -8,6 +8,13 @@ use metrics::{counter, histogram};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Minimum interval between RTCP Sender Reports we originate for a
+/// generated stream (RFC 3550 §6.2 RECOMMENDED minimum). Reports gate the
+/// RTT computation in [`forge_rtp::RttTracker`]; 5 s keeps RTCP a small
+/// fraction of session bandwidth while still sampling RTT several times a
+/// minute. See [`ForwardingEngine::maybe_emit_sender_reports`].
+const SR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// RTP packet forwarding engine
 pub struct ForwardingEngine;
 
@@ -257,6 +264,13 @@ impl ForwardingEngine {
                     )
                     .await;
                     Self::drain_scheduled_playout(
+                        &session,
+                        &sockets,
+                        &participant_a,
+                        &participant_b,
+                    )
+                    .await;
+                    Self::maybe_emit_sender_reports(
                         &session,
                         &sockets,
                         &participant_a,
@@ -734,6 +748,115 @@ impl ForwardingEngine {
         }
     }
 
+    /// Originate RTCP Sender Reports for the generated audio streams.
+    ///
+    /// siphon-ai's audio toward the carrier is a *generated* RTP stream
+    /// (forge's own SSRC), so the peer's Receiver Reports can only carry a
+    /// usable `last_sr` / `delay_since_last_sr` — and thus let us compute
+    /// RTT (RFC 3550 §A.7) — if we first send SRs it can echo back. Called
+    /// from the 20 ms housekeeping tick but rate-limited to one SR per
+    /// [`SR_INTERVAL`] per leg: §6.2 keeps RTCP a small fraction of session
+    /// bandwidth, and 5 s is the RECOMMENDED minimum interval. We only emit
+    /// once a leg has actually generated RTP and has a known remote address.
+    async fn maybe_emit_sender_reports(
+        session: &Arc<MediaSession>,
+        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+    ) {
+        let now = std::time::Instant::now();
+
+        for leg in [ParticipantLabel::A, ParticipantLabel::B] {
+            let remote_rtp = match leg {
+                ParticipantLabel::A => participant_a.read().await.remote_addr,
+                ParticipantLabel::B => participant_b.read().await.remote_addr,
+            };
+            let Some(remote_rtp) = remote_rtp else {
+                continue;
+            };
+
+            // Build the SR under the state lock: gate on cadence + having
+            // sent audio, snapshot the sender stats, and record the SR with
+            // the RttTracker so a later RR can resolve to an RTT sample.
+            let sr = {
+                let state_arc = session.generated_rtp_state(leg);
+                let mut state = state_arc.lock().await;
+                if state.packets_sent == 0 {
+                    continue; // nothing generated yet → nothing to report on
+                }
+                let due = state
+                    .last_sr_at
+                    .map(|t| now.duration_since(t) >= SR_INTERVAL)
+                    .unwrap_or(true);
+                if !due {
+                    continue;
+                }
+
+                let ntp = forge_rtp::rtcp::ntp::now();
+                let mut sr = forge_rtp::rtcp::SenderReport::new(state.ssrc);
+                sr.ntp_timestamp_msw = (ntp >> 32) as u32;
+                sr.ntp_timestamp_lsw = (ntp & 0xFFFF_FFFF) as u32;
+                sr.rtp_timestamp = state.next_timestamp;
+                sr.sender_packet_count = state.packets_sent;
+                sr.sender_octet_count = state.octets_sent;
+
+                state.rtt.record_outgoing_sr(ntp);
+                state.last_sr_at = Some(now);
+                sr
+            };
+
+            // Frame with the 4-byte RTCP common header (PT=SR, RC=0 — no
+            // reception blocks; we're a terminator reporting on our own
+            // generated stream).
+            let payload = sr.to_bytes();
+            let header = forge_rtp::rtcp::RtcpHeader {
+                version: 2,
+                padding: false,
+                count: 0,
+                packet_type: forge_rtp::rtcp::RtcpPacketType::SR,
+                length: (((4 + payload.len()) / 4) - 1) as u16,
+            };
+            let mut packet = header.to_bytes();
+            packet.extend_from_slice(&payload);
+
+            // SRTCP-protect (passthrough when no keys are installed) and
+            // send to the leg's RTCP address (RTP port + 1).
+            let srtp_ctx = match leg {
+                ParticipantLabel::A => session.srtp_a().clone(),
+                ParticipantLabel::B => session.srtp_b().clone(),
+            };
+            let send_data = {
+                let mut ctx = srtp_ctx.lock().await;
+                match ctx.protect_rtcp(&packet) {
+                    Ok(protected) => protected,
+                    Err(e) => {
+                        tracing::error!(
+                            "SRTCP protect of generated SR failed for session {}: {}",
+                            session.call_id().0,
+                            e
+                        );
+                        counter!("forge_srtcp_protect_errors_total", 1);
+                        continue;
+                    }
+                }
+            };
+
+            let rtcp_addr =
+                std::net::SocketAddr::new(remote_rtp.ip(), remote_rtp.port().wrapping_add(1));
+            if let Err(e) = sockets.send_rtcp_to(&send_data, rtcp_addr).await {
+                tracing::warn!(
+                    "Failed to send generated SR for session {} leg {}: {}",
+                    session.call_id().0,
+                    leg.as_str(),
+                    e
+                );
+            } else {
+                counter!("forge_rtcp_sender_reports_sent_total", 1);
+                counter!("forge_rtcp_packets_sent_total", 1);
+            }
+        }
+    }
+
     async fn determine_packet_sides(
         session: &Arc<MediaSession>,
         participant_a: &Arc<RwLock<Participant>>,
@@ -976,6 +1099,11 @@ impl ForwardingEngine {
             let ssrc = state.ssrc;
             state.next_sequence = state.next_sequence.wrapping_add(1);
             state.next_timestamp = stream_cursor_after;
+            // Sender stats for the periodic SR (RFC 3550 §6.4.1). Octet
+            // count is payload only, snapshotted before `payload` is moved
+            // into the RTP packet below.
+            state.packets_sent = state.packets_sent.wrapping_add(1);
+            state.octets_sent = state.octets_sent.wrapping_add(payload.len() as u32);
             (sequence_number, ssrc)
         };
 
@@ -1538,11 +1666,35 @@ impl ForwardingEngine {
         let call_id = session.call_id();
         let clock_rate = participant_a.read().await.codec_config.clock_rate;
         let bus = session.event_bus().cloned();
+        // The carrier's RR reports on the stream we *generate* toward it,
+        // which lives on leg A in siphon-ai's terminator model (matching
+        // this function's existing leg-A assumption).
+        let generated = session.generated_rtp_state(ParticipantLabel::A);
         for block in blocks {
             Self::record_report_block_metrics(block);
             Self::emit_qos_report(sockets, source_addr, &call_id.0, block);
+            // RTT (RFC 3550 §A.7): only when the block reports on our
+            // generated SSRC and carries the echo of an SR we sent. A
+            // non-matching SSRC or `last_sr == 0` yields `None`.
+            let rtt_ms = {
+                let mut state = generated.lock().await;
+                if block.ssrc == state.ssrc {
+                    state.rtt.observe_incoming_rr(
+                        block.last_sr,
+                        block.delay_since_last_sr,
+                        forge_rtp::rtcp::ntp::now(),
+                    )
+                } else {
+                    None
+                }
+            };
             if let Some(bus) = &bus {
-                let _ = bus.publish(Self::rtcp_report_event(call_id.clone(), block, clock_rate));
+                let _ = bus.publish(Self::rtcp_report_event(
+                    call_id.clone(),
+                    block,
+                    clock_rate,
+                    rtt_ms,
+                ));
             }
         }
     }
@@ -1550,13 +1702,14 @@ impl ForwardingEngine {
     /// Translate one RTCP reception-report block into a
     /// [`ForgeEvent::RtcpReportReceived`] payload, converting the RR's
     /// timestamp-unit jitter into milliseconds using the supplied RTP
-    /// clock rate. `rtt_ms` is `None` until forge-engine originates its
-    /// own SRs (siphon-ai DEV_PLAN_0.3.0.md §9 decision 10 — 0.3.1
-    /// follow-up).
+    /// clock rate. `rtt_ms` is the RTT sample resolved from this block's
+    /// `last_sr` / `delay_since_last_sr` against an SR we originated
+    /// (RFC 3550 §A.7), or `None` when no matching SR is on record.
     fn rtcp_report_event(
         call_id: forge_core::CallId,
         block: &forge_rtp::rtcp::ReceptionReportBlock,
         clock_rate: u32,
+        rtt_ms: Option<f32>,
     ) -> ForgeEvent {
         // `block.jitter` is in RTP timestamp units (1 / clock_rate
         // seconds each). Convert to ms; treat a degenerate
@@ -1569,7 +1722,7 @@ impl ForwardingEngine {
             call_id,
             jitter_ms,
             packet_loss_ratio,
-            rtt_ms: None,
+            rtt_ms,
             timestamp: chrono::Utc::now(),
         }
     }
@@ -1846,7 +1999,7 @@ mod tests {
         let call_id = CallId::generate();
         // 80 ticks @ 8 kHz = 10 ms.
         let block = rr_block(80, 0);
-        let event = ForwardingEngine::rtcp_report_event(call_id.clone(), &block, 8000);
+        let event = ForwardingEngine::rtcp_report_event(call_id.clone(), &block, 8000, None);
         match event {
             ForgeEvent::RtcpReportReceived {
                 jitter_ms,
@@ -1865,10 +2018,23 @@ mod tests {
     }
 
     #[test]
+    fn rtcp_report_event_propagates_rtt() {
+        let block = rr_block(0, 0);
+        let event =
+            ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 8000, Some(42.5));
+        match event {
+            ForgeEvent::RtcpReportReceived { rtt_ms, .. } => {
+                assert_eq!(rtt_ms, Some(42.5));
+            }
+            other => panic!("expected RtcpReportReceived, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn rtcp_report_event_converts_jitter_at_48khz_opus() {
         // 480 ticks @ 48 kHz = 10 ms.
         let block = rr_block(480, 0);
-        let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 48000);
+        let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 48000, None);
         match event {
             ForgeEvent::RtcpReportReceived { jitter_ms, .. } => {
                 assert!((jitter_ms - 10.0).abs() < 1e-3, "jitter_ms = {jitter_ms}");
@@ -1881,7 +2047,7 @@ mod tests {
     fn rtcp_report_event_fraction_lost_to_ratio() {
         // fraction_lost is 8-bit fixed-point: 64 / 256 = 0.25 (25% loss).
         let block = rr_block(0, 64);
-        let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 8000);
+        let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 8000, None);
         match event {
             ForgeEvent::RtcpReportReceived {
                 packet_loss_ratio, ..
@@ -1897,7 +2063,7 @@ mod tests {
         // Degenerate input — must not panic or produce Inf; fall back to
         // the SIP default 8 kHz so the value is at least interpretable.
         let block = rr_block(80, 0);
-        let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 0);
+        let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 0, None);
         match event {
             ForgeEvent::RtcpReportReceived { jitter_ms, .. } => {
                 assert!(jitter_ms.is_finite());
@@ -1906,5 +2072,156 @@ mod tests {
             }
             other => panic!("expected RtcpReportReceived, got {other:?}"),
         }
+    }
+
+    async fn make_rtcp_test_session(
+        start_port: u16,
+        bus: Option<Arc<forge_core::EventBus>>,
+    ) -> Arc<MediaSession> {
+        let config = PortPoolConfig::new(start_port, start_port + 100).unwrap();
+        let port_pool = Arc::new(PortPool::new(config));
+        let session_config = MediaSessionConfig {
+            socket_config: forge_rtp::RtpSocketConfig {
+                bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Arc::new(
+            MediaSession::new(
+                CallId::generate(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                &port_pool,
+                session_config,
+                bus,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    /// An incoming RR that echoes (via `last_sr`) an SR we originated for
+    /// our generated stream resolves to an RTT on the published event.
+    #[tokio::test]
+    async fn process_report_blocks_resolves_rtt_from_our_sr() {
+        let bus = Arc::new(forge_core::EventBus::new());
+        let session = make_rtcp_test_session(41200, Some(bus.clone())).await;
+
+        // Pretend we generated audio and emitted an SR carrying `ntp`.
+        let ntp = forge_rtp::rtcp::ntp::now();
+        let our_ssrc = {
+            let st = session.generated_rtp_state(ParticipantLabel::A);
+            let mut st = st.lock().await;
+            st.rtt.record_outgoing_sr(ntp);
+            st.ssrc
+        };
+
+        // Carrier RR echoing our SR: last_sr = middle-32 of `ntp`, no delay.
+        let mut block = forge_rtp::rtcp::ReceptionReportBlock::new(our_ssrc);
+        block.last_sr = forge_rtp::ntp_middle32(ntp);
+        block.delay_since_last_sr = 0;
+
+        let mut rx = bus.subscribe();
+        let sockets = session.sockets().clone();
+        let participant_a = session.participant_a().clone();
+        ForwardingEngine::process_report_blocks(
+            &session,
+            &sockets,
+            &participant_a,
+            "127.0.0.1:10000".parse().unwrap(),
+            &[block],
+        )
+        .await;
+
+        match rx
+            .try_recv()
+            .expect("an RtcpReportReceived event was published")
+        {
+            ForgeEvent::RtcpReportReceived { rtt_ms, .. } => {
+                let rtt = rtt_ms.expect("RTT resolved from our recorded SR");
+                // Real elapsed since record is tiny but non-negative.
+                assert!((0.0..5000.0).contains(&rtt), "rtt_ms = {rtt}");
+            }
+            other => panic!("expected RtcpReportReceived, got {other:?}"),
+        }
+    }
+
+    /// An RR reporting on a foreign SSRC (not our generated stream) never
+    /// yields an RTT, even with a non-zero `last_sr`.
+    #[tokio::test]
+    async fn process_report_blocks_no_rtt_for_foreign_ssrc() {
+        let bus = Arc::new(forge_core::EventBus::new());
+        let session = make_rtcp_test_session(41400, Some(bus.clone())).await;
+
+        let our_ssrc = {
+            let st = session.generated_rtp_state(ParticipantLabel::A);
+            let st = st.lock().await;
+            st.ssrc
+        };
+        let mut block = forge_rtp::rtcp::ReceptionReportBlock::new(our_ssrc.wrapping_add(1));
+        block.last_sr = 0x1234_5678;
+        block.delay_since_last_sr = 0;
+
+        let mut rx = bus.subscribe();
+        let sockets = session.sockets().clone();
+        let participant_a = session.participant_a().clone();
+        ForwardingEngine::process_report_blocks(
+            &session,
+            &sockets,
+            &participant_a,
+            "127.0.0.1:10000".parse().unwrap(),
+            &[block],
+        )
+        .await;
+
+        match rx.try_recv().expect("event published") {
+            ForgeEvent::RtcpReportReceived { rtt_ms, .. } => assert!(rtt_ms.is_none()),
+            other => panic!("expected RtcpReportReceived, got {other:?}"),
+        }
+    }
+
+    /// The SR emitter only fires once a leg has generated audio AND has a
+    /// known remote address; when it does, it stamps the cadence clock.
+    #[tokio::test]
+    async fn sender_report_gated_on_audio_and_remote_addr() {
+        let session = make_rtcp_test_session(41600, None).await;
+        let sockets = session.sockets().clone();
+        let pa = session.participant_a().clone();
+        let pb = session.participant_b().clone();
+
+        // No remote addr, no audio → nothing emitted.
+        ForwardingEngine::maybe_emit_sender_reports(&session, &sockets, &pa, &pb).await;
+        assert!(
+            session
+                .generated_rtp_state(ParticipantLabel::A)
+                .lock()
+                .await
+                .last_sr_at
+                .is_none(),
+            "no SR before any audio / remote addr"
+        );
+
+        // Remote addr learned + audio generated → SR emitted.
+        pa.write().await.remote_addr = Some("127.0.0.1:41700".parse().unwrap());
+        {
+            let st = session.generated_rtp_state(ParticipantLabel::A);
+            let mut st = st.lock().await;
+            st.packets_sent = 50;
+            st.octets_sent = 8_000;
+        }
+        ForwardingEngine::maybe_emit_sender_reports(&session, &sockets, &pa, &pb).await;
+        assert!(
+            session
+                .generated_rtp_state(ParticipantLabel::A)
+                .lock()
+                .await
+                .last_sr_at
+                .is_some(),
+            "SR emitted once audio + remote addr are present"
+        );
     }
 }

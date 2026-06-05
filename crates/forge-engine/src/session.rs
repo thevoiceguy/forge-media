@@ -267,6 +267,19 @@ pub(crate) struct GeneratedRtpState {
     pub ssrc: u32,
     pub next_sequence: u16,
     pub next_timestamp: u32,
+    /// RTP packets sent on this generated stream — the SR sender packet count.
+    pub packets_sent: u32,
+    /// RTP *payload* octets sent — the SR sender octet count (RFC 3550
+    /// §6.4.1: payload only, excludes header/padding).
+    pub octets_sent: u32,
+    /// Matches SRs we originate against the LSR/DLSR echoed in incoming
+    /// RRs to compute RTT (RFC 3550 §A.7). Without our own SRs the peer's
+    /// RR carries `last_sr = 0` and no RTT is computable — which is why
+    /// `rtcp_rtt_ms` was `null` before this stream originated SRs.
+    pub rtt: forge_rtp::RttTracker,
+    /// Wall-clock of the last SR we emitted for this stream, for the
+    /// RTCP send cadence (RFC 3550 §6.2). `None` until the first SR.
+    pub last_sr_at: Option<Instant>,
 }
 
 impl Default for GeneratedRtpState {
@@ -275,6 +288,12 @@ impl Default for GeneratedRtpState {
             ssrc: rand::random(),
             next_sequence: rand::random(),
             next_timestamp: rand::random(),
+            packets_sent: 0,
+            octets_sent: 0,
+            // Window only bounds the tracker's sample retention; we emit
+            // the per-RR sample directly, so a generous window is fine.
+            rtt: forge_rtp::RttTracker::new(Duration::from_secs(30)),
+            last_sr_at: None,
         }
     }
 }

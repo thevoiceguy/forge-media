@@ -42,6 +42,30 @@ pub async fn install_srtp_keys(
     );
 }
 
+/// Re-key a *running* [`SrtpContext`] with fresh master keys, preserving
+/// rollover counters / replay state so the media stream continues without a
+/// gap ([`SrtpContext::rekey`]). Use this on a mid-call key rotation — e.g.
+/// an SDES re-INVITE (RFC 4568 §6.1) — where [`install_srtp_keys`] (which is
+/// for *initial* setup) would read as the wrong intent.
+///
+/// Atomic against the per-packet send/recv path: the lock is held only while
+/// the two key fields are swapped, between packet-processing steps. The
+/// caller owns coordinating the SDP exchange that agreed the new keys.
+pub async fn rekey_srtp_keys(
+    srtp_ctx: &Arc<Mutex<SrtpContext>>,
+    local_srtp_key: SrtpKeyMaterial,
+    remote_srtp_key: SrtpKeyMaterial,
+) {
+    let mut ctx = srtp_ctx.lock().await;
+    let index = ctx.local_packet_index();
+    ctx.rekey(local_srtp_key, remote_srtp_key);
+    debug!(
+        "SRTP context re-keyed at outbound packet index {} (enabled: {})",
+        index,
+        ctx.is_enabled()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +95,28 @@ mod tests {
         .expect("remote key");
 
         install_srtp_keys(&ctx, local, remote).await;
+        assert!(ctx.lock().await.is_enabled());
+    }
+
+    /// `rekey_srtp_keys` swaps the master keys on a live context (the
+    /// crypto-continuity guarantee is covered by `forge_rtp::srtp`'s
+    /// `rekey_preserves_stream_continuity`). Here we just confirm the
+    /// engine-level wrapper locks, swaps, and leaves the context enabled.
+    #[tokio::test]
+    async fn rekey_swaps_keys_on_live_context() {
+        let profile = SrtpProfile::Aes128CmHmacSha1_80;
+        let key = |b: u8| {
+            SrtpKeyMaterial::new(
+                vec![b; profile.master_key_len()],
+                vec![b; profile.master_salt_len()],
+                profile,
+            )
+            .unwrap()
+        };
+        let ctx = Arc::new(Mutex::new(SrtpContext::with_keys(key(1), key(2))));
+        assert!(ctx.lock().await.is_enabled());
+
+        rekey_srtp_keys(&ctx, key(3), key(4)).await;
         assert!(ctx.lock().await.is_enabled());
     }
 }

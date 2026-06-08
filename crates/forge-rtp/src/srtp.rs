@@ -332,6 +332,13 @@ impl RocTracker {
         ((self.roc as u64) << 16) | (seq as u64)
     }
 
+    /// The current extended index (ROC ‖ highest seq) — the 48-bit index
+    /// of the most recent packet seen/sent on this SSRC. `0` before the
+    /// first packet.
+    fn current_index(&self) -> u64 {
+        ((self.roc as u64) << 16) | (self.highest_seq as u64)
+    }
+
     /// Update ROC based on received sequence number
     ///
     /// Implements RFC 3711 Section 3.3.1 index determination
@@ -443,6 +450,44 @@ impl SrtpContext {
     /// Set remote (inbound) key material
     pub fn set_remote_key(&mut self, key: SrtpKeyMaterial) {
         self.remote_key = Some(key);
+    }
+
+    /// Re-key this context mid-stream, replacing both master keys while
+    /// **preserving** the rollover counters, replay windows, and SRTCP
+    /// indices. Use this when a running call rotates its SRTP master keys —
+    /// e.g. an SDES re-INVITE (RFC 4568 §6.1) carrying fresh `a=crypto:`
+    /// key material.
+    ///
+    /// ## Why the index state is preserved (and must be)
+    ///
+    /// Session keys are derived per-packet from the *current* master key
+    /// plus the 48-bit SRTP packet index (ROC ‖ SEQ) — see
+    /// [`protect_rtp`](Self::protect_rtp) / [`unprotect_rtp`](Self::unprotect_rtp).
+    /// Swapping the master keys therefore takes effect on the very next
+    /// packet, while the index keeps climbing uninterrupted. Both peers
+    /// re-key the same way and stay in lock-step, so the media continues
+    /// with no gap and no dropped packet (RFC 3711 §3.3.1, §9). Resetting
+    /// the ROC here would desynchronise our index from the peer's and break
+    /// the stream — so it is deliberately left untouched. (A genuinely new
+    /// stream — a new SSRC — is a new context, not a re-key.)
+    ///
+    /// This is the **SDES** re-key path; coordinating the SDP offer/answer
+    /// that agrees the new keys is the caller's responsibility. The
+    /// DTLS-SRTP re-key path (renegotiation + re-export) is tracked
+    /// separately.
+    pub fn rekey(&mut self, local_key: SrtpKeyMaterial, remote_key: SrtpKeyMaterial) {
+        self.local_key = Some(local_key);
+        self.remote_key = Some(remote_key);
+        // ROC trackers, replay windows, and SRTCP indices intentionally
+        // preserved — see the doc comment.
+    }
+
+    /// The current outbound SRTP packet index (ROC ‖ highest sent SEQ).
+    /// Lets a caller enforce the RFC 3711 §9.2 master-key lifetime
+    /// (a master key MUST NOT protect more than 2^48 SRTP packets) and
+    /// decide when to [`rekey`](Self::rekey). `0` before the first packet.
+    pub fn local_packet_index(&self) -> u64 {
+        self.local_roc.current_index()
     }
 
     /// Encrypt an RTP packet to SRTP
@@ -1705,6 +1750,66 @@ mod tests {
 
         // Should match original
         assert_eq!(decrypted, rtp_packet);
+    }
+
+    /// A mid-stream re-key ([`SrtpContext::rekey`]) rotates the master keys
+    /// without breaking the stream: packets keep flowing under the new keys,
+    /// the SRTP index continues uninterrupted, and — proving the keys really
+    /// rotated — a packet protected under the old key no longer verifies
+    /// under the new one. This is the SDES re-key (RFC 4568 §6.1) guarantee.
+    #[test]
+    fn rekey_preserves_stream_continuity() {
+        let profile = SrtpProfile::Aes128CmHmacSha1_80;
+        let mk = |b: u8| SrtpKeyMaterial::new(vec![b; 16], vec![b ^ 0xFF; 14], profile).unwrap();
+        let ssrc = 0xDECAFBADu32;
+
+        // Loopback pair, A → B: A.local == B.remote and vice-versa.
+        let (k1, k2) = (mk(0x11), mk(0x22));
+        let mut a = SrtpContext::with_keys(k1.clone(), k2.clone());
+        let mut b = SrtpContext::with_keys(k2.clone(), k1.clone());
+
+        // Stream A → B before the re-key.
+        for seq in 1000u16..1005 {
+            let pkt = create_test_rtp_packet(seq, seq as u32 * 160, ssrc);
+            let prot = a.protect_rtp(&pkt).unwrap();
+            assert_eq!(b.unprotect_rtp(&prot).unwrap(), pkt, "pre-rekey seq {seq}");
+        }
+        assert_eq!(
+            a.local_packet_index(),
+            1004,
+            "index tracks the last protected seq"
+        );
+
+        // A packet protected under the OLD outbound key, held back for the
+        // negative check after the re-key.
+        let stale = create_test_rtp_packet(1005, 1005 * 160, ssrc);
+        let stale_old = a.protect_rtp(&stale).unwrap();
+
+        // Re-key both ends with fresh master keys (the SDES re-INVITE moment).
+        let (k3, k4) = (mk(0x33), mk(0x44));
+        a.rekey(k3.clone(), k4.clone());
+        b.rekey(k4.clone(), k3.clone());
+
+        // ROC/seq state survived the swap — the index kept climbing.
+        assert_eq!(
+            a.local_packet_index(),
+            1005,
+            "outbound index continues across re-key"
+        );
+
+        // The old-key packet must NOT verify under the new key (auth fails) —
+        // confirming the rotation took effect, not just that ROC lined up.
+        assert!(
+            b.unprotect_rtp(&stale_old).is_err(),
+            "old-key packet must fail under the new key"
+        );
+
+        // Stream continues uninterrupted under the new keys.
+        for seq in 1006u16..1011 {
+            let pkt = create_test_rtp_packet(seq, seq as u32 * 160, ssrc);
+            let prot = a.protect_rtp(&pkt).unwrap();
+            assert_eq!(b.unprotect_rtp(&prot).unwrap(), pkt, "post-rekey seq {seq}");
+        }
     }
 
     /// Cross-check AES-CM SRTP IV construction against RFC 3711 §4.1.1

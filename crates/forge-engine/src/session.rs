@@ -375,7 +375,14 @@ impl StatefulCodec {
             #[cfg(feature = "opus")]
             forge_core::AudioCodec::Opus => {
                 let opus_config = forge_codecs::opus::OpusConfig {
-                    sample_rate: 48000,
+                    // Run the codec at 16 kHz mono (matches
+                    // `codec_audio_sample_rate(Opus)`): the libopus decoder
+                    // resamples the 48 kHz-clocked stream to 16 kHz and
+                    // downmixes to mono on its own, and the encoder accepts
+                    // 16 kHz mono PCM (RFC 7587 — the RTP clock stays 48 kHz
+                    // regardless of the encoder's input rate). Keeps the
+                    // bridge on the WS-contract 16 kHz path.
+                    sample_rate: 16000,
                     channels: 1,
                     application: forge_codecs::opus::OpusApplication::Voip,
                     bitrate: 24000,
@@ -1572,6 +1579,13 @@ impl MediaSession {
     ) -> u32 {
         match codec {
             forge_core::AudioCodec::G722 => 16000,
+            // Opus negotiates a 48 kHz RTP clock (`opus/48000/2`) but we run
+            // the codec at 16 kHz: libopus decodes any encoded stream to the
+            // decoder's configured rate (and downmixes to mono) internally,
+            // so the bridge sees 16 kHz mono PCM. The 48 kHz RTP clock is
+            // still used for timestamp stepping (see `clock_rate / 50`),
+            // exactly the G.722 "wire clock != PCM rate" split.
+            forge_core::AudioCodec::Opus => 16000,
             _ => negotiated_clock_rate,
         }
     }
@@ -2862,6 +2876,41 @@ mod tests {
     use super::*;
     use forge_rtp::PortPoolConfig;
     use std::net::{SocketAddr, UdpSocket};
+
+    #[test]
+    fn opus_bridge_rate_is_16k_with_48k_rtp_clock() {
+        // Opus negotiates a 48 kHz RTP clock but runs on the bridge at
+        // 16 kHz (libopus does the 48<->16 conversion + stereo->mono
+        // internally), exactly the G.722 wire-clock-vs-PCM-rate split.
+        assert_eq!(
+            MediaSession::codec_audio_sample_rate(forge_core::AudioCodec::Opus, 48000),
+            16000,
+            "Opus bridge PCM rate must be 16 kHz, not the 48 kHz RTP clock"
+        );
+        // 16 kHz / 50 = 320 samples per 20 ms bridge frame.
+        assert_eq!(
+            MediaSession::frame_samples_for_codec(forge_core::AudioCodec::Opus, 16000),
+            Some(320)
+        );
+        // RTP timestamps still step at the 48 kHz clock (960 per 20 ms).
+        assert_eq!(48000u32 / 50, 960);
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn opus_codec_is_built_at_16k_mono() {
+        // The engine builds the Opus codec at 16 kHz mono (so libopus does
+        // the 48<->16 conversion + stereo->mono); 20 ms => 320 samples.
+        let StatefulCodec::Opus(codec) = StatefulCodec::new(forge_core::AudioCodec::Opus)
+            .expect("opus codec builds")
+            .expect("opus is Some")
+        else {
+            panic!("expected an Opus codec");
+        };
+        assert_eq!(codec.config().sample_rate, 16000);
+        assert_eq!(codec.config().channels, 1);
+        assert_eq!(codec.config().frame_size(), 320);
+    }
 
     #[tokio::test]
     async fn test_session_creation() {

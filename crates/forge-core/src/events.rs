@@ -405,7 +405,13 @@ impl EventBus {
                 Ok(count)
             }
             Err(e) => {
-                tracing::warn!("Failed to publish event: no active subscribers");
+                // A broadcast bus with zero live subscribers is a normal state, not an
+                // error worth a warning. It happens routinely at call-lifecycle edges:
+                // events published during session setup (before any consumer has called
+                // `subscribe()`) and during teardown (after the last receiver is dropped).
+                // At `warn` this fires on essentially every call and drowns out real
+                // warnings, so keep it at `debug`. Callers that care still get the `Err`.
+                tracing::debug!("event published with no active subscribers; dropped");
                 Err(e)
             }
         }

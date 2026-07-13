@@ -2631,6 +2631,9 @@ impl MediaSession {
                 bytes_sent: state.participant_a.stats.bytes_sent,
                 packets_lost: state.participant_a.stats.packets_lost,
                 last_packet_at: None, // Will be updated when packets arrive
+                // Receive-side measurement state is node-local (it anchors
+                // on monotonic Instants) — starts fresh after failover.
+                rx_stream: RxStreamStats::default(),
             },
             latch_allowed_ips: None,
         };
@@ -2651,6 +2654,7 @@ impl MediaSession {
                 bytes_sent: state.participant_b.stats.bytes_sent,
                 packets_lost: state.participant_b.stats.packets_lost,
                 last_packet_at: None,
+                rx_stream: RxStreamStats::default(),
             },
             latch_allowed_ips: None,
         };

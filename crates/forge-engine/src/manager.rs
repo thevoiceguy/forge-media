@@ -372,7 +372,7 @@ impl SessionManager {
         );
 
         // Update metrics
-        gauge!("forge_active_sessions", session_count as f64);
+        gauge!("forge_active_sessions").set(session_count as f64);
 
         Ok(session)
     }
@@ -455,7 +455,7 @@ impl SessionManager {
         );
 
         // Update metrics
-        gauge!("forge_active_sessions", session_count as f64);
+        gauge!("forge_active_sessions").set(session_count as f64);
 
         Ok(session)
     }
@@ -540,7 +540,7 @@ impl SessionManager {
         );
 
         // Update metrics
-        gauge!("forge_active_sessions", session_count as f64);
+        gauge!("forge_active_sessions").set(session_count as f64);
 
         Ok(())
     }
@@ -724,7 +724,7 @@ impl SessionManager {
         );
 
         // Update metrics
-        gauge!("forge_active_sessions", session_count as f64);
+        gauge!("forge_active_sessions").set(session_count as f64);
 
         Ok(recovered)
     }

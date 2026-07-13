@@ -341,7 +341,8 @@ async fn create_session(
 
         // Validate that local_address is provided
         let local_addr = request.local_address.as_ref().ok_or_else(|| {
-            counter!("sdp_negotiation_failures_total", "reason" => "missing_local_address").increment(1);
+            counter!("sdp_negotiation_failures_total", "reason" => "missing_local_address")
+                .increment(1);
             ApiError::InvalidRequest(
                 "local_address is required when sdp_offer is provided".to_string(),
             )
@@ -354,7 +355,8 @@ async fn create_session(
             "audio-opus" => forge_sdp::profiles::SdpProfile::audio_opus(),
             "audio-all" => forge_sdp::profiles::SdpProfile::audio_all(),
             _ => {
-                counter!("sdp_negotiation_failures_total", "reason" => "invalid_profile").increment(1);
+                counter!("sdp_negotiation_failures_total", "reason" => "invalid_profile")
+                    .increment(1);
                 return Err(ApiError::InvalidRequest(format!(
                     "Unknown SDP profile: {}. Valid values: audio-only, audio-opus, audio-all",
                     profile_name
@@ -375,23 +377,23 @@ async fn create_session(
         let local_caps = profile.with_local_addr(local_addr, 10000);
 
         // Negotiate answer
-        let answer = forge_sdp::SessionDescription::negotiate_answer(
-            &offer,
-            &local_caps,
-            local_addr,
-        )
-        .map_err(|e| match e {
-            forge_sdp::SdpError::NoCommonCodec => {
-                counter!("sdp_negotiation_failures_total", "reason" => "no_common_codec").increment(1);
-                ApiError::NotAcceptable(
-                    "No common codec found between offer and local capabilities".to_string(),
-                )
-            }
-            _ => {
-                counter!("sdp_negotiation_failures_total", "reason" => "negotiation_error").increment(1);
-                ApiError::InvalidRequest(format!("SDP negotiation failed: {}", e))
-            }
-        })?;
+        let answer =
+            forge_sdp::SessionDescription::negotiate_answer(&offer, &local_caps, local_addr)
+                .map_err(|e| match e {
+                    forge_sdp::SdpError::NoCommonCodec => {
+                        counter!("sdp_negotiation_failures_total", "reason" => "no_common_codec")
+                            .increment(1);
+                        ApiError::NotAcceptable(
+                            "No common codec found between offer and local capabilities"
+                                .to_string(),
+                        )
+                    }
+                    _ => {
+                        counter!("sdp_negotiation_failures_total", "reason" => "negotiation_error")
+                            .increment(1);
+                        ApiError::InvalidRequest(format!("SDP negotiation failed: {}", e))
+                    }
+                })?;
 
         // Extract negotiated codecs and build ParticipantCodecConfig
         let mut negotiated_codecs = std::collections::HashMap::new();

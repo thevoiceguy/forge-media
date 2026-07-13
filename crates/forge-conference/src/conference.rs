@@ -313,8 +313,10 @@ impl ConferenceRoom {
             "Admin-admitted participant {} into room {}",
             participant_id, self.id
         );
-        counter!("forge_conference_participants_joined_total", "room_id" => self.id.clone()).increment(1);
-        gauge!("forge_conference_participants_active", "room_id" => self.id.clone()).set(self.mixer.participant_count() as f64);
+        counter!("forge_conference_participants_joined_total", "room_id" => self.id.clone())
+            .increment(1);
+        gauge!("forge_conference_participants_active", "room_id" => self.id.clone())
+            .set(self.mixer.participant_count() as f64);
 
         Ok(())
     }
@@ -342,7 +344,8 @@ impl ConferenceRoom {
         }
 
         if admitted > 0 {
-            gauge!("forge_conference_participants_active", "room_id" => self.id.clone()).set(self.mixer.participant_count() as f64);
+            gauge!("forge_conference_participants_active", "room_id" => self.id.clone())
+                .set(self.mixer.participant_count() as f64);
             info!(
                 "Admin-admitted {} waiting participants into room {}",
                 admitted, self.id
@@ -442,8 +445,10 @@ impl ConferenceRoom {
         self.play_join_sound();
 
         // Update metrics
-        counter!("forge_conference_participants_joined_total", "room_id" => self.id.clone()).increment(1);
-        gauge!("forge_conference_participants_active", "room_id" => self.id.clone()).set(self.mixer.participant_count() as f64);
+        counter!("forge_conference_participants_joined_total", "room_id" => self.id.clone())
+            .increment(1);
+        gauge!("forge_conference_participants_active", "room_id" => self.id.clone())
+            .set(self.mixer.participant_count() as f64);
 
         // Check if we should auto-start recording
         self.check_auto_start_recording();
@@ -481,7 +486,8 @@ impl ConferenceRoom {
             }
         }
 
-        gauge!("forge_conference_participants_active", "room_id" => self.id.clone()).set(self.mixer.participant_count() as f64);
+        gauge!("forge_conference_participants_active", "room_id" => self.id.clone())
+            .set(self.mixer.participant_count() as f64);
     }
 
     /// Check if recording should auto-start based on participant count
@@ -533,8 +539,10 @@ impl ConferenceRoom {
         }
 
         // Update metrics
-        counter!("forge_conference_participants_left_total", "room_id" => self.id.clone()).increment(1);
-        gauge!("forge_conference_participants_active", "room_id" => self.id.clone()).set(self.mixer.participant_count() as f64);
+        counter!("forge_conference_participants_left_total", "room_id" => self.id.clone())
+            .increment(1);
+        gauge!("forge_conference_participants_active", "room_id" => self.id.clone())
+            .set(self.mixer.participant_count() as f64);
 
         // If the last host left and wait_for_moderator is enabled,
         // move active participants to waiting
@@ -597,8 +605,10 @@ impl ConferenceRoom {
         // Record mixing duration if mixing occurred
         if mixed.is_some() {
             let mix_duration = mix_start.elapsed();
-            histogram!("forge_conference_mixing_duration_seconds", "room_id" => self.id.clone()).record(mix_duration.as_secs_f64());
-            counter!("forge_conference_mix_operations_total", "room_id" => self.id.clone()).increment(1);
+            histogram!("forge_conference_mixing_duration_seconds", "room_id" => self.id.clone())
+                .record(mix_duration.as_secs_f64());
+            counter!("forge_conference_mix_operations_total", "room_id" => self.id.clone())
+                .increment(1);
         }
 
         // Write to recorder if recording
@@ -661,7 +671,8 @@ impl ConferenceRoom {
         self.play_recording_started_sound();
 
         // Update metrics
-        counter!("forge_conference_recordings_started_total", "room_id" => self.id.clone()).increment(1);
+        counter!("forge_conference_recordings_started_total", "room_id" => self.id.clone())
+            .increment(1);
         gauge!("forge_conference_recordings_active", "room_id" => self.id.clone()).set(1.0);
 
         Ok(())
@@ -679,7 +690,8 @@ impl ConferenceRoom {
             self.play_recording_stopped_sound();
 
             // Update metrics
-            counter!("forge_conference_recordings_stopped_total", "room_id" => self.id.clone()).increment(1);
+            counter!("forge_conference_recordings_stopped_total", "room_id" => self.id.clone())
+                .increment(1);
             gauge!("forge_conference_recordings_active", "room_id" => self.id.clone()).set(0.0);
 
             Ok(())

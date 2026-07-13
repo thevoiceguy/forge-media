@@ -286,7 +286,8 @@ async fn set_answer(
         .map_err(|e| ApiError::Internal(format!("Failed to set remote answer: {}", e)))?;
 
     let duration = start.elapsed();
-    histogram!("forge_webrtc_connection_establishment_duration_seconds").record(duration.as_secs_f64());
+    histogram!("forge_webrtc_connection_establishment_duration_seconds")
+        .record(duration.as_secs_f64());
 
     let state_str = format!("{:?}", peer_lock.get_state());
 

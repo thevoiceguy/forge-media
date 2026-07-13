@@ -1161,8 +1161,10 @@ impl ForwardingEngine {
             }
         };
 
-        counter!("forge_generated_media_packets_sent_total", "source" => item.source.as_label()).increment(1);
-        counter!("forge_generated_media_bytes_sent_total", "source" => item.source.as_label()).increment(packet_len);
+        counter!("forge_generated_media_packets_sent_total", "source" => item.source.as_label())
+            .increment(1);
+        counter!("forge_generated_media_bytes_sent_total", "source" => item.source.as_label())
+            .increment(packet_len);
 
         Ok(())
     }
@@ -1400,8 +1402,10 @@ impl ForwardingEngine {
                 match &rtcp_packet {
                     forge_rtp::rtcp::RtcpPacket::SenderReport(sr) => {
                         // Record sender statistics
-                        counter!("forge_rtcp_sender_packets_total").increment(sr.sender_packet_count as u64);
-                        counter!("forge_rtcp_sender_bytes_total").increment(sr.sender_octet_count as u64);
+                        counter!("forge_rtcp_sender_packets_total")
+                            .increment(sr.sender_packet_count as u64);
+                        counter!("forge_rtcp_sender_bytes_total")
+                            .increment(sr.sender_octet_count as u64);
 
                         Self::process_report_blocks(
                             session,

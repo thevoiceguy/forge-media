@@ -16,7 +16,7 @@ thiserror = { workspace = true }
 dashmap = { workspace = true }
 
 # XML metadata handling (RFC 7865)
-quick-xml = { version = "0.36", features = ["serialize", "overlapped-lists"] }
+quick-xml = { version = "0.41", features = ["serialize", "overlapped-lists"] }
 serde = { workspace = true }
 
 # SIP signaling

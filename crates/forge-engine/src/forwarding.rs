@@ -15,6 +15,18 @@ use tokio::sync::RwLock;
 /// minute. See [`ForwardingEngine::maybe_emit_sender_reports`].
 const SR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// RTP header fields threaded into [`ForwardingEngine::update_stats`] so a
+/// received packet also updates the leg's receive-side stream statistics.
+struct RxPacketMeta {
+    sequence: u16,
+    rtp_timestamp: u32,
+    /// Negotiated RTP clock rate for jitter→ms conversion.
+    clock_rate: u32,
+    /// `false` for packets whose RTP timestamp does not track audio time
+    /// (RFC 2833 telephone-events) — excluded from the jitter filter.
+    count_jitter: bool,
+}
+
 /// RTP packet forwarding engine
 pub struct ForwardingEngine;
 
@@ -70,6 +82,9 @@ impl ForwardingEngine {
         // peer heard nothing intelligible.
         let playout_tick = tokio::time::sleep(tokio::time::Duration::from_millis(20));
         tokio::pin!(playout_tick);
+        // Loop-local cadence gate for MediaStatsSnapshot publication; no
+        // session-level state needed since only this loop emits.
+        let mut last_media_stats_at: Option<std::time::Instant> = None;
 
         loop {
             // Check if session is still active
@@ -275,6 +290,13 @@ impl ForwardingEngine {
                         &sockets,
                         &participant_a,
                         &participant_b,
+                    )
+                    .await;
+                    Self::maybe_emit_media_stats(
+                        &session,
+                        &participant_a,
+                        &participant_b,
+                        &mut last_media_stats_at,
                     )
                     .await;
                 }
@@ -547,7 +569,27 @@ impl ForwardingEngine {
 
         // Update sender statistics and session activity
         let packet_len = packet.payload.len() as u64;
-        Self::update_stats(&sender, participant_a, participant_b, packet_len, true).await;
+        Self::update_stats(
+            &sender,
+            participant_a,
+            participant_b,
+            packet_len,
+            true,
+            Some(RxPacketMeta {
+                sequence: packet.header.sequence_number,
+                rtp_timestamp: packet.header.timestamp,
+                // The negotiated RTP clock (48 kHz for Opus), not the
+                // bridge/audio rate — jitter math runs in RTP timestamp
+                // units.
+                clock_rate: sender_codec.clock_rate,
+                // Relayed RFC 2833 telephone-events reach this point but
+                // hold their RTP timestamp for the digit's duration, which
+                // would fake a transit swing; keep them out of the jitter
+                // filter (they still count toward sequence stats).
+                count_jitter: pkt_pt != te_pt_a && pkt_pt != te_pt_b,
+            }),
+        )
+        .await;
 
         // Record metrics
         counter!("forge_rtp_packets_received_total", 1);
@@ -609,8 +651,15 @@ impl ForwardingEngine {
                 );
             } else {
                 // Update receiver statistics
-                Self::update_stats(&receiver, participant_a, participant_b, packet_len, false)
-                    .await;
+                Self::update_stats(
+                    &receiver,
+                    participant_a,
+                    participant_b,
+                    packet_len,
+                    false,
+                    None,
+                )
+                .await;
 
                 // Record sent metrics
                 counter!("forge_rtp_packets_sent_total", 1);
@@ -745,6 +794,61 @@ impl ForwardingEngine {
                     );
                 }
             }
+        }
+    }
+
+    /// Publish one [`ForgeEvent::MediaStatsSnapshot`] per leg that has
+    /// received RTP, when the session's `media_stats_interval` cadence is
+    /// configured and due. Called from the 20 ms housekeeping tick;
+    /// `last_emit` is the loop-local gate shared by both legs so the two
+    /// snapshots of a tick carry the same cadence.
+    ///
+    /// Counters are cumulative since call start (see the event docs), so a
+    /// consumer that misses a snapshot loses resolution, not data — which
+    /// is why publishing rides the lossy broadcast bus like every other
+    /// `ForgeEvent`.
+    async fn maybe_emit_media_stats(
+        session: &Arc<MediaSession>,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        last_emit: &mut Option<std::time::Instant>,
+    ) {
+        let Some(interval) = session.media_stats_interval() else {
+            return;
+        };
+        let Some(bus) = session.event_bus() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let due = last_emit
+            .map(|t| now.duration_since(t) >= interval)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        *last_emit = Some(now);
+
+        for (leg, participant) in [
+            (forge_core::MediaLeg::A, participant_a),
+            (forge_core::MediaLeg::B, participant_b),
+        ] {
+            let rx = {
+                let p = participant.read().await;
+                if p.stats.rx_stream.packets_received == 0 {
+                    continue; // leg hasn't received RTP (e.g. WS-only side)
+                }
+                p.stats.rx_stream.clone()
+            };
+            let _ = bus.publish(ForgeEvent::MediaStatsSnapshot {
+                call_id: session.call_id().clone(),
+                leg,
+                rx_packets_received: rx.packets_received,
+                rx_packets_lost: rx.packets_lost(),
+                rx_packets_out_of_order: rx.packets_out_of_order,
+                rx_packets_duplicate: rx.packets_duplicate,
+                rx_jitter_ms: rx.jitter_ms(),
+                timestamp: chrono::Utc::now(),
+            });
         }
     }
 
@@ -1139,6 +1243,7 @@ impl ForwardingEngine {
             participant_b,
             packet_len,
             false,
+            None,
         )
         .await;
 
@@ -1524,12 +1629,17 @@ impl ForwardingEngine {
     }
 
     /// Update participant statistics
+    ///
+    /// `rx` carries the RTP header fields needed to update the leg's
+    /// [`RxStreamStats`] (sequence tracking + interarrival jitter) under
+    /// the same write lock; pass `None` on the send side.
     async fn update_stats(
         side: &Side,
         participant_a: &Arc<RwLock<Participant>>,
         participant_b: &Arc<RwLock<Participant>>,
         packet_len: u64,
         is_received: bool,
+        rx: Option<RxPacketMeta>,
     ) {
         let participant = match side {
             Side::A => participant_a,
@@ -1538,9 +1648,19 @@ impl ForwardingEngine {
 
         let mut p = participant.write().await;
         if is_received {
+            let now = std::time::Instant::now();
             p.stats.packets_received += 1;
             p.stats.bytes_received += packet_len;
-            p.stats.last_packet_at = Some(std::time::Instant::now());
+            p.stats.last_packet_at = Some(now);
+            if let Some(rx) = rx {
+                p.stats.rx_stream.record(
+                    rx.sequence,
+                    rx.rtp_timestamp,
+                    now,
+                    rx.clock_rate,
+                    rx.count_jitter,
+                );
+            }
         } else {
             p.stats.packets_sent += 1;
             p.stats.bytes_sent += packet_len;
@@ -2078,13 +2198,18 @@ mod tests {
         start_port: u16,
         bus: Option<Arc<forge_core::EventBus>>,
     ) -> Arc<MediaSession> {
+        make_test_session_with_config(start_port, bus, MediaSessionConfig::default()).await
+    }
+
+    async fn make_test_session_with_config(
+        start_port: u16,
+        bus: Option<Arc<forge_core::EventBus>>,
+        mut session_config: MediaSessionConfig,
+    ) -> Arc<MediaSession> {
         let config = PortPoolConfig::new(start_port, start_port + 100).unwrap();
         let port_pool = Arc::new(PortPool::new(config));
-        let session_config = MediaSessionConfig {
-            socket_config: forge_rtp::RtpSocketConfig {
-                bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
-                ..Default::default()
-            },
+        session_config.socket_config = forge_rtp::RtpSocketConfig {
+            bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
             ..Default::default()
         };
         Arc::new(
@@ -2223,5 +2348,123 @@ mod tests {
                 .is_some(),
             "SR emitted once audio + remote addr are present"
         );
+    }
+
+    /// Seed leg A's receive-side stats with a short run containing one
+    /// sequence gap: 3 packets received, 1 lost.
+    async fn seed_rx_stats(session: &Arc<MediaSession>) {
+        let pa = session.participant_a().clone();
+        let mut p = pa.write().await;
+        let t0 = std::time::Instant::now();
+        p.stats.rx_stream.record(1, 160, t0, 8000, true);
+        p.stats.rx_stream.record(
+            2,
+            320,
+            t0 + std::time::Duration::from_millis(20),
+            8000,
+            true,
+        );
+        p.stats.rx_stream.record(
+            4,
+            640,
+            t0 + std::time::Duration::from_millis(60),
+            8000,
+            true,
+        );
+    }
+
+    /// With a cadence configured, one snapshot is published for the leg
+    /// that has received RTP — and none for the silent leg.
+    #[tokio::test]
+    async fn media_stats_snapshot_emitted_for_receiving_leg_only() {
+        let bus = Arc::new(forge_core::EventBus::new());
+        let session = make_test_session_with_config(
+            41600,
+            Some(bus.clone()),
+            MediaSessionConfig {
+                media_stats_interval: Some(std::time::Duration::ZERO),
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_rx_stats(&session).await;
+
+        let mut rx = bus.subscribe();
+        let pa = session.participant_a().clone();
+        let pb = session.participant_b().clone();
+        let mut last_emit = None;
+        ForwardingEngine::maybe_emit_media_stats(&session, &pa, &pb, &mut last_emit).await;
+
+        match rx.try_recv().expect("a MediaStatsSnapshot was published") {
+            ForgeEvent::MediaStatsSnapshot {
+                call_id,
+                leg,
+                rx_packets_received,
+                rx_packets_lost,
+                rx_packets_out_of_order,
+                rx_packets_duplicate,
+                rx_jitter_ms,
+                ..
+            } => {
+                assert_eq!(&call_id, session.call_id());
+                assert_eq!(leg, forge_core::MediaLeg::A);
+                assert_eq!(rx_packets_received, 3);
+                assert_eq!(rx_packets_lost, 1);
+                assert_eq!(rx_packets_out_of_order, 0);
+                assert_eq!(rx_packets_duplicate, 0);
+                assert!(rx_jitter_ms.is_finite());
+            }
+            other => panic!("expected MediaStatsSnapshot, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "leg B received no RTP — no snapshot for it"
+        );
+        assert!(last_emit.is_some(), "cadence gate advanced");
+    }
+
+    /// No `media_stats_interval` (the default) → no snapshots, even with
+    /// receive-side stats present.
+    #[tokio::test]
+    async fn media_stats_snapshot_disabled_by_default() {
+        let bus = Arc::new(forge_core::EventBus::new());
+        let session = make_rtcp_test_session(41800, Some(bus.clone())).await;
+        seed_rx_stats(&session).await;
+
+        let mut rx = bus.subscribe();
+        let pa = session.participant_a().clone();
+        let pb = session.participant_b().clone();
+        let mut last_emit = None;
+        ForwardingEngine::maybe_emit_media_stats(&session, &pa, &pb, &mut last_emit).await;
+
+        assert!(rx.try_recv().is_err(), "disabled by default");
+        assert!(last_emit.is_none());
+    }
+
+    /// The cadence gate holds between ticks: a second housekeeping pass
+    /// inside the interval publishes nothing.
+    #[tokio::test]
+    async fn media_stats_snapshot_respects_cadence() {
+        let bus = Arc::new(forge_core::EventBus::new());
+        let session = make_test_session_with_config(
+            42000,
+            Some(bus.clone()),
+            MediaSessionConfig {
+                media_stats_interval: Some(std::time::Duration::from_secs(60)),
+                ..Default::default()
+            },
+        )
+        .await;
+        seed_rx_stats(&session).await;
+
+        let mut rx = bus.subscribe();
+        let pa = session.participant_a().clone();
+        let pb = session.participant_b().clone();
+        let mut last_emit = None;
+        ForwardingEngine::maybe_emit_media_stats(&session, &pa, &pb, &mut last_emit).await;
+        assert!(rx.try_recv().is_ok(), "first pass emits");
+
+        ForwardingEngine::maybe_emit_media_stats(&session, &pa, &pb, &mut last_emit).await;
+        assert!(rx.try_recv().is_err(), "second pass inside interval holds");
     }
 }

@@ -36,6 +36,29 @@ pub enum DtmfEventKind {
     End,
 }
 
+/// Which leg of a two-party media session a per-leg event refers to.
+///
+/// Mirrors `forge_engine::ParticipantLabel` without a dependency edge —
+/// forge-core cannot depend on forge-engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaLeg {
+    /// Participant A (typically caller)
+    A,
+    /// Participant B (typically callee)
+    B,
+}
+
+impl MediaLeg {
+    /// Human-readable leg label for logs and APIs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "a",
+            Self::B => "b",
+        }
+    }
+}
+
 /// All possible events that can occur in the Forge engine
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -204,6 +227,37 @@ pub enum ForgeEvent {
         timestamp: DateTime<Utc>,
     },
 
+    /// Periodic snapshot of locally-measured receive-side stream statistics.
+    ///
+    /// Published per leg on the embedder-configured cadence
+    /// (`MediaSessionConfig::media_stats_interval`; disabled when `None`)
+    /// once the leg has received RTP. Complements
+    /// [`Self::RtcpReportReceived`]: that event relays how the *remote*
+    /// end receives the stream we send, while these counters are measured
+    /// by the forwarding engine on the stream we *receive*. All counters
+    /// are cumulative since the start of the call, not per-interval
+    /// deltas — consumers diff successive snapshots if they need rates.
+    MediaStatsSnapshot {
+        call_id: CallId,
+        /// Which participant leg received these packets.
+        leg: MediaLeg,
+        /// Unique RTP packets received (duplicates excluded).
+        rx_packets_received: u64,
+        /// Sequence-gap loss: extended-sequence-number span minus packets
+        /// actually received (RFC 3550 §A.3). Late arrivals repair the
+        /// count retroactively.
+        rx_packets_lost: u64,
+        /// Late arrivals — packets whose sequence number was older than
+        /// the highest already seen.
+        rx_packets_out_of_order: u64,
+        /// Re-receives of a recently seen sequence number.
+        rx_packets_duplicate: u64,
+        /// Locally-computed interarrival jitter (RFC 3550 §6.4.1),
+        /// converted to milliseconds via the leg's RTP clock rate.
+        rx_jitter_ms: f32,
+        timestamp: DateTime<Utc>,
+    },
+
     // Transcription events
     TranscriptionStarted {
         call_id: CallId,
@@ -282,6 +336,7 @@ impl ForgeEvent {
             | Self::QualityDegraded { timestamp, .. }
             | Self::QualityRestored { timestamp, .. }
             | Self::RtcpReportReceived { timestamp, .. }
+            | Self::MediaStatsSnapshot { timestamp, .. }
             | Self::TranscriptionStarted { timestamp, .. }
             | Self::TranscriptionResult { timestamp, .. }
             | Self::TranscriptionStopped { timestamp, .. }
@@ -322,6 +377,7 @@ impl ForgeEvent {
             Self::QualityDegraded { .. } => "quality_degraded",
             Self::QualityRestored { .. } => "quality_restored",
             Self::RtcpReportReceived { .. } => "rtcp_report_received",
+            Self::MediaStatsSnapshot { .. } => "media_stats_snapshot",
             Self::TranscriptionStarted { .. } => "transcription_started",
             Self::TranscriptionResult { .. } => "transcription_result",
             Self::TranscriptionStopped { .. } => "transcription_stopped",
@@ -508,5 +564,38 @@ mod tests {
         };
 
         assert_eq!(event.event_type(), "participant_joined");
+    }
+
+    #[test]
+    fn test_media_stats_snapshot_serde_roundtrip() {
+        let event = ForgeEvent::MediaStatsSnapshot {
+            call_id: CallId::generate(),
+            leg: MediaLeg::A,
+            rx_packets_received: 1500,
+            rx_packets_lost: 3,
+            rx_packets_out_of_order: 2,
+            rx_packets_duplicate: 1,
+            rx_jitter_ms: 4.25,
+            timestamp: Utc::now(),
+        };
+        assert_eq!(event.event_type(), "media_stats_snapshot");
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "media_stats_snapshot");
+        assert_eq!(json["leg"], "a");
+        assert_eq!(json["rx_packets_received"], 1500);
+
+        let back: ForgeEvent = serde_json::from_value(json).unwrap();
+        match back {
+            ForgeEvent::MediaStatsSnapshot {
+                leg,
+                rx_packets_lost,
+                ..
+            } => {
+                assert_eq!(leg, MediaLeg::A);
+                assert_eq!(rx_packets_lost, 3);
+            }
+            other => panic!("expected MediaStatsSnapshot, got {other:?}"),
+        }
     }
 }

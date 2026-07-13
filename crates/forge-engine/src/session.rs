@@ -90,6 +90,11 @@ pub struct MediaSessionConfig {
     pub vad_config: VadConfig,
     /// Transcoding configuration
     pub transcoding_config: TranscodingConfig,
+    /// Cadence for publishing [`forge_core::ForgeEvent::MediaStatsSnapshot`]
+    /// events with locally-measured receive-side stream statistics.
+    /// `None` (the default) disables snapshot publication entirely; the
+    /// per-packet counters are still maintained either way.
+    pub media_stats_interval: Option<Duration>,
 }
 
 impl Default for MediaSessionConfig {
@@ -100,6 +105,7 @@ impl Default for MediaSessionConfig {
             dtmf_config: DtmfConfig::default(),
             vad_config: VadConfig::default(),
             transcoding_config: TranscodingConfig::default(),
+            media_stats_interval: None,
         }
     }
 }
@@ -259,6 +265,154 @@ pub struct ParticipantStats {
     pub packets_lost: u64,
     /// Last packet received timestamp
     pub last_packet_at: Option<Instant>,
+    /// Locally-measured receive-side stream statistics (sequence tracking
+    /// + RFC 3550 interarrival jitter). Feeds the periodic
+    /// [`forge_core::ForgeEvent::MediaStatsSnapshot`] event.
+    pub rx_stream: RxStreamStats,
+}
+
+/// Local receive-side RTP stream statistics.
+///
+/// Tracks the stream this leg *receives*, measured at the forwarding
+/// engine — as opposed to RTCP Receiver Reports, which describe how the
+/// remote end receives the stream we send. Sequence numbers are extended
+/// with a wrap-cycle count (RFC 3550 §A.1) so loss survives the 16-bit
+/// rollover; duplicates are detected against a 64-packet window ending at
+/// the highest sequence seen.
+#[derive(Debug, Clone, Default)]
+pub struct RxStreamStats {
+    /// Unique RTP packets received (duplicates excluded).
+    pub packets_received: u64,
+    /// Late arrivals — sequence number older than the highest already seen.
+    pub packets_out_of_order: u64,
+    /// Re-receives of a sequence number inside the recent-packet window.
+    pub packets_duplicate: u64,
+    /// Extended sequence number of the first packet.
+    base_seq_ext: Option<u64>,
+    /// Highest extended sequence number seen.
+    max_seq_ext: u64,
+    /// Receive bitmask for the 64 sequence numbers ending at
+    /// `max_seq_ext` (bit 0 = `max_seq_ext` itself), for dup detection.
+    recent_window: u64,
+    /// Interarrival jitter in RTP timestamp units (RFC 3550 §6.4.1).
+    jitter_units: f64,
+    /// Transit (arrival − RTP timestamp) of the previous packet, in
+    /// timestamp units.
+    last_transit: Option<f64>,
+    /// Zero-point for converting arrival `Instant`s to timestamp units.
+    epoch: Option<Instant>,
+    /// RTP clock rate of the last recorded packet, for `jitter_ms()`.
+    clock_rate: u32,
+}
+
+impl RxStreamStats {
+    /// Record one received RTP packet.
+    ///
+    /// `clock_rate` is the negotiated RTP clock (48 000 for Opus, not the
+    /// bridge rate). `count_jitter` should be `false` for packets whose
+    /// RTP timestamp does not track wall-clock audio time (RFC 2833
+    /// telephone-events hold their timestamp for the digit's duration) —
+    /// the packet still counts toward the sequence statistics.
+    pub fn record(
+        &mut self,
+        sequence: u16,
+        rtp_timestamp: u32,
+        arrival: Instant,
+        clock_rate: u32,
+        count_jitter: bool,
+    ) {
+        let Some(base) = self.base_seq_ext else {
+            self.base_seq_ext = Some(sequence as u64);
+            self.max_seq_ext = sequence as u64;
+            self.recent_window = 1;
+            self.packets_received = 1;
+            self.update_jitter(rtp_timestamp, arrival, clock_rate, count_jitter);
+            return;
+        };
+
+        // Extend the 16-bit sequence relative to the highest seen: a
+        // forward delta under half the space advances (possibly crossing a
+        // wrap); anything else is a late arrival some distance back.
+        let max_lo = (self.max_seq_ext & 0xFFFF) as u16;
+        let delta = sequence.wrapping_sub(max_lo);
+        if delta != 0 && delta < 0x8000 {
+            let advance = delta as u64;
+            self.recent_window = if advance >= 64 {
+                1
+            } else {
+                (self.recent_window << advance) | 1
+            };
+            self.max_seq_ext += advance;
+            self.packets_received += 1;
+        } else {
+            let back = ((0x1_0000 - delta as u32) & 0xFFFF) as u64;
+            let Some(ext) = self.max_seq_ext.checked_sub(back) else {
+                return; // predates the extended-sequence origin; ignore
+            };
+            if back < 64 {
+                let bit = 1u64 << back;
+                if self.recent_window & bit != 0 {
+                    self.packets_duplicate += 1;
+                    return; // re-receive: no jitter update either
+                }
+                self.recent_window |= bit;
+            }
+            if ext < base {
+                return; // stray pre-base packet (reordered call start)
+            }
+            self.packets_out_of_order += 1;
+            self.packets_received += 1;
+        }
+
+        self.update_jitter(rtp_timestamp, arrival, clock_rate, count_jitter);
+    }
+
+    fn update_jitter(
+        &mut self,
+        rtp_timestamp: u32,
+        arrival: Instant,
+        clock_rate: u32,
+        count_jitter: bool,
+    ) {
+        if !count_jitter || clock_rate == 0 {
+            return;
+        }
+        self.clock_rate = clock_rate;
+        let epoch = *self.epoch.get_or_insert(arrival);
+        let arrival_units = arrival.duration_since(epoch).as_secs_f64() * clock_rate as f64;
+        // RFC 3550 §6.4.1: J += (|D(i-1,i)| − J) / 16. A u32 RTP
+        // timestamp wrap mid-call produces one outlier transit sample,
+        // which the 1/16 filter absorbs — not worth unwrapping for.
+        let transit = arrival_units - rtp_timestamp as f64;
+        if let Some(last) = self.last_transit {
+            let d = (transit - last).abs();
+            self.jitter_units += (d - self.jitter_units) / 16.0;
+        }
+        self.last_transit = Some(transit);
+    }
+
+    /// Packets expected per the extended-sequence span (RFC 3550 §A.3).
+    fn expected(&self) -> u64 {
+        match self.base_seq_ext {
+            Some(base) => self.max_seq_ext - base + 1,
+            None => 0,
+        }
+    }
+
+    /// Cumulative sequence-gap loss. Late arrivals repair this
+    /// retroactively, so it can shrink between reads.
+    pub fn packets_lost(&self) -> u64 {
+        self.expected().saturating_sub(self.packets_received)
+    }
+
+    /// Interarrival jitter converted to milliseconds via the stream's RTP
+    /// clock rate. `0.0` until two jitter-eligible packets have arrived.
+    pub fn jitter_ms(&self) -> f32 {
+        if self.clock_rate == 0 {
+            return 0.0;
+        }
+        (self.jitter_units / self.clock_rate as f64 * 1000.0) as f32
+    }
 }
 
 /// RTP state for generated audio injected into a participant leg.
@@ -1146,6 +1300,11 @@ impl MediaSession {
     /// Get the transcoding configuration
     pub fn transcoding_config(&self) -> &TranscodingConfig {
         &self.config.transcoding_config
+    }
+
+    /// Cadence for publishing `MediaStatsSnapshot` events (`None` = never).
+    pub fn media_stats_interval(&self) -> Option<Duration> {
+        self.config.media_stats_interval
     }
 
     /// Get transcoder for A → B direction
@@ -3585,5 +3744,121 @@ mod tests {
         assert!(queue.items.is_empty());
         assert!(queue.next_due_at.is_none());
         assert!(queue.next_rtp_timestamp.is_none());
+    }
+
+    /// Feed `stats` a run of packets described as `(seq, rtp_ts, arrival_ms)`
+    /// at an 8 kHz clock with jitter counting on.
+    fn feed(stats: &mut RxStreamStats, packets: &[(u16, u32, u64)]) {
+        let t0 = Instant::now();
+        for &(seq, ts, at_ms) in packets {
+            stats.record(seq, ts, t0 + Duration::from_millis(at_ms), 8000, true);
+        }
+    }
+
+    #[test]
+    fn rx_stream_in_order_no_loss() {
+        let mut s = RxStreamStats::default();
+        feed(
+            &mut s,
+            &[(1, 160, 0), (2, 320, 20), (3, 480, 40), (4, 640, 60)],
+        );
+        assert_eq!(s.packets_received, 4);
+        assert_eq!(s.packets_lost(), 0);
+        assert_eq!(s.packets_out_of_order, 0);
+        assert_eq!(s.packets_duplicate, 0);
+        // Perfect 20 ms pacing at matching timestamps → zero transit
+        // variation → zero jitter.
+        assert!(s.jitter_ms().abs() < 1e-6, "jitter_ms = {}", s.jitter_ms());
+    }
+
+    #[test]
+    fn rx_stream_gap_counts_lost_and_late_arrival_repairs() {
+        let mut s = RxStreamStats::default();
+        feed(&mut s, &[(1, 160, 0), (2, 320, 20), (5, 800, 80)]);
+        assert_eq!(s.packets_lost(), 2); // 3 and 4 missing
+
+        // Packet 3 arrives late: repairs one loss, counts out-of-order.
+        feed(&mut s, &[(3, 480, 100)]);
+        assert_eq!(s.packets_received, 4);
+        assert_eq!(s.packets_lost(), 1);
+        assert_eq!(s.packets_out_of_order, 1);
+    }
+
+    #[test]
+    fn rx_stream_duplicates_detected_and_not_double_counted() {
+        let mut s = RxStreamStats::default();
+        feed(
+            &mut s,
+            &[(1, 160, 0), (2, 320, 20), (2, 320, 21), (1, 160, 25)],
+        );
+        assert_eq!(s.packets_received, 2);
+        assert_eq!(s.packets_duplicate, 2);
+        assert_eq!(s.packets_lost(), 0);
+        assert_eq!(s.packets_out_of_order, 0);
+    }
+
+    #[test]
+    fn rx_stream_sequence_wrap_extends() {
+        let mut s = RxStreamStats::default();
+        feed(
+            &mut s,
+            &[
+                (65534, 160, 0),
+                (65535, 320, 20),
+                (0, 480, 40),
+                (1, 640, 60),
+            ],
+        );
+        assert_eq!(s.packets_received, 4);
+        assert_eq!(s.packets_lost(), 0);
+        assert_eq!(s.packets_out_of_order, 0);
+    }
+
+    #[test]
+    fn rx_stream_pre_base_packet_ignored() {
+        let mut s = RxStreamStats::default();
+        feed(&mut s, &[(5, 800, 0), (3, 480, 5)]);
+        assert_eq!(s.packets_received, 1);
+        assert_eq!(s.packets_out_of_order, 0);
+        assert_eq!(s.packets_lost(), 0);
+    }
+
+    #[test]
+    fn rx_stream_jitter_tracks_arrival_variation() {
+        let mut s = RxStreamStats::default();
+        // Timestamps step a clean 20 ms but arrivals alternate ±5 ms —
+        // classic network jitter. RFC 3550 filter must land above zero
+        // and below the raw 5 ms swing.
+        feed(
+            &mut s,
+            &[
+                (1, 160, 0),
+                (2, 320, 25),
+                (3, 480, 40),
+                (4, 640, 65),
+                (5, 800, 80),
+                (6, 960, 105),
+            ],
+        );
+        let j = s.jitter_ms();
+        assert!(j > 0.0 && j < 5.0, "jitter_ms = {j}");
+    }
+
+    #[test]
+    fn rx_stream_telephone_event_counts_sequence_not_jitter() {
+        let mut s = RxStreamStats::default();
+        let t0 = Instant::now();
+        s.record(1, 160, t0, 8000, true);
+        s.record(2, 320, t0 + Duration::from_millis(20), 8000, true);
+        // RFC 2833 burst: timestamp frozen at the digit start — would fake
+        // a huge transit swing if it entered the jitter filter.
+        s.record(3, 320, t0 + Duration::from_millis(40), 8000, false);
+        s.record(4, 320, t0 + Duration::from_millis(60), 8000, false);
+        // Audio resumes on the original cadence.
+        s.record(5, 800, t0 + Duration::from_millis(80), 8000, true);
+
+        assert_eq!(s.packets_received, 5);
+        assert_eq!(s.packets_lost(), 0);
+        assert!(s.jitter_ms().abs() < 1e-6, "jitter_ms = {}", s.jitter_ms());
     }
 }

@@ -261,7 +261,7 @@ impl RecordingSession {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn to_xml(&self) -> Result<String, quick_xml::DeError> {
+    pub fn to_xml(&self) -> Result<String, quick_xml::SeError> {
         quick_xml::se::to_string(self)
     }
 

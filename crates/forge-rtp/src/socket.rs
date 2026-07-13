@@ -268,7 +268,7 @@ impl RtpSocketPair {
                 source = %addr,
                 "rejected RTP latch attempt: source disallowed by latch policy"
             );
-            metrics::counter!("forge_rtp_latch_rejected_total", 1);
+            metrics::counter!("forge_rtp_latch_rejected_total").increment(1);
             return;
         }
         drop(policy);
@@ -288,7 +288,7 @@ impl RtpSocketPair {
                 rtcp_addr: None,
             });
             tracing::debug!(target: "forge::rtp::latch", source = %addr, "learned RTP endpoint");
-            metrics::counter!("forge_rtp_latch_learned_total", 1);
+            metrics::counter!("forge_rtp_latch_learned_total").increment(1);
         }
     }
 

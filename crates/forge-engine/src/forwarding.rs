@@ -122,7 +122,7 @@ impl ForwardingEngine {
                                     continue;
                                 }
                                 if crate::dtls_srtp::is_unsupported_first_byte(first) {
-                                    counter!("forge_rtp_unsupported_first_byte_total", 1);
+                                    counter!("forge_rtp_unsupported_first_byte_total").increment(1);
                                     continue;
                                 }
                             }
@@ -148,7 +148,7 @@ impl ForwardingEngine {
                                     Ok(data) => data,
                                     Err(e) => {
                                         tracing::warn!("SRTP unprotect failed for session {}: {}", call_id.0, e);
-                                        counter!("forge_srtp_unprotect_errors_total", 1);
+                                        counter!("forge_srtp_unprotect_errors_total").increment(1);
                                         continue;
                                     }
                                 }
@@ -205,7 +205,7 @@ impl ForwardingEngine {
                                     Ok(data) => bytes::Bytes::from(data),
                                     Err(e) => {
                                         tracing::warn!("SRTCP unprotect failed for session {}: {}", call_id.0, e);
-                                        counter!("forge_srtcp_unprotect_errors_total", 1);
+                                        counter!("forge_srtcp_unprotect_errors_total").increment(1);
                                         continue;
                                     }
                                 }
@@ -344,8 +344,8 @@ impl ForwardingEngine {
                             );
 
                             // Record metrics
-                            counter!("forge_dtmf_events_total", 1, "method" => "rfc2833", "digit" => format!("{}", event.digit));
-                            counter!("forge_dtmf_rfc2833_events_total", 1, "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type));
+                            counter!("forge_dtmf_events_total", "method" => "rfc2833", "digit" => format!("{}", event.digit)).increment(1);
+                            counter!("forge_dtmf_rfc2833_events_total", "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type)).increment(1);
 
                             // Publish event to EventBus
                             if let Some(bus) = session.event_bus() {
@@ -357,7 +357,7 @@ impl ForwardingEngine {
                                 call_id.0,
                                 event.digit
                             );
-                            counter!("forge_dtmf_duplicates_suppressed_total", 1, "method" => "rfc2833", "digit" => format!("{}", event.digit));
+                            counter!("forge_dtmf_duplicates_suppressed_total", "method" => "rfc2833", "digit" => format!("{}", event.digit)).increment(1);
                         }
                     }
                 }
@@ -371,7 +371,7 @@ impl ForwardingEngine {
             }
 
             session.update_activity().await;
-            counter!("forge_dtmf_rfc2833_packets_total", 1);
+            counter!("forge_dtmf_rfc2833_packets_total").increment(1);
 
             if !session.relay_rfc2833() {
                 // Detect-only mode: consume the packet, don't forward
@@ -380,7 +380,7 @@ impl ForwardingEngine {
             // Relay mode: fall through to normal forwarding path.
             // The packet's PT won't match audio codecs, so pcm_samples will be
             // empty — recording and inband detection are safely skipped.
-            counter!("forge_dtmf_rfc2833_relayed_total", 1);
+            counter!("forge_dtmf_rfc2833_relayed_total").increment(1);
         }
 
         let Some((sender, receiver)) =
@@ -504,7 +504,7 @@ impl ForwardingEngine {
 
             // Inband DTMF detection (only if enabled)
             if session.dtmf_config().enable_inband {
-                counter!("forge_dtmf_inband_packets_processed_total", 1);
+                counter!("forge_dtmf_inband_packets_processed_total").increment(1);
 
                 let mut detector = session.inband_detector().lock().await;
                 match detector.process_samples(&pcm_samples) {
@@ -521,8 +521,8 @@ impl ForwardingEngine {
                                 );
 
                                 // Record metrics
-                                counter!("forge_dtmf_events_total", 1, "method" => "inband", "digit" => format!("{}", event.digit));
-                                counter!("forge_dtmf_inband_events_total", 1, "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type));
+                                counter!("forge_dtmf_events_total", "method" => "inband", "digit" => format!("{}", event.digit)).increment(1);
+                                counter!("forge_dtmf_inband_events_total", "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type)).increment(1);
 
                                 // Publish event to EventBus
                                 if let Some(bus) = session.event_bus() {
@@ -534,7 +534,7 @@ impl ForwardingEngine {
                                     call_id.0,
                                     event.digit
                                 );
-                                counter!("forge_dtmf_duplicates_suppressed_total", 1, "method" => "inband", "digit" => format!("{}", event.digit));
+                                counter!("forge_dtmf_duplicates_suppressed_total", "method" => "inband", "digit" => format!("{}", event.digit)).increment(1);
                             }
                         }
                     }
@@ -592,8 +592,8 @@ impl ForwardingEngine {
         .await;
 
         // Record metrics
-        counter!("forge_rtp_packets_received_total", 1);
-        counter!("forge_rtp_bytes_received_total", packet_len);
+        counter!("forge_rtp_packets_received_total").increment(1);
+        counter!("forge_rtp_bytes_received_total").increment(packet_len);
 
         // Update session activity timestamp
         session.update_activity().await;
@@ -637,7 +637,7 @@ impl ForwardingEngine {
                     Ok(protected) => protected,
                     Err(e) => {
                         tracing::error!("SRTP protect failed for session {}: {}", call_id.0, e);
-                        counter!("forge_srtp_protect_errors_total", 1);
+                        counter!("forge_srtp_protect_errors_total").increment(1);
                         return;
                     }
                 }
@@ -662,8 +662,8 @@ impl ForwardingEngine {
                 .await;
 
                 // Record sent metrics
-                counter!("forge_rtp_packets_sent_total", 1);
-                counter!("forge_rtp_bytes_sent_total", packet_len);
+                counter!("forge_rtp_packets_sent_total").increment(1);
+                counter!("forge_rtp_bytes_sent_total").increment(packet_len);
             }
         } else {
             tracing::debug!(
@@ -939,7 +939,7 @@ impl ForwardingEngine {
                             session.call_id().0,
                             e
                         );
-                        counter!("forge_srtcp_protect_errors_total", 1);
+                        counter!("forge_srtcp_protect_errors_total").increment(1);
                         continue;
                     }
                 }
@@ -955,8 +955,8 @@ impl ForwardingEngine {
                     e
                 );
             } else {
-                counter!("forge_rtcp_sender_reports_sent_total", 1);
-                counter!("forge_rtcp_packets_sent_total", 1);
+                counter!("forge_rtcp_sender_reports_sent_total").increment(1);
+                counter!("forge_rtcp_packets_sent_total").increment(1);
             }
         }
     }
@@ -1022,7 +1022,7 @@ impl ForwardingEngine {
                 call_id.0,
                 source_addr
             );
-            counter!("forge_rtp_latch_learned_total", 1);
+            counter!("forge_rtp_latch_learned_total").increment(1);
             drop(a);
             drop(b);
             participant_a.write().await.remote_addr = Some(source_addr);
@@ -1034,7 +1034,7 @@ impl ForwardingEngine {
                 call_id.0,
                 source_addr
             );
-            counter!("forge_rtp_latch_learned_total", 1);
+            counter!("forge_rtp_latch_learned_total").increment(1);
             drop(a);
             drop(b);
             participant_b.write().await.remote_addr = Some(source_addr);
@@ -1046,7 +1046,7 @@ impl ForwardingEngine {
             source_addr,
             call_id.0
         );
-        counter!("forge_rtp_latch_rejected_total", 1);
+        counter!("forge_rtp_latch_rejected_total").increment(1);
         None
     }
 
@@ -1128,19 +1128,11 @@ impl ForwardingEngine {
                 )
                 .await?;
 
-                counter!(
-                    "forge_generated_audio_packets_sent_total",
-                    1,
-                    "source" => item.source.as_label()
-                );
-                counter!(
-                    "forge_generated_audio_bytes_sent_total",
-                    packet_len,
-                    "source" => item.source.as_label()
-                );
+                counter!("forge_generated_audio_packets_sent_total", "source" => item.source.as_label()).increment(1);
+                counter!("forge_generated_audio_bytes_sent_total", "source" => item.source.as_label()).increment(packet_len);
                 if matches!(item.source, crate::session::ScheduledPlayoutSource::AI) {
-                    counter!("forge_ai_audio_packets_sent_total", 1);
-                    counter!("forge_ai_audio_bytes_sent_total", packet_len);
+                    counter!("forge_ai_audio_packets_sent_total").increment(1);
+                    counter!("forge_ai_audio_bytes_sent_total").increment(packet_len);
                 }
 
                 packet_len
@@ -1163,22 +1155,16 @@ impl ForwardingEngine {
                     item.marker,
                 )
                 .await?;
-                counter!("forge_dtmf_rfc2833_injected_packets_total", 1);
-                counter!("forge_dtmf_rfc2833_injected_bytes_total", packet_len);
+                counter!("forge_dtmf_rfc2833_injected_packets_total").increment(1);
+                counter!("forge_dtmf_rfc2833_injected_bytes_total").increment(packet_len);
                 packet_len
             }
         };
 
-        counter!(
-            "forge_generated_media_packets_sent_total",
-            1,
-            "source" => item.source.as_label()
-        );
-        counter!(
-            "forge_generated_media_bytes_sent_total",
-            packet_len,
-            "source" => item.source.as_label()
-        );
+        counter!("forge_generated_media_packets_sent_total", "source" => item.source.as_label())
+            .increment(1);
+        counter!("forge_generated_media_bytes_sent_total", "source" => item.source.as_label())
+            .increment(packet_len);
 
         Ok(())
     }
@@ -1354,9 +1340,7 @@ impl ForwardingEngine {
 
                         // Record successful transcoding duration
                         let transcode_duration = transcode_start.elapsed();
-                        histogram!("forge_transcoding_duration_seconds", transcode_duration.as_secs_f64(),
-                            "from_codec" => codec_name(src_codec),
-                            "to_codec" => codec_name(dst_codec));
+                        histogram!("forge_transcoding_duration_seconds", "from_codec" => codec_name(src_codec), "to_codec" => codec_name(dst_codec)).record(transcode_duration.as_secs_f64());
 
                         // Update packet with transcoded payload
                         packet.payload = combined_payload.into();
@@ -1366,15 +1350,8 @@ impl ForwardingEngine {
                             (packet.header.marker_payload_type & 0x80) | dst_pt;
 
                         // Record transcoding metrics with codec labels
-                        counter!("forge_transcoding_packets_total", 1,
-                            "from_codec" => codec_name(src_codec),
-                            "to_codec" => codec_name(dst_codec));
-                        counter!(
-                            "forge_transcoding_bytes_total",
-                            output_len as u64,
-                            "from_codec" => codec_name(src_codec),
-                            "to_codec" => codec_name(dst_codec)
-                        );
+                        counter!("forge_transcoding_packets_total", "from_codec" => codec_name(src_codec), "to_codec" => codec_name(dst_codec)).increment(1);
+                        counter!("forge_transcoding_bytes_total", "from_codec" => codec_name(src_codec), "to_codec" => codec_name(dst_codec)).increment(output_len as u64);
 
                         tracing::trace!(
                             "Transcoded packet: {} → {} ({} bytes → {} bytes) in {:?}",
@@ -1388,9 +1365,7 @@ impl ForwardingEngine {
                 }
                 Err(e) => {
                     tracing::warn!("Transcoding failed: {}, forwarding original packet", e);
-                    counter!("forge_transcoding_errors_total", 1,
-                        "from_codec" => codec_name(src_codec),
-                        "to_codec" => codec_name(dst_codec));
+                    counter!("forge_transcoding_errors_total", "from_codec" => codec_name(src_codec), "to_codec" => codec_name(dst_codec)).increment(1);
                 }
             }
         }
@@ -1410,8 +1385,8 @@ impl ForwardingEngine {
         let call_id = session.call_id();
 
         // Record RTCP metrics
-        counter!("forge_rtcp_packets_received_total", 1);
-        counter!("forge_rtcp_bytes_received_total", data.len() as u64);
+        counter!("forge_rtcp_packets_received_total").increment(1);
+        counter!("forge_rtcp_bytes_received_total").increment(data.len() as u64);
 
         // Try to parse the RTCP packet for logging/debugging and metrics
         match RtcpPacket::parse(data) {
@@ -1427,14 +1402,10 @@ impl ForwardingEngine {
                 match &rtcp_packet {
                     forge_rtp::rtcp::RtcpPacket::SenderReport(sr) => {
                         // Record sender statistics
-                        counter!(
-                            "forge_rtcp_sender_packets_total",
-                            sr.sender_packet_count as u64
-                        );
-                        counter!(
-                            "forge_rtcp_sender_bytes_total",
-                            sr.sender_octet_count as u64
-                        );
+                        counter!("forge_rtcp_sender_packets_total")
+                            .increment(sr.sender_packet_count as u64);
+                        counter!("forge_rtcp_sender_bytes_total")
+                            .increment(sr.sender_octet_count as u64);
 
                         Self::process_report_blocks(
                             session,
@@ -1550,7 +1521,7 @@ impl ForwardingEngine {
                     Ok(protected) => protected,
                     Err(e) => {
                         tracing::error!("SRTCP protect failed for session {}: {}", call_id.0, e);
-                        counter!("forge_srtcp_protect_errors_total", 1);
+                        counter!("forge_srtcp_protect_errors_total").increment(1);
                         return;
                     }
                 }
@@ -1570,8 +1541,8 @@ impl ForwardingEngine {
                 );
 
                 // Record sent metrics
-                counter!("forge_rtcp_packets_sent_total", 1);
-                counter!("forge_rtcp_bytes_sent_total", data.len() as u64);
+                counter!("forge_rtcp_packets_sent_total").increment(1);
+                counter!("forge_rtcp_bytes_sent_total").increment(data.len() as u64);
 
                 // HEP3 capture (chunk 0x05 = RTCP). Emit the plaintext
                 // bytes (`data`) so Homer shows the SR/RR contents
@@ -1699,7 +1670,7 @@ impl ForwardingEngine {
     ) {
         use crate::dtls_srtp::HandshakeOutcome;
 
-        counter!("forge_dtls_packets_received_total", 1);
+        counter!("forge_dtls_packets_received_total").increment(1);
 
         // Pick the side by source_addr. Same shape as the SRTP-context
         // selection above. Default to A if neither participant has
@@ -1722,7 +1693,7 @@ impl ForwardingEngine {
                 // No DTLS configured on this side. Could be a stale
                 // packet from a previous call, or misrouted traffic.
                 // Drop with a metric.
-                counter!("forge_dtls_packets_dropped_no_leg_total", 1);
+                counter!("forge_dtls_packets_dropped_no_leg_total").increment(1);
                 return;
             };
             leg.feed(Some(raw_data))
@@ -1742,7 +1713,7 @@ impl ForwardingEngine {
                     error = %e,
                     "failed to send outgoing DTLS bytes",
                 );
-                counter!("forge_dtls_send_errors_total", 1);
+                counter!("forge_dtls_send_errors_total").increment(1);
             }
         }
 
@@ -1753,7 +1724,7 @@ impl ForwardingEngine {
                 remote_srtp_key,
                 ..
             } => {
-                counter!("forge_dtls_handshakes_completed_total", 1);
+                counter!("forge_dtls_handshakes_completed_total").increment(1);
                 crate::dtls_srtp::install_keys(&srtp_ctx, local_srtp_key, remote_srtp_key).await;
                 tracing::info!(
                     call_id = %session.call_id().0,
@@ -1761,7 +1732,7 @@ impl ForwardingEngine {
                 );
             }
             HandshakeOutcome::Failed(e) => {
-                counter!("forge_dtls_handshakes_failed_total", 1);
+                counter!("forge_dtls_handshakes_failed_total").increment(1);
                 tracing::warn!(
                     call_id = %session.call_id().0,
                     error = %e,
@@ -1886,17 +1857,14 @@ impl ForwardingEngine {
         // Record packet loss metrics
         // fraction_lost is expressed as a fixed-point number with 8-bit fraction (0-255 = 0-100%)
         let packet_loss_fraction = (block.fraction_lost as f64) / 256.0;
-        gauge!("forge_rtcp_packet_loss_fraction", packet_loss_fraction);
-        gauge!(
-            "forge_rtcp_packets_lost_total",
-            block.cumulative_lost as f64
-        );
+        gauge!("forge_rtcp_packet_loss_fraction").set(packet_loss_fraction);
+        gauge!("forge_rtcp_packets_lost_total").set(block.cumulative_lost as f64);
 
         // Record jitter (in timestamp units)
-        gauge!("forge_rtcp_jitter", block.jitter as f64);
+        gauge!("forge_rtcp_jitter").set(block.jitter as f64);
 
         // Record highest sequence number
-        gauge!("forge_rtcp_highest_seq", block.extended_highest_seq as f64);
+        gauge!("forge_rtcp_highest_seq").set(block.extended_highest_seq as f64);
     }
 }
 

@@ -68,8 +68,8 @@ thiserror = "2.0"
 # Logging and Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-metrics = "0.21"
-metrics-exporter-prometheus = "0.13"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.18"
 
 # HTTP/API
 axum = { version = "0.8", features = ["ws", "multipart"] }
@@ -88,6 +88,11 @@ aes-gcm = "0.10"
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
+# Pinned to 0.9: the siphon-rs submodule crates (sip-auth, sip-dialog, …)
+# are path deps inside this workspace directory, so they inherit THIS
+# rand via `workspace = true` — and their code targets the 0.9 API
+# (OsRng/TryRngCore re-exports, &Alphanumeric sampling). Bump to 0.10
+# only after upstream siphon-rs migrates.
 rand = "0.9"
 subtle = "2.5"
 

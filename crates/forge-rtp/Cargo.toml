@@ -33,6 +33,10 @@ subtle = { workspace = true }
 # Optional DTLS support
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 openssl-sys = { version = "0.9", optional = true }
+# Must track the foreign-types major that `openssl` itself uses (0.3):
+# dtls.rs calls foreign_types::ForeignType on openssl's types, and a
+# newer major here is a different trait that openssl's types don't
+# implement. Only bump when rust-openssl does.
 foreign-types = { version = "0.3", optional = true }
 
 [features]

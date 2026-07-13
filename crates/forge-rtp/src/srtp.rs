@@ -579,7 +579,7 @@ impl SrtpContext {
         };
 
         // Increment metrics counter
-        counter!("forge_srtp_packets_encrypted_total", 1);
+        counter!("forge_srtp_packets_encrypted_total").increment(1);
 
         Ok(srtp_packet)
     }
@@ -800,7 +800,7 @@ impl SrtpContext {
 
         // Check replay protection
         if self.replay_window.check(packet_index) {
-            counter!("forge_srtp_replay_attacks_blocked_total", 1);
+            counter!("forge_srtp_replay_attacks_blocked_total").increment(1);
             return Err(ForgeError::Srtp("Replay attack detected".to_string()));
         }
 
@@ -835,7 +835,7 @@ impl SrtpContext {
         self.remote_roc.update(sequence);
 
         // Increment metrics counter
-        counter!("forge_srtp_packets_decrypted_total", 1);
+        counter!("forge_srtp_packets_decrypted_total").increment(1);
 
         Ok(rtp_packet)
     }
@@ -1068,7 +1068,7 @@ impl SrtpContext {
         };
 
         // Increment metrics counter
-        counter!("forge_srtcp_packets_encrypted_total", 1);
+        counter!("forge_srtcp_packets_encrypted_total").increment(1);
 
         Ok(srtcp_packet)
     }
@@ -1269,7 +1269,7 @@ impl SrtpContext {
         // SRTCP replay protection (RFC 3711 Section 3.4)
         // Check if this index has been seen before
         if self.srtcp_replay_window.check(srtcp_index as u64) {
-            counter!("forge_srtcp_replay_attacks_blocked_total", 1);
+            counter!("forge_srtcp_replay_attacks_blocked_total").increment(1);
             return Err(ForgeError::Srtp("SRTCP replay attack detected".to_string()));
         }
 
@@ -1306,7 +1306,7 @@ impl SrtpContext {
         }
 
         // Increment metrics counter
-        counter!("forge_srtcp_packets_decrypted_total", 1);
+        counter!("forge_srtcp_packets_decrypted_total").increment(1);
 
         Ok(rtcp_packet)
     }

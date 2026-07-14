@@ -79,12 +79,8 @@ tokio-tungstenite = "0.21"
 reqwest = { version = "0.12", features = ["json"] }
 
 # Crypto
-# aes 0.9 dropped the `BlockEncrypt::encrypt_block` API the SRTP code
-# in forge-rtp still uses (dependabot regression). Pin to 0.8 until
-# the SRTP code migrates; see the upstream issue on the
-# forge-media tracker.
-aes = "0.8"
-aes-gcm = "0.10"
+aes = "0.9"
+aes-gcm = "0.11"
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"

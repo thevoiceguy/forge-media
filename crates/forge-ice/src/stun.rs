@@ -4,8 +4,8 @@
 use bytes::{Buf, BufMut, BytesMut};
 use forge_core::{ForgeError, Result};
 use hmac::{Hmac, Mac};
-use rand::rngs::OsRng;
-use rand::TryRngCore;
+use rand::rngs::SysRng;
+use rand::TryRng;
 use sha1::Sha1;
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -118,12 +118,12 @@ impl StunMessage {
     /// RFC 8489 §6 requires transaction IDs to be unpredictable. Audit
     /// finding C8: the previous implementation used `rand::thread_rng()`, a
     /// ChaCha8-seeded PRNG that is deterministic after seed recovery. We use
-    /// `OsRng` (the OS CSPRNG — `getrandom(2)` on Linux, `BCryptGenRandom`
+    /// `SysRng` (the OS CSPRNG — `getrandom(2)` on Linux, `BCryptGenRandom`
     /// on Windows) so that an off-path attacker cannot predict an
     /// outstanding transaction ID and forge a response.
     pub fn new_binding_request() -> Self {
         let mut transaction_id = [0u8; 12];
-        OsRng
+        SysRng
             .try_fill_bytes(&mut transaction_id)
             .expect("OS RNG must not fail");
 

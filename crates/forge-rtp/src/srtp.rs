@@ -3,9 +3,9 @@
 //! This module provides SRTP (Secure Real-time Transport Protocol) implementation
 //! with support for AES-CM and AES-GCM cipher suites.
 
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use aes::{Aes128, Aes256};
-use aes_gcm::{AeadInPlace, Aes128Gcm, Aes256Gcm, Nonce};
+use aes_gcm::{AeadInOut, Aes128Gcm, Aes256Gcm, Nonce};
 use forge_core::{ForgeError, Result};
 use hmac::{Hmac, Mac};
 use metrics::counter;
@@ -701,7 +701,7 @@ impl SrtpContext {
             nonce_bytes[10 + i] ^= seq_bytes[i];
         }
 
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         // Split packet into header (AAD) and payload
         let mut payload = packet[header_len..].to_vec();
@@ -714,7 +714,11 @@ impl SrtpContext {
                 })?;
 
                 cipher
-                    .encrypt_in_place_detached(nonce, &packet[..header_len], &mut payload)
+                    .encrypt_inout_detached(
+                        &nonce,
+                        &packet[..header_len],
+                        payload.as_mut_slice().into(),
+                    )
                     .map_err(|e| ForgeError::Srtp(format!("AES-GCM encryption failed: {}", e)))?
             }
             SrtpProfile::AeadAes256Gcm => {
@@ -723,7 +727,11 @@ impl SrtpContext {
                 })?;
 
                 cipher
-                    .encrypt_in_place_detached(nonce, &packet[..header_len], &mut payload)
+                    .encrypt_inout_detached(
+                        &nonce,
+                        &packet[..header_len],
+                        payload.as_mut_slice().into(),
+                    )
                     .map_err(|e| ForgeError::Srtp(format!("AES-GCM encryption failed: {}", e)))?
             }
             _ => unreachable!(),
@@ -957,7 +965,7 @@ impl SrtpContext {
             nonce_bytes[10 + i] ^= seq_bytes[i];
         }
 
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         // Extract auth tag (last 16 bytes)
         let tag_len = 16;
@@ -979,7 +987,7 @@ impl SrtpContext {
         let tag_array: &[u8; 16] = tag
             .try_into()
             .map_err(|_| ForgeError::Srtp("Invalid tag length".to_string()))?;
-        let tag_obj = Tag::from_slice(tag_array);
+        let tag_obj = Tag::from(*tag_array);
 
         match profile {
             SrtpProfile::AeadAes128Gcm => {
@@ -988,11 +996,11 @@ impl SrtpContext {
                 })?;
 
                 cipher
-                    .decrypt_in_place_detached(
-                        nonce,
+                    .decrypt_inout_detached(
+                        &nonce,
                         &packet[..header_len],
-                        &mut ciphertext,
-                        tag_obj,
+                        ciphertext.as_mut_slice().into(),
+                        &tag_obj,
                     )
                     .map_err(|e| {
                         ForgeError::Srtp(format!("AES-GCM decryption/verification failed: {}", e))
@@ -1004,11 +1012,11 @@ impl SrtpContext {
                 })?;
 
                 cipher
-                    .decrypt_in_place_detached(
-                        nonce,
+                    .decrypt_inout_detached(
+                        &nonce,
                         &packet[..header_len],
-                        &mut ciphertext,
-                        tag_obj,
+                        ciphertext.as_mut_slice().into(),
+                        &tag_obj,
                     )
                     .map_err(|e| {
                         ForgeError::Srtp(format!("AES-GCM decryption/verification failed: {}", e))
@@ -1183,7 +1191,7 @@ impl SrtpContext {
             nonce_bytes[8 + i] ^= index_bytes[i];
         }
 
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         // Compute E-bit + SRTCP index field (to include in AAD per RFC 7714)
         let e_bit = 1u32 << 31;
@@ -1206,7 +1214,7 @@ impl SrtpContext {
                 })?;
 
                 cipher
-                    .encrypt_in_place_detached(nonce, &aad, &mut payload)
+                    .encrypt_inout_detached(&nonce, &aad, payload.as_mut_slice().into())
                     .map_err(|e| ForgeError::Srtp(format!("AES-GCM encryption failed: {}", e)))?
             }
             SrtpProfile::AeadAes256Gcm => {
@@ -1215,7 +1223,7 @@ impl SrtpContext {
                 })?;
 
                 cipher
-                    .encrypt_in_place_detached(nonce, &aad, &mut payload)
+                    .encrypt_inout_detached(&nonce, &aad, payload.as_mut_slice().into())
                     .map_err(|e| ForgeError::Srtp(format!("AES-GCM encryption failed: {}", e)))?
             }
             _ => unreachable!(),
@@ -1440,7 +1448,7 @@ impl SrtpContext {
             nonce_bytes[8 + i] ^= index_bytes[i];
         }
 
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         // Decrypt and verify with detached tag
         use aes_gcm::Tag;
@@ -1449,7 +1457,7 @@ impl SrtpContext {
         let tag_array: &[u8; 16] = tag
             .try_into()
             .map_err(|_| ForgeError::Srtp("Invalid tag length".to_string()))?;
-        let tag_obj = Tag::from_slice(tag_array);
+        let tag_obj = Tag::from(*tag_array);
 
         match profile {
             SrtpProfile::AeadAes128Gcm => {
@@ -1458,7 +1466,12 @@ impl SrtpContext {
                 })?;
 
                 cipher
-                    .decrypt_in_place_detached(nonce, &aad, &mut ciphertext, tag_obj)
+                    .decrypt_inout_detached(
+                        &nonce,
+                        &aad,
+                        ciphertext.as_mut_slice().into(),
+                        &tag_obj,
+                    )
                     .map_err(|e| {
                         ForgeError::Srtp(format!(
                             "SRTCP AES-GCM decryption/verification failed: {}",
@@ -1472,7 +1485,12 @@ impl SrtpContext {
                 })?;
 
                 cipher
-                    .decrypt_in_place_detached(nonce, &aad, &mut ciphertext, tag_obj)
+                    .decrypt_inout_detached(
+                        &nonce,
+                        &aad,
+                        ciphertext.as_mut_slice().into(),
+                        &tag_obj,
+                    )
                     .map_err(|e| {
                         ForgeError::Srtp(format!(
                             "SRTCP AES-GCM decryption/verification failed: {}",
@@ -1827,7 +1845,7 @@ mod tests {
     /// This test computes the expected keystream from first principles.
     #[test]
     fn test_srtp_aes_cm_iv_matches_rfc3711_spec() {
-        use aes::cipher::{BlockEncrypt, KeyInit};
+        use aes::cipher::{BlockCipherEncrypt, KeyInit};
         use aes::Aes128;
 
         let master_key = vec![0x2Bu8; 16];
@@ -1853,7 +1871,7 @@ mod tests {
 
         // First keystream block under AES-CM.
         let cipher = Aes128::new_from_slice(&derived.encryption_key).unwrap();
-        let mut block = aes::Block::clone_from_slice(&expected_iv);
+        let mut block = aes::Block::from(expected_iv);
         cipher.encrypt_block(&mut block);
         let expected_ks0: [u8; 16] = block.into();
 
@@ -1893,7 +1911,7 @@ mod tests {
     /// SRTCP_INDEX is 32 bits → bits 16..47 of the IV → bytes 10-13.
     #[test]
     fn test_srtcp_aes_cm_iv_matches_rfc3711_spec() {
-        use aes::cipher::{BlockEncrypt, KeyInit};
+        use aes::cipher::{BlockCipherEncrypt, KeyInit};
         use aes::Aes128;
 
         let master_key = vec![0x3Cu8; 16];
@@ -1917,7 +1935,7 @@ mod tests {
         let expected_iv: [u8; 16] = iv_u128.to_be_bytes();
 
         let cipher = Aes128::new_from_slice(&derived.encryption_key).unwrap();
-        let mut block = aes::Block::clone_from_slice(&expected_iv);
+        let mut block = aes::Block::from(expected_iv);
         cipher.encrypt_block(&mut block);
         let expected_ks0: [u8; 16] = block.into();
 

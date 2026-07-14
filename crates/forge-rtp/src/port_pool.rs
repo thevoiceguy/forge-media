@@ -4,7 +4,7 @@
 //! Ports are allocated in pairs (even for RTP, odd for RTCP) as per RFC 3550.
 
 use forge_core::{ForgeError, Result};
-use rand::{seq::SliceRandom, Rng};
+use rand::{seq::SliceRandom, RngExt};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;

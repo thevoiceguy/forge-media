@@ -31,7 +31,7 @@
 use crate::{Attribute, MediaDescription, SessionDescription};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use forge_rtp::{SrtpKeyMaterial, SrtpProfile};
-use rand::RngCore;
+use rand::Rng;
 use smol_str::SmolStr;
 use std::str::FromStr;
 use thiserror::Error;

@@ -1402,8 +1402,7 @@ impl MediaSession {
         let result = detector.process(pcm_samples);
         match windows_before.zip(detector.windows_processed()) {
             Some((before, after)) if after > before => {
-                counter!("forge_vad_windows_total", "backend" => backend)
-                    .increment(after - before);
+                counter!("forge_vad_windows_total", "backend" => backend).increment(after - before);
                 // Wall time of this `process` call; covers the 1..=n
                 // model windows the frame completed (usually 1).
                 histogram!("forge_vad_neural_inference_seconds")
@@ -4037,7 +4036,10 @@ mod tests {
     async fn vad_test_session(
         port_range: (u16, u16),
         vad_config: VadConfig,
-    ) -> (Arc<MediaSession>, tokio::sync::broadcast::Receiver<ForgeEvent>) {
+    ) -> (
+        Arc<MediaSession>,
+        tokio::sync::broadcast::Receiver<ForgeEvent>,
+    ) {
         let pool_config = PortPoolConfig::new(port_range.0, port_range.1).unwrap();
         let port_pool = Arc::new(PortPool::new(pool_config));
         let event_bus = Arc::new(EventBus::new());
@@ -4088,8 +4090,7 @@ mod tests {
         // The engine refactor (VadConfig.detector -> .engine,
         // AnyVadDetector) must keep default deployments emitting the
         // same events as before.
-        let (session, mut events) =
-            vad_test_session((31100, 31299), VadConfig::default()).await;
+        let (session, mut events) = vad_test_session((31100, 31299), VadConfig::default()).await;
         assert_eq!(
             session.vad_detector().lock().await.backend_name(),
             "energy_zcr"
@@ -4113,8 +4114,7 @@ mod tests {
         // The energy detector is rate-agnostic; the rate guard must
         // not rebuild it (that would reset adaptive state) when the
         // stream rate differs from the configured default.
-        let (session, mut events) =
-            vad_test_session((31300, 31499), VadConfig::default()).await;
+        let (session, mut events) = vad_test_session((31300, 31499), VadConfig::default()).await;
         let speech = energy_speech_frame();
         for rate in [8000, 16000, 48000] {
             for _ in 0..10 {
@@ -4131,8 +4131,7 @@ mod tests {
         /// 3 s speech fixture shared with forge-vad's integration
         /// tests (JFK 1961 inaugural excerpt, public domain).
         fn fixture_16k() -> Vec<i16> {
-            let bytes: &[u8] =
-                include_bytes!("../../forge-vad/tests/fixtures/speech_16k.wav");
+            let bytes: &[u8] = include_bytes!("../../forge-vad/tests/fixtures/speech_16k.wav");
             // Fixture is a known-good canonical WAV: 44-byte header,
             // then s16le data.
             bytes[44..]
@@ -4155,10 +4154,7 @@ mod tests {
         async fn neural_session_emits_speech_started_and_stopped() {
             let (session, mut events) =
                 vad_test_session((31500, 31699), neural_vad_config(200)).await;
-            assert_eq!(
-                session.vad_detector().lock().await.backend_name(),
-                "neural"
-            );
+            assert_eq!(session.vad_detector().lock().await.backend_name(), "neural");
 
             // 20 ms frames, like the forwarding loop feeds.
             for frame in fixture_16k().chunks(320) {
@@ -4190,11 +4186,7 @@ mod tests {
             }
 
             assert_eq!(
-                session
-                    .vad_detector()
-                    .lock()
-                    .await
-                    .required_sample_rate(),
+                session.vad_detector().lock().await.required_sample_rate(),
                 Some(8000),
                 "detector must have been rebuilt at the stream rate"
             );
@@ -4241,12 +4233,10 @@ mod tests {
                 MediaSessionConfig {
                     vad_config: VadConfig {
                         enabled: true,
-                        engine: forge_vad::VadEngineConfig::Neural(
-                            forge_vad::NeuralVadConfig {
-                                sample_rate: 44100,
-                                ..forge_vad::NeuralVadConfig::default()
-                            },
-                        ),
+                        engine: forge_vad::VadEngineConfig::Neural(forge_vad::NeuralVadConfig {
+                            sample_rate: 44100,
+                            ..forge_vad::NeuralVadConfig::default()
+                        }),
                     },
                     ..MediaSessionConfig::default()
                 },
@@ -4256,7 +4246,9 @@ mod tests {
                 None,
             )
             .await;
-            let err = result.err().expect("bad VAD config must fail session setup");
+            let err = result
+                .err()
+                .expect("bad VAD config must fail session setup");
             assert!(err.to_string().contains("sample rates"), "{err}");
         }
     }

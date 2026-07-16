@@ -41,7 +41,11 @@ fn detector(sample_rate: u32) -> forge_vad::AnyVadDetector {
 
 /// Feed audio in RTP-sized 20 ms frames, returning (states seen, max
 /// probability seen).
-fn run(detector: &mut forge_vad::AnyVadDetector, samples: &[i16], rate: u32) -> (Vec<VadState>, f32) {
+fn run(
+    detector: &mut forge_vad::AnyVadDetector,
+    samples: &[i16],
+    rate: u32,
+) -> (Vec<VadState>, f32) {
     let frame = (rate / 50) as usize; // 20 ms
     let mut states = Vec::new();
     let mut max_prob = 0.0f32;
@@ -109,7 +113,11 @@ fn tone_and_noise_never_trigger_speech() {
                 max_prob < 0.35,
                 "{name} @ {rate} Hz peak probability {max_prob} above silence threshold"
             );
-            assert_eq!(d.state(), VadState::Silence, "{name} @ {rate} settles to Silence");
+            assert_eq!(
+                d.state(),
+                VadState::Silence,
+                "{name} @ {rate} settles to Silence"
+            );
         }
     }
 }
@@ -121,11 +129,7 @@ fn model_path_override_loads_from_disk() {
     let dir = std::env::temp_dir().join("forge-vad-model-override-test");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("model.onnx");
-    std::fs::write(
-        &path,
-        include_bytes!("../models/silero_vad_v6_16k.onnx"),
-    )
-    .unwrap();
+    std::fs::write(&path, include_bytes!("../models/silero_vad_v6_16k.onnx")).unwrap();
 
     let mut d = VadEngineConfig::Neural(NeuralVadConfig {
         model_path: Some(path),
@@ -159,6 +163,9 @@ fn reset_recovers_full_detection() {
     d.reset();
     assert_eq!(d.state(), VadState::Unknown);
     let (states, max_prob) = run(&mut d, &samples, 16000);
-    assert!(states.contains(&VadState::Speech), "detects again after reset");
+    assert!(
+        states.contains(&VadState::Speech),
+        "detects again after reset"
+    );
     assert!(max_prob > 0.9);
 }

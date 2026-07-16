@@ -161,8 +161,7 @@ mod tests {
             VadEngineConfig::EnergyZcr(c) => assert_eq!(c.sample_rate, 8000),
             VadEngineConfig::Neural(_) => unreachable!(),
         }
-        let config =
-            VadEngineConfig::Neural(NeuralVadConfig::default()).with_sample_rate(8000);
+        let config = VadEngineConfig::Neural(NeuralVadConfig::default()).with_sample_rate(8000);
         match config {
             VadEngineConfig::Neural(c) => assert_eq!(c.sample_rate, 8000),
             VadEngineConfig::EnergyZcr(_) => unreachable!(),

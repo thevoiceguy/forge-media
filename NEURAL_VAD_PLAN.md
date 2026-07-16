@@ -1,6 +1,40 @@
 # Neural VAD for forge-vad — Implementation Plan
 
-Status: **PLANNED** (spike first — see Chunk 0)
+Status: **IMPLEMENTED (Chunks 0–2, 2026-07-16)** — forge-media side complete;
+Phase 2 (siphon-ai plumbing, §5.4) remains. Spike results below.
+
+## Chunk 0 spike results (2026-07-16, dev box, tract-onnx 0.23.4)
+
+- **Model**: Silero VAD **v6.2.1**, via the upstream `silero_vad_op18_ifless.onnx`
+  export (SHA-256 `7671cd04…6bbd28`, MIT). The plain v5/v4/16k-op15 exports all
+  **fail** under tract: their `If` nodes have branches whose output ranks differ,
+  which tract's type inference rejects. The ifless export has exactly one
+  top-level `If` switching on `sr` between two self-contained per-rate subgraphs
+  (43 plain nodes each: Conv/Gemm/Split/Sigmoid/Tanh/Pad/Slice — no inner Ifs).
+  We **specialize** that graph offline (committed `specialize.py`): extract each
+  branch into a standalone per-rate model — same weights, no control flow, no
+  `sr` input. Parity vs. the original under onnxruntime is **bit-exact** (max
+  |Δprob| = 0.0 over the full fixture, both rates).
+  - `silero_vad_v6_16k.onnx` 1,556,692 B, SHA-256 `871f0828…0337`, input
+    `[1,576]` (512-sample window + 64 context), state `[2,1,128]`
+  - `silero_vad_v6_8k.onnx` 1,261,615 B, SHA-256 `03fb3a9d…c242`, input
+    `[1,288]` (256-sample window + 32 context), state `[2,1,128]`
+- **Op support (kill a)**: PASS — tract builds a fully *optimized* plan for both
+  specialized models.
+- **Quality (kill b)**: PASS — JFK speech fixture: mean prob 0.69 / max 1.00 /
+  68% windows > 0.5; silence, 440 Hz tone, white noise all ≤ 0.03 max, at both
+  rates.
+- **Latency (kill c)**: PASS — glibc: p50 95 µs / p99 180 µs per window @16 k
+  (68/84 µs @8 k). musl static: p50 180 µs / p99 530 µs. Budget is 1500 µs —
+  ~3–8× headroom.
+- **musl static (kill d)**: PASS — `--target x86_64-unknown-linux-musl` builds
+  (static-pie) and runs with identical probabilities. tract-linalg's build
+  script needs a C toolchain for its assembly kernels; plain host `gcc` works
+  (`CC_x86_64_unknown_linux_musl=gcc`), as does zig cc. **Not** a C++ runtime
+  dep — kernels only.
+- **Caveat**: tract 0.23.4 declares `rust-version = 1.91`; workspace MSRV is
+  1.75. Builds **with** `neural` enabled need rustc ≥ 1.91. Default builds are
+  unaffected (tract is an optional dep, feature off by default).
 Consumer driving this: **siphon-ai** (ROADMAP P2, *upstream-gated* item "Neural
 VAD upgrade in forge-vad"). Written 2026-07-16.
 
@@ -190,16 +224,21 @@ forge release conventions so siphon-ai has a pinnable rev.
 
 ## 8. Definition of done (forge-media side)
 
-- [ ] Spike results recorded; runtime/model decision confirmed against §4.1–2.
-- [ ] `forge-vad` builds with and without `neural`; existing energy tests
-      untouched and green.
-- [ ] `AnyVadDetector` neural path: state-machine tests (scripted scorer),
-      real-model fixture test, both green in CI with the feature enabled.
-- [ ] Bench: neural ≤ 1.5 ms p99/window; numbers recorded in
-      `docs/NEURAL_VAD.md`.
-- [ ] Engine: neural-configured session emits correct events; default
-      behavior byte-identical to today; rate-change guard tested.
-- [ ] musl static build of a `neural`-enabled consumer verified (Chunk 0
-      artifact re-run against the final crate).
-- [ ] Docs: `docs/NEURAL_VAD.md`, CHANGELOG entry, CLAUDE.MD capability line;
-      workspace version bumped; rev communicated for the siphon-ai pin.
+- [x] Spike results recorded; runtime/model decision confirmed against §4.1–2
+      (tract-onnx 0.23 + Silero v6.2.1 via per-rate "ifless" specialization).
+- [x] `forge-vad` builds with and without `neural`; existing energy tests
+      untouched and green (22 unit tests).
+- [x] `AnyVadDetector` neural path: state-machine tests (scripted scorer, run
+      without the feature too), real-model fixture tests (6, feature-gated).
+- [x] Bench: neural ~60–81 µs mean / window (≤ 1.5 ms budget, ~20× headroom);
+      numbers recorded in `docs/NEURAL_VAD.md`.
+- [x] Engine: neural-configured session emits `SpeechStarted`/`SpeechStopped`
+      (session-level tests); default behavior unchanged (energy backend via
+      the same enum; parity test); rate-change guard tested (rebuild at
+      stream rate + disable-on-unsupported-rate).
+- [x] musl static build of a `neural`-enabled consumer verified against the
+      final crate (static-pie binary, fixture detects speech).
+- [x] Docs: `docs/NEURAL_VAD.md`, CHANGELOG entry, CLAUDE.MD capability line;
+      `forge-vad` 0.1.0→0.2.0, `forge-engine` 0.4.0→0.5.0 (workspace version
+      left to the release process since [Unreleased] isn't being cut here);
+      siphon-ai pins the git rev once this merges.

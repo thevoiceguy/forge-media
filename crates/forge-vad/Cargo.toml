@@ -1,11 +1,19 @@
 [package]
 name = "forge-vad"
-description = "Energy + zero-crossing-rate Voice Activity Detection for forge-media."
-version = "0.1.0"
+description = "Energy + zero-crossing-rate and neural (Silero) Voice Activity Detection for forge-media."
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Neural (Silero) VAD backend. Off by default: pulls in tract-onnx and
+# embeds ~2.8 MB of model weights. NOTE: tract 0.23 declares
+# rust-version 1.91, so builds with this feature enabled need a newer
+# rustc than the workspace MSRV (default builds are unaffected).
+neural = ["dep:tract-onnx"]
+
 [dependencies]
 thiserror = { workspace = true }
+tract-onnx = { version = "0.23", optional = true }

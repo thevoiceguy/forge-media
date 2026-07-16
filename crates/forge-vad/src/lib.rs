@@ -1,11 +1,16 @@
 //! Voice Activity Detection (VAD) for `forge-media`.
 //!
-//! Detects when speech is present in 16-bit linear-PCM audio frames
-//! using energy (RMS) and zero-crossing-rate analysis with hysteresis
-//! and an adaptive noise-floor estimator. The algorithm has zero
-//! external runtime dependencies — it runs synchronously, allocates
-//! a fixed-size sliding window, and is safe to call from a per-frame
-//! audio loop.
+//! Two backends behind one surface, selected via [`VadEngineConfig`]:
+//!
+//! - [`VadDetector`] (default): energy (RMS) + zero-crossing-rate
+//!   analysis with hysteresis and an adaptive noise-floor estimator.
+//!   Zero external runtime dependencies — it runs synchronously,
+//!   allocates a fixed-size sliding window, and is safe to call from
+//!   a per-frame audio loop.
+//! - [`NeuralVadDetector`] (Cargo feature `neural`, off by default):
+//!   the Silero VAD neural network via the pure-Rust `tract-onnx`
+//!   runtime, for materially fewer acoustic false positives (coughs,
+//!   keyboard clatter, hold music) on real calls. See [`neural`].
 //!
 //! ## Where it fits
 //!
@@ -35,12 +40,23 @@
 
 use thiserror::Error;
 
+mod engine;
+pub mod neural;
+
+pub use engine::{AnyVadDetector, VadEngineConfig};
+pub use neural::{NeuralVadConfig, NeuralVadDetector};
+
 #[derive(Debug, Error)]
 pub enum VadError {
     /// The detector saw a configuration value that doesn't make
     /// sense (e.g., `frame_size_ms` of 0). Caller bug.
     #[error("invalid VAD configuration: {0}")]
     InvalidConfig(String),
+
+    /// The neural backend's inference runtime failed (model load or
+    /// per-window inference). Carries the runtime's own description.
+    #[error("VAD backend error: {0}")]
+    Backend(String),
 }
 
 pub type Result<T> = std::result::Result<T, VadError>;

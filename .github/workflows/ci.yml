@@ -25,6 +25,17 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Free runner disk space
+        # `--all-features` now includes `neural-vad` (tract-onnx + friends),
+        # and the full-workspace debug test build no longer fits alongside
+        # the runner's preinstalled toolchains: the beta job died with
+        # ENOSPC + an lld bus error while linking. Drop the big unused
+        # preinstalled trees (~25 GB) before building.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Install system dependencies
         # `--all-features` pulls in `bcg729-sys`, which link-libs against the
         # system `libbcg729`. The codec is packaged on ubuntu as

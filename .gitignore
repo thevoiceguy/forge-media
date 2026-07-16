@@ -106,6 +106,8 @@ recordings/
 *.wav
 *.opus
 *.mp3
+# ...but committed test fixtures are allowed (NEURAL_VAD_PLAN.md decision 12)
+!crates/forge-vad/tests/fixtures/*.wav
 *.flac
 
 # Temporary files

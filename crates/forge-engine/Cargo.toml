@@ -1,6 +1,6 @@
 [package]
 name = "forge-engine"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -43,6 +43,11 @@ redis = { version = "0.24", features = ["tokio-comp", "connection-manager"], opt
 
 [features]
 default = ["g722", "ai"]
+# Neural (Silero) VAD backend for per-session selection via
+# `VadConfig.engine`. Off by default: pulls in tract-onnx + ~2.8 MB of
+# embedded model weights, and needs rustc >= 1.91 (tract). See
+# docs/NEURAL_VAD.md.
+neural-vad = ["forge-vad/neural"]
 xdp = ["forge-kernel"]
 opus = ["forge-codecs/opus"]
 g722 = ["forge-codecs/g722", "forge-transcoder/g722"]

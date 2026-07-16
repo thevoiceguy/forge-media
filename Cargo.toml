@@ -164,6 +164,10 @@ harness = false
 name = "srtp_bench"
 harness = false
 
+[[bench]]
+name = "vad_bench"
+harness = false
+
 [features]
 default = ["recording", "dtmf"]
 full = [
@@ -189,6 +193,9 @@ siprec = ["dep:forge-siprec"]
 ai-stream = ["dep:forge-ai-stream"]
 ha = ["dep:forge-ha", "forge-api/ha", "forge-engine/ha"]
 xdp = ["forge-engine/xdp", "forge-api/xdp"]
+# Neural (Silero) VAD backend. Needs rustc >= 1.91 (tract); see
+# docs/NEURAL_VAD.md.
+neural-vad = ["forge-vad/neural", "forge-engine/neural-vad"]
 
 [profile.dev]
 opt-level = 0

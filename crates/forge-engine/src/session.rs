@@ -30,21 +30,49 @@ pub struct DtmfConfig {
 }
 
 /// Voice-activity detection configuration. Defaults to enabled with
-/// `forge_vad::VadConfig::default()` thresholds. Disable via
-/// `enabled = false` on session-config-time deployments that don't
-/// want speech events on the `EventBus`.
+/// the energy + ZCR backend at `forge_vad::VadConfig::default()`
+/// thresholds — byte-identical behavior to deployments predating
+/// backend selection. Disable via `enabled = false` on
+/// session-config-time deployments that don't want speech events on
+/// the `EventBus`, or pick the neural backend via
+/// `engine = VadEngineConfig::Neural(..)` (needs the `neural-vad`
+/// feature).
 #[derive(Debug, Clone)]
 pub struct VadConfig {
     pub enabled: bool,
-    pub detector: forge_vad::VadConfig,
+    pub engine: forge_vad::VadEngineConfig,
 }
 
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            detector: forge_vad::VadConfig::default(),
+            engine: forge_vad::VadEngineConfig::default(),
         }
+    }
+}
+
+impl VadConfig {
+    /// Build the configured detector, failing session setup loudly on
+    /// a bad config (unsupported sample rate, unreadable model,
+    /// neural backend selected in a build without the `neural-vad`
+    /// feature) instead of erroring per frame.
+    fn build_detector(&self) -> Result<forge_vad::AnyVadDetector> {
+        let detector = self
+            .engine
+            .build()
+            .map_err(|e| ForgeError::InvalidConfig(format!("VAD engine: {e}")))?;
+        if self.enabled {
+            if let Some(rate) = detector.required_sample_rate() {
+                tracing::info!(
+                    backend = detector.backend_name(),
+                    sample_rate = rate,
+                    model = forge_vad::neural::MODEL_VERSION,
+                    "neural VAD detector built"
+                );
+            }
+        }
+        Ok(detector)
     }
 }
 
@@ -673,7 +701,13 @@ pub struct MediaSession {
     /// every decoded PCM frame and publishes
     /// `ForgeEvent::SpeechStarted` / `SpeechStopped` on state
     /// transitions. Initialised from `MediaSessionConfig.vad_config`.
-    vad_detector: Arc<Mutex<forge_vad::VadDetector>>,
+    vad_detector: Arc<Mutex<forge_vad::AnyVadDetector>>,
+    /// Latched when the VAD rate guard could not rebuild the detector
+    /// at the decoded stream's actual sample rate (e.g. a neural
+    /// detector on a codec whose PCM rate the model doesn't support).
+    /// Once tripped, VAD is skipped for the session — fail loud once,
+    /// not per frame.
+    vad_rate_guard_tripped: AtomicBool,
     /// Wallclock the most recent `SpeechStarted` was emitted at;
     /// used to compute `duration_ms` for the matching
     /// `SpeechStopped`. `None` before the first speech transition,
@@ -791,7 +825,7 @@ impl MediaSession {
 
         // VAD config is cloned out before `config` is moved into the
         // struct literal below.
-        let vad_detector_config = config.vad_config.detector.clone();
+        let vad_detector = config.vad_config.build_detector()?;
 
         let session = Self {
             call_id: call_id.clone(),
@@ -809,7 +843,8 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
-            vad_detector: Arc::new(Mutex::new(forge_vad::VadDetector::new(vad_detector_config))),
+            vad_detector: Arc::new(Mutex::new(vad_detector)),
+            vad_rate_guard_tripped: AtomicBool::new(false),
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
@@ -949,7 +984,7 @@ impl MediaSession {
 
         // VAD config is cloned out before `config` is moved into the
         // struct literal below.
-        let vad_detector_config = config.vad_config.detector.clone();
+        let vad_detector = config.vad_config.build_detector()?;
 
         let session = Self {
             call_id: call_id.clone(),
@@ -967,7 +1002,8 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
-            vad_detector: Arc::new(Mutex::new(forge_vad::VadDetector::new(vad_detector_config))),
+            vad_detector: Arc::new(Mutex::new(vad_detector)),
+            vad_rate_guard_tripped: AtomicBool::new(false),
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
@@ -1151,7 +1187,7 @@ impl MediaSession {
 
         // VAD config is cloned out before `config` is moved into the
         // struct literal below.
-        let vad_detector_config = config.vad_config.detector.clone();
+        let vad_detector = config.vad_config.build_detector()?;
 
         let session = Self {
             call_id: call_id.clone(),
@@ -1169,7 +1205,8 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
-            vad_detector: Arc::new(Mutex::new(forge_vad::VadDetector::new(vad_detector_config))),
+            vad_detector: Arc::new(Mutex::new(vad_detector)),
+            vad_rate_guard_tripped: AtomicBool::new(false),
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
@@ -1282,7 +1319,7 @@ impl MediaSession {
     }
 
     /// Get the voice-activity detector for this session.
-    pub fn vad_detector(&self) -> &Arc<Mutex<forge_vad::VadDetector>> {
+    pub fn vad_detector(&self) -> &Arc<Mutex<forge_vad::AnyVadDetector>> {
         &self.vad_detector
     }
 
@@ -1295,6 +1332,136 @@ impl MediaSession {
     /// Get the VAD configuration.
     pub fn vad_config(&self) -> &VadConfig {
         &self.config.vad_config
+    }
+
+    /// Run voice-activity detection over one decoded PCM frame and
+    /// publish `SpeechStarted` / `SpeechStopped` on the EventBus when
+    /// the detector flips state under hysteresis. Called by the
+    /// forwarding loop for every decoded packet while
+    /// `vad_config().enabled`; `pcm_rate` is the frame's actual PCM
+    /// sample rate (`codec_audio_sample_rate`).
+    ///
+    /// Rate guard: a neural detector is specific to its configured
+    /// sample rate. If the decoded stream's rate differs (config
+    /// default vs. negotiated codec, or a mid-call re-INVITE codec
+    /// switch), the detector is rebuilt at the stream rate — one
+    /// `warn!`, detection restarts. If it can't be rebuilt (rate the
+    /// model doesn't support), VAD is disabled for the session with
+    /// one `warn!` rather than erroring per frame.
+    pub(crate) async fn process_vad_frame(&self, pcm_samples: &[i16], pcm_rate: u32) {
+        use forge_vad::VadState;
+        use metrics::{counter, histogram};
+
+        if self.vad_rate_guard_tripped.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let mut detector = self.vad_detector.lock().await;
+
+        if let Some(required) = detector.required_sample_rate() {
+            if required != pcm_rate {
+                match self
+                    .config
+                    .vad_config
+                    .engine
+                    .clone()
+                    .with_sample_rate(pcm_rate)
+                    .build()
+                {
+                    Ok(rebuilt) => {
+                        tracing::warn!(
+                            "VAD detector for session {} was configured at {} Hz but the \
+                             decoded stream is {} Hz; rebuilt the detector at the stream rate",
+                            self.call_id.0,
+                            required,
+                            pcm_rate
+                        );
+                        *detector = rebuilt;
+                        // Any in-flight utterance bookkeeping is stale.
+                        *self.speech_started_at.lock().await = None;
+                    }
+                    Err(e) => {
+                        self.vad_rate_guard_tripped.store(true, Ordering::Relaxed);
+                        tracing::warn!(
+                            "VAD disabled for session {}: cannot run the configured detector \
+                             at the decoded stream rate {} Hz: {}",
+                            self.call_id.0,
+                            pcm_rate,
+                            e
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        let prev = detector.state();
+        let backend = detector.backend_name();
+        let windows_before = detector.windows_processed();
+        let inference_started = Instant::now();
+        let result = detector.process(pcm_samples);
+        match windows_before.zip(detector.windows_processed()) {
+            Some((before, after)) if after > before => {
+                counter!("forge_vad_windows_total", "backend" => backend)
+                    .increment(after - before);
+                // Wall time of this `process` call; covers the 1..=n
+                // model windows the frame completed (usually 1).
+                histogram!("forge_vad_neural_inference_seconds")
+                    .record(inference_started.elapsed().as_secs_f64());
+            }
+            Some(_) => {} // Frame buffered, no window scored.
+            None => {
+                // Windowless backend (energy): one "window" per frame.
+                counter!("forge_vad_windows_total", "backend" => backend).increment(1);
+            }
+        }
+        if let Err(e) = result {
+            counter!("forge_vad_errors_total", "backend" => backend).increment(1);
+            tracing::debug!("VAD processing error for session {}: {}", self.call_id.0, e);
+            return;
+        }
+        let new = detector.state();
+        drop(detector);
+
+        if new == prev {
+            return;
+        }
+        let now = chrono::Utc::now();
+        let mut started_guard = self.speech_started_at.lock().await;
+        match new {
+            VadState::Speech => {
+                *started_guard = Some(now);
+                drop(started_guard);
+                if let Some(bus) = self.event_bus() {
+                    let _ = bus.publish(ForgeEvent::SpeechStarted {
+                        call_id: self.call_id.clone(),
+                        timestamp: now,
+                    });
+                }
+            }
+            VadState::Silence => {
+                let started_at = started_guard.take();
+                drop(started_guard);
+                let duration_ms = started_at
+                    .map(|t| {
+                        (now - t)
+                            .to_std()
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0);
+                if let Some(bus) = self.event_bus() {
+                    let _ = bus.publish(ForgeEvent::SpeechStopped {
+                        call_id: self.call_id.clone(),
+                        timestamp: now,
+                        duration_ms,
+                    });
+                }
+            }
+            VadState::Unknown => {
+                // Hysteresis says we don't fire yet.
+            }
+        }
     }
 
     /// Get the transcoding configuration
@@ -2677,7 +2844,7 @@ impl MediaSession {
 
         // VAD config is cloned out before `config` is moved into the
         // struct literal below.
-        let vad_detector_config = config.vad_config.detector.clone();
+        let vad_detector = config.vad_config.build_detector()?;
 
         let session = Self {
             call_id,
@@ -2695,7 +2862,8 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
-            vad_detector: Arc::new(Mutex::new(forge_vad::VadDetector::new(vad_detector_config))),
+            vad_detector: Arc::new(Mutex::new(vad_detector)),
+            vad_rate_guard_tripped: AtomicBool::new(false),
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
@@ -3864,5 +4032,232 @@ mod tests {
         assert_eq!(s.packets_received, 5);
         assert_eq!(s.packets_lost(), 0);
         assert!(s.jitter_ms().abs() < 1e-6, "jitter_ms = {}", s.jitter_ms());
+    }
+
+    async fn vad_test_session(
+        port_range: (u16, u16),
+        vad_config: VadConfig,
+    ) -> (Arc<MediaSession>, tokio::sync::broadcast::Receiver<ForgeEvent>) {
+        let pool_config = PortPoolConfig::new(port_range.0, port_range.1).unwrap();
+        let port_pool = Arc::new(PortPool::new(pool_config));
+        let event_bus = Arc::new(EventBus::new());
+        let events = event_bus.subscribe();
+        let session = MediaSession::new(
+            CallId::generate(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            &port_pool,
+            MediaSessionConfig {
+                vad_config,
+                ..MediaSessionConfig::default()
+            },
+            Some(event_bus),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        (Arc::new(session), events)
+    }
+
+    fn drain_speech_events(
+        events: &mut tokio::sync::broadcast::Receiver<ForgeEvent>,
+    ) -> Vec<&'static str> {
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event {
+                ForgeEvent::SpeechStarted { .. } => seen.push("started"),
+                ForgeEvent::SpeechStopped { .. } => seen.push("stopped"),
+                _ => {}
+            }
+        }
+        seen
+    }
+
+    /// Speech-like 20 ms frame for the energy backend: high energy,
+    /// low ZCR.
+    fn energy_speech_frame() -> Vec<i16> {
+        (0..320)
+            .map(|i| ((i as f32 * 0.1).sin() * 4000.0) as i16)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn default_vad_session_still_emits_speech_events() {
+        // The engine refactor (VadConfig.detector -> .engine,
+        // AnyVadDetector) must keep default deployments emitting the
+        // same events as before.
+        let (session, mut events) =
+            vad_test_session((31100, 31299), VadConfig::default()).await;
+        assert_eq!(
+            session.vad_detector().lock().await.backend_name(),
+            "energy_zcr"
+        );
+
+        let speech = energy_speech_frame();
+        for _ in 0..20 {
+            session.process_vad_frame(&speech, 8000).await;
+        }
+        let silence = vec![0i16; 320];
+        for _ in 0..40 {
+            session.process_vad_frame(&silence, 8000).await;
+        }
+
+        let seen = drain_speech_events(&mut events);
+        assert_eq!(seen, vec!["started", "stopped"]);
+    }
+
+    #[tokio::test]
+    async fn energy_backend_ignores_pcm_rate_changes() {
+        // The energy detector is rate-agnostic; the rate guard must
+        // not rebuild it (that would reset adaptive state) when the
+        // stream rate differs from the configured default.
+        let (session, mut events) =
+            vad_test_session((31300, 31499), VadConfig::default()).await;
+        let speech = energy_speech_frame();
+        for rate in [8000, 16000, 48000] {
+            for _ in 0..10 {
+                session.process_vad_frame(&speech, rate).await;
+            }
+        }
+        assert_eq!(drain_speech_events(&mut events), vec!["started"]);
+    }
+
+    #[cfg(feature = "neural-vad")]
+    mod neural {
+        use super::*;
+
+        /// 3 s speech fixture shared with forge-vad's integration
+        /// tests (JFK 1961 inaugural excerpt, public domain).
+        fn fixture_16k() -> Vec<i16> {
+            let bytes: &[u8] =
+                include_bytes!("../../forge-vad/tests/fixtures/speech_16k.wav");
+            // Fixture is a known-good canonical WAV: 44-byte header,
+            // then s16le data.
+            bytes[44..]
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect()
+        }
+
+        fn neural_vad_config(min_silence_duration_ms: u32) -> VadConfig {
+            VadConfig {
+                enabled: true,
+                engine: forge_vad::VadEngineConfig::Neural(forge_vad::NeuralVadConfig {
+                    min_silence_duration_ms,
+                    ..forge_vad::NeuralVadConfig::default()
+                }),
+            }
+        }
+
+        #[tokio::test]
+        async fn neural_session_emits_speech_started_and_stopped() {
+            let (session, mut events) =
+                vad_test_session((31500, 31699), neural_vad_config(200)).await;
+            assert_eq!(
+                session.vad_detector().lock().await.backend_name(),
+                "neural"
+            );
+
+            // 20 ms frames, like the forwarding loop feeds.
+            for frame in fixture_16k().chunks(320) {
+                session.process_vad_frame(frame, 16000).await;
+            }
+            // 1 s of silence to trip the 200 ms exit hysteresis.
+            let silence = vec![0i16; 320];
+            for _ in 0..50 {
+                session.process_vad_frame(&silence, 16000).await;
+            }
+
+            let seen = drain_speech_events(&mut events);
+            assert!(!seen.is_empty(), "expected speech events");
+            assert_eq!(seen[0], "started");
+            assert_eq!(*seen.last().unwrap(), "stopped");
+        }
+
+        #[tokio::test]
+        async fn rate_guard_rebuilds_neural_detector_at_stream_rate() {
+            // Configured at the 16 kHz default, but the decoded
+            // stream turns out to be 8 kHz (e.g. G.711): the guard
+            // rebuilds the detector at 8 kHz and detection works.
+            let (session, mut events) =
+                vad_test_session((31700, 31899), neural_vad_config(200)).await;
+
+            let fixture_8k: Vec<i16> = fixture_16k().chunks(2).map(|c| c[0]).collect();
+            for frame in fixture_8k.chunks(160) {
+                session.process_vad_frame(frame, 8000).await;
+            }
+
+            assert_eq!(
+                session
+                    .vad_detector()
+                    .lock()
+                    .await
+                    .required_sample_rate(),
+                Some(8000),
+                "detector must have been rebuilt at the stream rate"
+            );
+            assert!(
+                drain_speech_events(&mut events).contains(&"started"),
+                "decimated speech still detected after the rate swap"
+            );
+            assert!(!session.vad_rate_guard_tripped.load(Ordering::Relaxed));
+        }
+
+        #[tokio::test]
+        async fn rate_guard_disables_vad_on_unsupported_rate() {
+            let (session, mut events) =
+                vad_test_session((31900, 32099), neural_vad_config(200)).await;
+
+            // 48 kHz PCM: no Silero model for it, no resampling in
+            // v1 — VAD must disable itself once, loudly, not error
+            // per frame or emit bogus events.
+            let frame = vec![0i16; 960];
+            for _ in 0..20 {
+                session.process_vad_frame(&frame, 48000).await;
+            }
+
+            assert!(session.vad_rate_guard_tripped.load(Ordering::Relaxed));
+            assert!(drain_speech_events(&mut events).is_empty());
+
+            // And it stays off — the fixture at a supported rate no
+            // longer reaches the (stale-rate) detector.
+            for frame in fixture_16k().chunks(320) {
+                session.process_vad_frame(frame, 16000).await;
+            }
+            assert!(drain_speech_events(&mut events).is_empty());
+        }
+
+        #[tokio::test]
+        async fn neural_build_failure_fails_session_setup() {
+            let pool_config = PortPoolConfig::new(32100, 32299).unwrap();
+            let port_pool = Arc::new(PortPool::new(pool_config));
+            let result = MediaSession::new(
+                CallId::generate(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                &port_pool,
+                MediaSessionConfig {
+                    vad_config: VadConfig {
+                        enabled: true,
+                        engine: forge_vad::VadEngineConfig::Neural(
+                            forge_vad::NeuralVadConfig {
+                                sample_rate: 44100,
+                                ..forge_vad::NeuralVadConfig::default()
+                            },
+                        ),
+                    },
+                    ..MediaSessionConfig::default()
+                },
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            let err = result.err().expect("bad VAD config must fail session setup");
+            assert!(err.to_string().contains("sample rates"), "{err}");
+        }
     }
 }

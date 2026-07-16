@@ -21,6 +21,7 @@ Forge is a high-performance RTP and WebRTC media engine for real-time communicat
 - **Recording**: Multi-format, multi-storage backend, audio and video recording
 - **SIPREC**: RFC 7865/7866 SRC and SRS roles
 - **DTMF**: RFC 2833 and in-band detection/generation
+- **Voice Activity Detection**: energy+ZCR (default) or neural Silero backend (`neural-vad` feature, local tract-onnx inference) driving `SpeechStarted`/`SpeechStopped` — see docs/NEURAL_VAD.md
 - **Transcription**: Real-time STT (Deepgram, Google, AWS, Azure)
 - **AI Streaming**: OpenAI Realtime, Dialogflow CX, Amazon Lex, Azure
 - **Audio Injection**: File playback, TTS, tone generation

@@ -281,13 +281,19 @@ pub struct Participant {
 /// Statistics for a participant
 #[derive(Debug, Clone, Default)]
 pub struct ParticipantStats {
-    /// Total packets received
+    /// Total RTP packets received from this leg's endpoint
     pub packets_received: u64,
-    /// Total bytes received
+    /// Total RTP *payload* octets received, excluding RTP headers and
+    /// SRTP overhead
     pub bytes_received: u64,
-    /// Total packets sent
+    /// Total RTP packets sent to this leg's endpoint — bridged from the
+    /// other leg plus forge-generated audio and DTMF. Feeds
+    /// [`forge_core::ForgeEvent::MediaStatsSnapshot::tx_packets_sent`].
     pub packets_sent: u64,
-    /// Total bytes sent
+    /// Total RTP *payload* octets sent, on the same basis as
+    /// `bytes_received` and as an SR's sender octet count (RFC 3550
+    /// §6.4.1). Feeds
+    /// [`forge_core::ForgeEvent::MediaStatsSnapshot::tx_octets_sent`].
     pub bytes_sent: u64,
     /// Packets lost
     pub packets_lost: u64,

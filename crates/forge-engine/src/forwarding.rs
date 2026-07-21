@@ -587,6 +587,11 @@ impl ForwardingEngine {
         };
 
         if let Some(addr) = receiver_addr {
+            // Octets we're about to put on the wire for the receiver, which
+            // is not `packet_len` (the *received* payload size) whenever
+            // transcoding re-encoded the payload into a different codec.
+            let tx_payload_len = packet.payload.len() as u64;
+
             // Serialize packet
             let data = packet.to_bytes();
 
@@ -619,7 +624,7 @@ impl ForwardingEngine {
                     &receiver,
                     participant_a,
                     participant_b,
-                    packet_len,
+                    tx_payload_len,
                     false,
                     None,
                 )
@@ -627,7 +632,7 @@ impl ForwardingEngine {
 
                 // Record sent metrics
                 counter!("forge_rtp_packets_sent_total").increment(1);
-                counter!("forge_rtp_bytes_sent_total").increment(packet_len);
+                counter!("forge_rtp_bytes_sent_total").increment(tx_payload_len);
             }
         } else {
             tracing::debug!(
@@ -762,10 +767,11 @@ impl ForwardingEngine {
     }
 
     /// Publish one [`ForgeEvent::MediaStatsSnapshot`] per leg that has
-    /// received RTP, when the session's `media_stats_interval` cadence is
-    /// configured and due. Called from the 20 ms housekeeping tick;
-    /// `last_emit` is the loop-local gate shared by both legs so the two
-    /// snapshots of a tick carry the same cadence.
+    /// carried RTP in either direction, when the session's
+    /// `media_stats_interval` cadence is configured and due. Called from
+    /// the 20 ms housekeeping tick; `last_emit` is the loop-local gate
+    /// shared by both legs so the two snapshots of a tick carry the same
+    /// cadence.
     ///
     /// Counters are cumulative since call start (see the event docs), so a
     /// consumer that misses a snapshot loses resolution, not data — which
@@ -796,12 +802,20 @@ impl ForwardingEngine {
             (forge_core::MediaLeg::A, participant_a),
             (forge_core::MediaLeg::B, participant_b),
         ] {
-            let rx = {
+            let (rx, tx_packets_sent, tx_octets_sent) = {
                 let p = participant.read().await;
-                if p.stats.rx_stream.packets_received == 0 {
-                    continue; // leg hasn't received RTP (e.g. WS-only side)
+                // Skip only a leg that has carried no RTP at all. Checking
+                // rx alone would silence the snapshot on a leg we only send
+                // to — exactly the outbound-AI case where the TX counters
+                // are the interesting half.
+                if p.stats.rx_stream.packets_received == 0 && p.stats.packets_sent == 0 {
+                    continue;
                 }
-                p.stats.rx_stream.clone()
+                (
+                    p.stats.rx_stream.clone(),
+                    p.stats.packets_sent,
+                    p.stats.bytes_sent,
+                )
             };
             let _ = bus.publish(ForgeEvent::MediaStatsSnapshot {
                 call_id: session.call_id().clone(),
@@ -811,6 +825,8 @@ impl ForwardingEngine {
                 rx_packets_out_of_order: rx.packets_out_of_order,
                 rx_packets_duplicate: rx.packets_duplicate,
                 rx_jitter_ms: rx.jitter_ms(),
+                tx_packets_sent,
+                tx_octets_sent,
                 timestamp: chrono::Utc::now(),
             });
         }
@@ -1146,6 +1162,11 @@ impl ForwardingEngine {
         payload: bytes::Bytes,
         marker: bool,
     ) -> Result<u64> {
+        // Payload octets, snapshotted before `payload` is moved into the
+        // RTP packet below. Feeds both the SR's sender octet count and the
+        // participant's `bytes_sent`.
+        let payload_len = payload.len() as u64;
+
         let (sequence_number, ssrc) = {
             let state = session.generated_rtp_state(leg);
             let mut state = state.lock().await;
@@ -1154,10 +1175,9 @@ impl ForwardingEngine {
             state.next_sequence = state.next_sequence.wrapping_add(1);
             state.next_timestamp = stream_cursor_after;
             // Sender stats for the periodic SR (RFC 3550 §6.4.1). Octet
-            // count is payload only, snapshotted before `payload` is moved
-            // into the RTP packet below.
+            // count is payload only.
             state.packets_sent = state.packets_sent.wrapping_add(1);
-            state.octets_sent = state.octets_sent.wrapping_add(payload.len() as u32);
+            state.octets_sent = state.octets_sent.wrapping_add(payload_len as u32);
             (sequence_number, ssrc)
         };
 
@@ -1187,11 +1207,15 @@ impl ForwardingEngine {
             .map_err(|e| ForgeError::Network(e.to_string()))?;
 
         let packet_len = send_data.len() as u64;
+        // `ParticipantStats::bytes_sent` counts RTP payload octets (the
+        // same basis as `bytes_received` and as an SR's sender octet
+        // count), not the protected wire length that `packet_len` carries
+        // back to this function's caller for its byte-rate metrics.
         Self::update_stats(
             &Side::from_label(leg),
             participant_a,
             participant_b,
-            packet_len,
+            payload_len,
             false,
             None,
         )
@@ -1565,6 +1589,11 @@ impl ForwardingEngine {
 
     /// Update participant statistics
     ///
+    /// `packet_len` is the RTP *payload* length in octets — never the
+    /// serialized or SRTP-protected wire length — so `bytes_received` and
+    /// `bytes_sent` share one basis with each other and with an SR's
+    /// sender octet count (RFC 3550 §6.4.1).
+    ///
     /// `rx` carries the RTP header fields needed to update the leg's
     /// [`RxStreamStats`] (sequence tracking + interarrival jitter) under
     /// the same write lock; pass `None` on the send side.
@@ -1773,10 +1802,17 @@ impl ForwardingEngine {
         let cr = if clock_rate == 0 { 8000 } else { clock_rate };
         let jitter_ms = (block.jitter as f32) / (cr as f32) * 1000.0;
         let packet_loss_ratio = (block.fraction_lost as f32) / 256.0;
+        // `cumulative_lost` and `extended_highest_seq` pass through
+        // verbatim — the parser has already sign-extended the former from
+        // its 24-bit wire form, and deriving a ratio from the latter needs
+        // the stream's initial sequence number, which is the consumer's to
+        // hold, not ours.
         ForgeEvent::RtcpReportReceived {
             call_id,
             jitter_ms,
             packet_loss_ratio,
+            cumulative_lost: block.cumulative_lost,
+            extended_highest_seq: block.extended_highest_seq,
             rtt_ms,
             timestamp: chrono::Utc::now(),
         }
@@ -2046,6 +2082,30 @@ mod tests {
         block
     }
 
+    /// The whole-stream loss fields ride through untouched — including a
+    /// negative `cumulative_lost`, which RFC 3550 §6.4.1 permits when
+    /// duplicates push packets-received past packets-expected.
+    #[test]
+    fn rtcp_report_event_passes_through_cumulative_loss_fields() {
+        for lost in [0, 12, -3] {
+            let mut block = rr_block(0, 0);
+            block.cumulative_lost = lost;
+            block.extended_highest_seq = 0x0001_04D2;
+            let event = ForwardingEngine::rtcp_report_event(CallId::generate(), &block, 8000, None);
+            match event {
+                ForgeEvent::RtcpReportReceived {
+                    cumulative_lost,
+                    extended_highest_seq,
+                    ..
+                } => {
+                    assert_eq!(cumulative_lost, lost);
+                    assert_eq!(extended_highest_seq, 0x0001_04D2);
+                }
+                other => panic!("expected RtcpReportReceived, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn rtcp_report_event_converts_jitter_at_8khz() {
         let call_id = CallId::generate();
@@ -2306,9 +2366,9 @@ mod tests {
     }
 
     /// With a cadence configured, one snapshot is published for the leg
-    /// that has received RTP — and none for the silent leg.
+    /// that has carried RTP — and none for the silent leg.
     #[tokio::test]
-    async fn media_stats_snapshot_emitted_for_receiving_leg_only() {
+    async fn media_stats_snapshot_emitted_for_active_leg_only() {
         let bus = Arc::new(forge_core::EventBus::new());
         let session = make_test_session_with_config(
             41600,
@@ -2320,6 +2380,12 @@ mod tests {
         )
         .await;
         seed_rx_stats(&session).await;
+        {
+            let pa = session.participant_a().clone();
+            let mut p = pa.write().await;
+            p.stats.packets_sent = 1914;
+            p.stats.bytes_sent = 306_240;
+        }
 
         let mut rx = bus.subscribe();
         let pa = session.participant_a().clone();
@@ -2336,6 +2402,8 @@ mod tests {
                 rx_packets_out_of_order,
                 rx_packets_duplicate,
                 rx_jitter_ms,
+                tx_packets_sent,
+                tx_octets_sent,
                 ..
             } => {
                 assert_eq!(&call_id, session.call_id());
@@ -2345,14 +2413,62 @@ mod tests {
                 assert_eq!(rx_packets_out_of_order, 0);
                 assert_eq!(rx_packets_duplicate, 0);
                 assert!(rx_jitter_ms.is_finite());
+                assert_eq!(tx_packets_sent, 1914);
+                assert_eq!(tx_octets_sent, 306_240);
             }
             other => panic!("expected MediaStatsSnapshot, got {other:?}"),
         }
         assert!(
             rx.try_recv().is_err(),
-            "leg B received no RTP — no snapshot for it"
+            "leg B carried no RTP in either direction — no snapshot for it"
         );
         assert!(last_emit.is_some(), "cadence gate advanced");
+    }
+
+    /// A leg forge only *sends* to — the outbound-AI shape, where the
+    /// carrier side is bridged but the AI side receives no RTP — still
+    /// gets a snapshot, because the TX counters are the whole point of it.
+    #[tokio::test]
+    async fn media_stats_snapshot_emitted_for_send_only_leg() {
+        let bus = Arc::new(forge_core::EventBus::new());
+        let session = make_test_session_with_config(
+            41900,
+            Some(bus.clone()),
+            MediaSessionConfig {
+                media_stats_interval: Some(std::time::Duration::ZERO),
+                ..Default::default()
+            },
+        )
+        .await;
+        {
+            let pb = session.participant_b().clone();
+            let mut p = pb.write().await;
+            p.stats.packets_sent = 500;
+            p.stats.bytes_sent = 80_000;
+        }
+
+        let mut rx = bus.subscribe();
+        let pa = session.participant_a().clone();
+        let pb = session.participant_b().clone();
+        let mut last_emit = None;
+        ForwardingEngine::maybe_emit_media_stats(&session, &pa, &pb, &mut last_emit).await;
+
+        match rx.try_recv().expect("a MediaStatsSnapshot was published") {
+            ForgeEvent::MediaStatsSnapshot {
+                leg,
+                rx_packets_received,
+                tx_packets_sent,
+                tx_octets_sent,
+                ..
+            } => {
+                assert_eq!(leg, forge_core::MediaLeg::B);
+                assert_eq!(rx_packets_received, 0);
+                assert_eq!(tx_packets_sent, 500);
+                assert_eq!(tx_octets_sent, 80_000);
+            }
+            other => panic!("expected MediaStatsSnapshot, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "leg A carried no RTP at all");
     }
 
     /// No `media_stats_interval` (the default) → no snapshots, even with

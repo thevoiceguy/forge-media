@@ -205,18 +205,41 @@ pub enum ForgeEvent {
     /// `[`QualityDegraded`] is reserved for threshold-driven semantics
     /// that may layer on top of this stream later.
     ///
-    /// All three RR-derived quality fields ride together so consumers
-    /// can update their state from one event rather than three.
+    /// All RR-derived quality fields ride together so consumers can
+    /// update their state from one event rather than several.
     RtcpReportReceived {
         call_id: CallId,
         /// Interarrival jitter in milliseconds, derived from the RR's
         /// jitter field (RFC 3550 §6.4.1) converted to ms via the RTP
         /// clock rate of the corresponding media stream.
         jitter_ms: f32,
-        /// Cumulative-loss ratio in `[0.0, 1.0]`, derived from the RR's
-        /// `fraction_lost` field (8-bit fixed-point, RFC 3550 §6.4.1)
-        /// divided by 256.
+        /// Loss ratio in `[0.0, 1.0]` over the *interval* since the
+        /// previous report, derived from the RR's `fraction_lost` field
+        /// (8-bit fixed-point, RFC 3550 §6.4.1) divided by 256.
+        ///
+        /// This is a per-interval measure, so averaging it across a call
+        /// does **not** yield the call's overall loss ratio — for that,
+        /// use `cumulative_lost` against the expected-packet count
+        /// derived from `extended_highest_seq` (RFC 3550 §A.3).
         packet_loss_ratio: f32,
+        /// Total packets the remote end has lost on the stream we send,
+        /// since the start of reception (RFC 3550 §6.4.1, signed 24-bit
+        /// as parsed off the wire).
+        ///
+        /// Signed because duplicates can make packets-received exceed
+        /// packets-expected, so a well-behaved sender can legitimately
+        /// report a negative total. Unlike `packet_loss_ratio` this is a
+        /// whole-stream figure and is what reconciles against a
+        /// carrier's own cumulative loss count.
+        cumulative_lost: i32,
+        /// Extended highest sequence number the remote end has received
+        /// (RFC 3550 §6.4.1): low 16 bits are the highest sequence
+        /// number seen, high 16 bits the wrap-around count.
+        ///
+        /// Subtracting the stream's initial sequence number gives the
+        /// packets *expected* (RFC 3550 §A.3), which is the denominator
+        /// `cumulative_lost` needs to become a true cumulative ratio.
+        extended_highest_seq: u32,
         /// Mean round-trip time in milliseconds, derived from RTCP
         /// SR/RR exchanges per RFC 3550 §A.7. `None` until forge-engine
         /// originates its own SRs (deferred to 0.3.1 per siphon-ai
@@ -227,19 +250,23 @@ pub enum ForgeEvent {
         timestamp: DateTime<Utc>,
     },
 
-    /// Periodic snapshot of locally-measured receive-side stream statistics.
+    /// Periodic snapshot of locally-measured stream statistics for one leg.
     ///
     /// Published per leg on the embedder-configured cadence
     /// (`MediaSessionConfig::media_stats_interval`; disabled when `None`)
-    /// once the leg has received RTP. Complements
-    /// [`Self::RtcpReportReceived`]: that event relays how the *remote*
-    /// end receives the stream we send, while these counters are measured
-    /// by the forwarding engine on the stream we *receive*. All counters
-    /// are cumulative since the start of the call, not per-interval
-    /// deltas — consumers diff successive snapshots if they need rates.
+    /// once the leg has carried RTP in either direction. Complements
+    /// [`Self::RtcpReportReceived`]: that event relays what the *remote*
+    /// end observed about the stream we send, while these counters are
+    /// measured locally by the forwarding engine. All counters are
+    /// cumulative since the start of the call, not per-interval deltas —
+    /// consumers diff successive snapshots if they need rates.
+    ///
+    /// `rx_*` describes what we received from this leg's endpoint; `tx_*`
+    /// what we sent to it, counting both bridged packets and packets
+    /// forge generated itself (AI audio, playout, injected DTMF).
     MediaStatsSnapshot {
         call_id: CallId,
-        /// Which participant leg received these packets.
+        /// Which participant leg these counters describe.
         leg: MediaLeg,
         /// Unique RTP packets received (duplicates excluded).
         rx_packets_received: u64,
@@ -255,6 +282,18 @@ pub enum ForgeEvent {
         /// Locally-computed interarrival jitter (RFC 3550 §6.4.1),
         /// converted to milliseconds via the leg's RTP clock rate.
         rx_jitter_ms: f32,
+        /// RTP packets sent to this leg's endpoint — bridged from the
+        /// other leg plus any forge-generated audio or DTMF.
+        ///
+        /// This is the denominator for [`Self::RtcpReportReceived`]'s
+        /// loss figures: those say how much of what we sent went missing,
+        /// this says how much we sent.
+        tx_packets_sent: u64,
+        /// RTP *payload* octets sent to this leg's endpoint, excluding
+        /// RTP headers and any SRTP overhead — the same accounting as
+        /// `rx_*` byte counts and as an SR's sender octet count
+        /// (RFC 3550 §6.4.1).
+        tx_octets_sent: u64,
         timestamp: DateTime<Utc>,
     },
 
@@ -582,6 +621,8 @@ mod tests {
             rx_packets_out_of_order: 2,
             rx_packets_duplicate: 1,
             rx_jitter_ms: 4.25,
+            tx_packets_sent: 1914,
+            tx_octets_sent: 306_240,
             timestamp: Utc::now(),
         };
         assert_eq!(event.event_type(), "media_stats_snapshot");
@@ -590,18 +631,61 @@ mod tests {
         assert_eq!(json["type"], "media_stats_snapshot");
         assert_eq!(json["leg"], "a");
         assert_eq!(json["rx_packets_received"], 1500);
+        assert_eq!(json["tx_packets_sent"], 1914);
+        assert_eq!(json["tx_octets_sent"], 306_240);
 
         let back: ForgeEvent = serde_json::from_value(json).unwrap();
         match back {
             ForgeEvent::MediaStatsSnapshot {
                 leg,
                 rx_packets_lost,
+                tx_packets_sent,
+                tx_octets_sent,
                 ..
             } => {
                 assert_eq!(leg, MediaLeg::A);
                 assert_eq!(rx_packets_lost, 3);
+                assert_eq!(tx_packets_sent, 1914);
+                assert_eq!(tx_octets_sent, 306_240);
             }
             other => panic!("expected MediaStatsSnapshot, got {other:?}"),
+        }
+    }
+
+    /// The RR passthrough fields survive a serde round-trip with their
+    /// wire types intact — `cumulative_lost` in particular is signed, and
+    /// a consumer that deserializes it as unsigned would read a negative
+    /// (duplicate-inflated) total as a huge positive one.
+    #[test]
+    fn test_rtcp_report_received_serde_roundtrip() {
+        let event = ForgeEvent::RtcpReportReceived {
+            call_id: CallId::generate(),
+            jitter_ms: 12.5,
+            packet_loss_ratio: 0.25,
+            cumulative_lost: -3,
+            extended_highest_seq: 0x0001_04D2,
+            rtt_ms: Some(42.5),
+            timestamp: Utc::now(),
+        };
+        assert_eq!(event.event_type(), "rtcp_report_received");
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["cumulative_lost"], -3);
+        assert_eq!(json["extended_highest_seq"], 0x0001_04D2);
+
+        let back: ForgeEvent = serde_json::from_value(json).unwrap();
+        match back {
+            ForgeEvent::RtcpReportReceived {
+                cumulative_lost,
+                extended_highest_seq,
+                packet_loss_ratio,
+                ..
+            } => {
+                assert_eq!(cumulative_lost, -3);
+                assert_eq!(extended_highest_seq, 0x0001_04D2);
+                assert_eq!(packet_loss_ratio, 0.25);
+            }
+            other => panic!("expected RtcpReportReceived, got {other:?}"),
         }
     }
 }

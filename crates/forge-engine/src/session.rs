@@ -4223,43 +4223,56 @@ mod tests {
         assert_eq!(s.packets_lost(), 4);
     }
 
-    /// The field failure, replayed from a real Twilio capture.
+    /// The reported signature: `rx_packets_lost` equal to the ring
+    /// duration in packets, frozen for the rest of the call, pinning MOS
+    /// to the floor of the scale (siphon-ai #330 — 621 lost on a 12.42 s
+    /// ring).
     ///
-    /// The trunk sends ringback as early media, then switches SSRC at the
-    /// answer while keeping the sequence counter *continuous* across the
-    /// change (capture: SSRC 0x10FCD7B3 seq 773.., 0x7586F026 seq 785..,
-    /// 0x5618A94F seq 1522.. — no sequence gap anywhere, 2561 packets,
-    /// zero wire loss).
+    /// This models a **sequence discontinuity at the stream change**. All
+    /// packets are counted (verified against a live daemon: a call with
+    /// ringback and no post-answer media reports the ringback packets in
+    /// `rx_packets_received`), so the phantom loss cannot come from an
+    /// uncounted burst — it comes from the answered stream's sequence not
+    /// continuing the ringback stream's. A media server deriving the new
+    /// stream's start sequence from a clock that has been running since
+    /// call setup produces exactly the observed `ring_seconds × 50`.
     ///
-    /// Only the first ringback packet reaches these stats; the rest of the
-    /// early-media burst is received but never counted. With one
-    /// SSRC-blind baseline that leaves `base` anchored at seq 773 while
-    /// counting resumes at 1522, so the expected-packet span covers the
-    /// whole ring and the shortfall equals the ringback packet count —
-    /// `ring_seconds × 50`, frozen for the rest of the call, which is
-    /// precisely the reported signature (siphon-ai #330: 621 lost on a
-    /// 12.42 s ring, MOS pinned to 1.0).
+    /// Under one SSRC-blind baseline that jump is read as motion inside
+    /// the old stream, so the expected-packet span absorbs it and the
+    /// shortfall equals the jump. Re-baselining on the SSRC change
+    /// discards the stale baseline, which handles this discontinuity and
+    /// any other.
     ///
-    /// Re-baselining on the SSRC change discards the poisoned baseline,
-    /// because that change coincides with the answer.
+    /// Sizes come from a real capture of this trunk: ~15 s of ringback at
+    /// 50 pps (749 packets, seq 773..1521) then 1812 answered packets.
+    /// The *packets* are real; the discontinuity is the hypothesis, since
+    /// the failing call's own packets were never captured. Either way the
+    /// fix is what the assertion pins.
     #[test]
-    fn rx_stream_ringback_ssrc_switch_does_not_fabricate_ring_duration_loss() {
+    fn rx_stream_sequence_jump_at_ssrc_change_is_not_loss() {
+        const RING_PACKETS: u32 = 749; // ~14.98 s at 50 pps
         let mut s = RxStreamStats::default();
-        // One early-media packet counted, at the capture's real start.
-        feed_ssrc(&mut s, 0x10FC_D7B3, &[(773, 0, 0)]);
-        // ~15 s of ringback arrives but never reaches these stats, then
-        // the answered stream starts on a new SSRC at the next sequence.
+
+        // Ringback, fully counted, contiguous.
+        let ring: Vec<_> = (0..RING_PACKETS)
+            .map(|i| ((773 + i) as u16, 160 * i, 20 * i as u64))
+            .collect();
+        feed_ssrc(&mut s, 0x10FC_D7B3, &ring);
+        assert_eq!(s.packets_lost(), 0, "clean ringback stream");
+
+        // Answered stream on a new SSRC, starting RING_PACKETS *ahead* of
+        // where the ringback stream ended rather than continuing it.
+        let first_answered = 773 + RING_PACKETS + RING_PACKETS;
         let answered: Vec<_> = (0..1812u32)
-            .map(|i| ((1522 + i) as u16, 160 * i, 14_980 + 20 * i as u64))
+            .map(|i| ((first_answered + i) as u16, 160 * i, 14_980 + 20 * i as u64))
             .collect();
         feed_ssrc(&mut s, 0x5618_A94F, &answered);
 
-        assert_eq!(s.packets_received, 1813);
+        assert_eq!(s.packets_received, RING_PACKETS as u64 + 1812);
         assert_eq!(
             s.packets_lost(),
             0,
-            "the uncounted ringback burst belongs to a stream that ended; \
-             it must not be charged as loss against the answered stream"
+            "a new source's start sequence is not a gap in the stream that ended"
         );
     }
 

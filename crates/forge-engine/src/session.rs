@@ -321,9 +321,22 @@ pub struct RxStreamStats {
     pub packets_out_of_order: u64,
     /// Re-receives of a sequence number inside the recent-packet window.
     pub packets_duplicate: u64,
-    /// Extended sequence number of the first packet.
+    /// SSRC of the stream currently being tracked. Sequence numbers are
+    /// only comparable within one SSRC (RFC 3550 §8: each source has its
+    /// own independent, randomly-initialised sequence space), so a change
+    /// here re-baselines the per-stream fields below.
+    ssrc: Option<u32>,
+    /// Loss folded in from streams that have already ended, so the
+    /// cumulative total survives an SSRC change.
+    lost_carry: u64,
+    /// `packets_received` at the moment the current stream started —
+    /// lets [`Self::packets_lost`] measure the current stream's shortfall
+    /// without the earlier streams' packets counting toward it.
+    received_at_stream_start: u64,
+    /// Extended sequence number of the first packet *of the current
+    /// stream*.
     base_seq_ext: Option<u64>,
-    /// Highest extended sequence number seen.
+    /// Highest extended sequence number seen in the current stream.
     max_seq_ext: u64,
     /// Receive bitmask for the 64 sequence numbers ending at
     /// `max_seq_ext` (bit 0 = `max_seq_ext` itself), for dup detection.
@@ -342,6 +355,19 @@ pub struct RxStreamStats {
 impl RxStreamStats {
     /// Record one received RTP packet.
     ///
+    /// `ssrc` identifies the synchronisation source. Sequence numbers are
+    /// only meaningful *within* one SSRC — RFC 3550 §8 gives every source
+    /// its own randomly-initialised sequence space — so a change closes
+    /// out the previous stream and re-baselines. Without this, a mid-call
+    /// stream change (ringback → answered media is the common one) has
+    /// the new stream's random start sequence read as motion inside the
+    /// old stream: land forward of `max_seq_ext` and the expected-packet
+    /// span inflates into phantom **loss**; land behind it and the
+    /// packets are miscounted as **reordered or duplicate**. Both were
+    /// observed in the field, the first as an `rx_packets_lost` that
+    /// tracked ring duration and pinned MOS to the floor of the scale for
+    /// the whole call (siphon-ai #330).
+    ///
     /// `clock_rate` is the negotiated RTP clock (48 000 for Opus, not the
     /// bridge rate). `count_jitter` should be `false` for packets whose
     /// RTP timestamp does not track wall-clock audio time (RFC 2833
@@ -349,17 +375,39 @@ impl RxStreamStats {
     /// the packet still counts toward the sequence statistics.
     pub fn record(
         &mut self,
+        ssrc: u32,
         sequence: u16,
         rtp_timestamp: u32,
         arrival: Instant,
         clock_rate: u32,
         count_jitter: bool,
     ) {
+        // A new source: bank what the finished stream lost, then start
+        // clean. Cumulative counters (`packets_received`, reorder, dup)
+        // keep accumulating — the event contract documents them as
+        // per-call totals, not per-stream.
+        if self.ssrc != Some(ssrc) {
+            if self.ssrc.is_some() {
+                self.lost_carry = self.lost_carry.saturating_add(self.current_stream_lost());
+                self.base_seq_ext = None;
+                // The RTP timestamp base is per-source too, so the first
+                // transit sample of the new stream is meaningless as a
+                // delta against the old one. Drop it rather than feeding
+                // the jitter filter a large artificial spike.
+                self.last_transit = None;
+            }
+            self.ssrc = Some(ssrc);
+            self.received_at_stream_start = self.packets_received;
+        }
+
         let Some(base) = self.base_seq_ext else {
             self.base_seq_ext = Some(sequence as u64);
             self.max_seq_ext = sequence as u64;
             self.recent_window = 1;
-            self.packets_received = 1;
+            // `+=`, not `= 1`: this branch also runs for the first packet
+            // of a *subsequent* stream, and `packets_received` is a
+            // per-call total that must survive the re-baseline.
+            self.packets_received += 1;
             self.update_jitter(rtp_timestamp, arrival, clock_rate, count_jitter);
             return;
         };
@@ -433,10 +481,22 @@ impl RxStreamStats {
         }
     }
 
-    /// Cumulative sequence-gap loss. Late arrivals repair this
-    /// retroactively, so it can shrink between reads.
+    /// Shortfall of the stream currently being tracked: its
+    /// expected-packet span minus the packets it actually contributed.
+    /// Scoped to one SSRC — comparing a span against a total that spans
+    /// several sources is what produced the phantom loss this replaced.
+    fn current_stream_lost(&self) -> u64 {
+        let received_this_stream = self
+            .packets_received
+            .saturating_sub(self.received_at_stream_start);
+        self.expected().saturating_sub(received_this_stream)
+    }
+
+    /// Cumulative sequence-gap loss across every stream on this leg.
+    /// Late arrivals repair the current stream's share retroactively, so
+    /// it can shrink between reads.
     pub fn packets_lost(&self) -> u64 {
-        self.expected().saturating_sub(self.packets_received)
+        self.lost_carry.saturating_add(self.current_stream_lost())
     }
 
     /// Interarrival jitter converted to milliseconds via the stream's RTP
@@ -3923,12 +3983,21 @@ mod tests {
         assert!(queue.next_rtp_timestamp.is_none());
     }
 
+    /// SSRC used by every single-stream fixture below, so `feed` reads the
+    /// same as it did before streams became a concept.
+    const TEST_SSRC: u32 = 0x1111_1111;
+
     /// Feed `stats` a run of packets described as `(seq, rtp_ts, arrival_ms)`
-    /// at an 8 kHz clock with jitter counting on.
+    /// at an 8 kHz clock with jitter counting on, all on one SSRC.
     fn feed(stats: &mut RxStreamStats, packets: &[(u16, u32, u64)]) {
+        feed_ssrc(stats, TEST_SSRC, packets);
+    }
+
+    /// As [`feed`], but on a named SSRC — for the stream-change cases.
+    fn feed_ssrc(stats: &mut RxStreamStats, ssrc: u32, packets: &[(u16, u32, u64)]) {
         let t0 = Instant::now();
         for &(seq, ts, at_ms) in packets {
-            stats.record(seq, ts, t0 + Duration::from_millis(at_ms), 8000, true);
+            stats.record(ssrc, seq, ts, t0 + Duration::from_millis(at_ms), 8000, true);
         }
     }
 
@@ -4025,18 +4094,184 @@ mod tests {
     fn rx_stream_telephone_event_counts_sequence_not_jitter() {
         let mut s = RxStreamStats::default();
         let t0 = Instant::now();
-        s.record(1, 160, t0, 8000, true);
-        s.record(2, 320, t0 + Duration::from_millis(20), 8000, true);
+        s.record(0xFEED_FACE, 1, 160, t0, 8000, true);
+        s.record(
+            0xFEED_FACE,
+            2,
+            320,
+            t0 + Duration::from_millis(20),
+            8000,
+            true,
+        );
         // RFC 2833 burst: timestamp frozen at the digit start — would fake
         // a huge transit swing if it entered the jitter filter.
-        s.record(3, 320, t0 + Duration::from_millis(40), 8000, false);
-        s.record(4, 320, t0 + Duration::from_millis(60), 8000, false);
+        s.record(
+            0xFEED_FACE,
+            3,
+            320,
+            t0 + Duration::from_millis(40),
+            8000,
+            false,
+        );
+        s.record(
+            0xFEED_FACE,
+            4,
+            320,
+            t0 + Duration::from_millis(60),
+            8000,
+            false,
+        );
         // Audio resumes on the original cadence.
-        s.record(5, 800, t0 + Duration::from_millis(80), 8000, true);
+        s.record(
+            0xFEED_FACE,
+            5,
+            800,
+            t0 + Duration::from_millis(80),
+            8000,
+            true,
+        );
 
         assert_eq!(s.packets_received, 5);
         assert_eq!(s.packets_lost(), 0);
         assert!(s.jitter_ms().abs() < 1e-6, "jitter_ms = {}", s.jitter_ms());
+    }
+
+    // ── stream (SSRC) changes — siphon-ai #330 ──
+
+    /// The reported failure: ringback and answered media are separate
+    /// sources, and the second stream's random start sequence landing
+    /// *ahead* of the first stream's high-water mark inflated the
+    /// expected-packet span into loss that never existed. Two clean
+    /// streams must report clean.
+    #[test]
+    fn rx_stream_ssrc_change_forward_seq_is_not_loss() {
+        let mut s = RxStreamStats::default();
+        // Ringback: 200 packets (4 s at 50 pps), no gaps.
+        let ring: Vec<_> = (0..200u16)
+            .map(|i| (100 + i, 160 * i as u32, 20 * i as u64))
+            .collect();
+        feed_ssrc(&mut s, 0xAAAA_AAAA, &ring);
+        assert_eq!(s.packets_lost(), 0, "clean ringback stream");
+
+        // Answered media, unrelated source, sequence far ahead.
+        let answered: Vec<_> = (0..100u16)
+            .map(|i| (40_000 + i, 160 * i as u32, 4_000 + 20 * i as u64))
+            .collect();
+        feed_ssrc(&mut s, 0xBBBB_BBBB, &answered);
+
+        assert_eq!(
+            s.packets_received, 300,
+            "both streams count toward the call total"
+        );
+        assert_eq!(
+            s.packets_lost(),
+            0,
+            "a new SSRC re-baselines; its start sequence is not a gap in the old stream"
+        );
+    }
+
+    /// The mirror image, which is what a loopback harness reproduces: the
+    /// new stream's start sequence lands *behind* the old high-water mark
+    /// and the packets were miscounted as reordered/duplicate instead.
+    #[test]
+    fn rx_stream_ssrc_change_backward_seq_is_not_reorder_or_duplicate() {
+        let mut s = RxStreamStats::default();
+        feed_ssrc(
+            &mut s,
+            0xAAAA_AAAA,
+            &[(50_000, 0, 0), (50_001, 160, 20), (50_002, 320, 40)],
+        );
+        // Second source starts low — inside the old stream's history.
+        feed_ssrc(
+            &mut s,
+            0xBBBB_BBBB,
+            &[(10, 0, 60), (11, 160, 80), (12, 320, 100)],
+        );
+
+        assert_eq!(s.packets_received, 6);
+        assert_eq!(
+            s.packets_out_of_order, 0,
+            "a new source is not a late arrival"
+        );
+        assert_eq!(s.packets_duplicate, 0, "a new source is not a re-receive");
+        assert_eq!(s.packets_lost(), 0);
+    }
+
+    /// Real loss in a stream that ended must survive the switch, so the
+    /// per-call total stays honest rather than being reset by a new SSRC.
+    #[test]
+    fn rx_stream_loss_before_ssrc_change_is_carried() {
+        let mut s = RxStreamStats::default();
+        // Gap: 1, 2, then 5 — packets 3 and 4 genuinely lost.
+        feed_ssrc(
+            &mut s,
+            0xAAAA_AAAA,
+            &[(1, 0, 0), (2, 160, 20), (5, 640, 80)],
+        );
+        assert_eq!(s.packets_lost(), 2);
+
+        feed_ssrc(&mut s, 0xBBBB_BBBB, &[(900, 0, 100), (901, 160, 120)]);
+        assert_eq!(
+            s.packets_lost(),
+            2,
+            "earlier stream's real loss is retained"
+        );
+        assert_eq!(s.packets_received, 5);
+
+        // …and new loss on the new stream adds to it.
+        feed_ssrc(&mut s, 0xBBBB_BBBB, &[(904, 640, 180)]);
+        assert_eq!(s.packets_lost(), 4);
+    }
+
+    /// The field failure, replayed from a real Twilio capture.
+    ///
+    /// The trunk sends ringback as early media, then switches SSRC at the
+    /// answer while keeping the sequence counter *continuous* across the
+    /// change (capture: SSRC 0x10FCD7B3 seq 773.., 0x7586F026 seq 785..,
+    /// 0x5618A94F seq 1522.. — no sequence gap anywhere, 2561 packets,
+    /// zero wire loss).
+    ///
+    /// Only the first ringback packet reaches these stats; the rest of the
+    /// early-media burst is received but never counted. With one
+    /// SSRC-blind baseline that leaves `base` anchored at seq 773 while
+    /// counting resumes at 1522, so the expected-packet span covers the
+    /// whole ring and the shortfall equals the ringback packet count —
+    /// `ring_seconds × 50`, frozen for the rest of the call, which is
+    /// precisely the reported signature (siphon-ai #330: 621 lost on a
+    /// 12.42 s ring, MOS pinned to 1.0).
+    ///
+    /// Re-baselining on the SSRC change discards the poisoned baseline,
+    /// because that change coincides with the answer.
+    #[test]
+    fn rx_stream_ringback_ssrc_switch_does_not_fabricate_ring_duration_loss() {
+        let mut s = RxStreamStats::default();
+        // One early-media packet counted, at the capture's real start.
+        feed_ssrc(&mut s, 0x10FC_D7B3, &[(773, 0, 0)]);
+        // ~15 s of ringback arrives but never reaches these stats, then
+        // the answered stream starts on a new SSRC at the next sequence.
+        let answered: Vec<_> = (0..1812u32)
+            .map(|i| ((1522 + i) as u16, 160 * i, 14_980 + 20 * i as u64))
+            .collect();
+        feed_ssrc(&mut s, 0x5618_A94F, &answered);
+
+        assert_eq!(s.packets_received, 1813);
+        assert_eq!(
+            s.packets_lost(),
+            0,
+            "the uncounted ringback burst belongs to a stream that ended; \
+             it must not be charged as loss against the answered stream"
+        );
+    }
+
+    /// A single stream must behave exactly as before — the SSRC argument
+    /// is inert when it never changes.
+    #[test]
+    fn rx_stream_single_ssrc_unchanged_behaviour() {
+        let mut a = RxStreamStats::default();
+        feed(&mut a, &[(1, 0, 0), (2, 160, 20), (5, 640, 80)]);
+        assert_eq!(a.packets_received, 3);
+        assert_eq!(a.packets_lost(), 2);
+        assert_eq!(a.packets_out_of_order, 0);
     }
 
     async fn vad_test_session(

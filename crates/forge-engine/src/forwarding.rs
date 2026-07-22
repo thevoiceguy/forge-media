@@ -18,6 +18,9 @@ const SR_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// RTP header fields threaded into [`ForwardingEngine::update_stats`] so a
 /// received packet also updates the leg's receive-side stream statistics.
 struct RxPacketMeta {
+    /// Synchronisation source. Sequence numbers are only comparable
+    /// within one SSRC, so `RxStreamStats` re-baselines when it changes.
+    ssrc: u32,
     sequence: u16,
     rtp_timestamp: u32,
     /// Negotiated RTP clock rate for jitter→ms conversion.
@@ -540,6 +543,7 @@ impl ForwardingEngine {
             packet_len,
             true,
             Some(RxPacketMeta {
+                ssrc: packet.header.ssrc,
                 sequence: packet.header.sequence_number,
                 rtp_timestamp: packet.header.timestamp,
                 // The negotiated RTP clock (48 kHz for Opus), not the
@@ -1618,6 +1622,7 @@ impl ForwardingEngine {
             p.stats.last_packet_at = Some(now);
             if let Some(rx) = rx {
                 p.stats.rx_stream.record(
+                    rx.ssrc,
                     rx.sequence,
                     rx.rtp_timestamp,
                     now,
@@ -2348,8 +2353,11 @@ mod tests {
         let pa = session.participant_a().clone();
         let mut p = pa.write().await;
         let t0 = std::time::Instant::now();
-        p.stats.rx_stream.record(1, 160, t0, 8000, true);
+        p.stats
+            .rx_stream
+            .record(0xFEED_FACE, 1, 160, t0, 8000, true);
         p.stats.rx_stream.record(
+            0xFEED_FACE,
             2,
             320,
             t0 + std::time::Duration::from_millis(20),
@@ -2357,6 +2365,7 @@ mod tests {
             true,
         );
         p.stats.rx_stream.record(
+            0xFEED_FACE,
             4,
             640,
             t0 + std::time::Duration::from_millis(60),

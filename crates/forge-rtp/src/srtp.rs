@@ -10,6 +10,7 @@ use forge_core::{ForgeError, Result};
 use hmac::{Hmac, Mac};
 use metrics::counter;
 use sha1::Sha1;
+use std::collections::HashMap;
 use subtle::ConstantTimeEq;
 
 type HmacSha1 = Hmac<Sha1>;
@@ -401,16 +402,19 @@ pub struct SrtpContext {
     remote_key: Option<SrtpKeyMaterial>,
     /// Replay protection window for RTP
     replay_window: ReplayWindow,
-    /// Replay protection window for RTCP (separate per RFC 3711 Section 3.4)
-    srtcp_replay_window: ReplayWindow,
+    /// Per-SSRC replay protection windows for RTCP (RFC 3711 Section 3.4).
+    /// Each SSRC has its own SRTCP index space, so a shared window would
+    /// reject a new SSRC's fresh low indices as replays after a mid-call
+    /// SSRC change (e.g. carrier ringback → answered stream).
+    /// Entries are only created after successful authentication, so forged
+    /// SSRCs cannot grow the map.
+    srtcp_replay_windows: HashMap<u32, ReplayWindow>,
     /// ROC tracker for local (outbound) SSRC
     local_roc: RocTracker,
     /// ROC tracker for remote (inbound) SSRC
     remote_roc: RocTracker,
     /// SRTCP index for local (outbound) RTCP packets
     local_srtcp_index: u32,
-    /// SRTCP index for remote (inbound) RTCP packets (highest received)
-    remote_srtcp_index: u32,
 }
 
 impl SrtpContext {
@@ -420,11 +424,10 @@ impl SrtpContext {
             local_key: None,
             remote_key: None,
             replay_window: ReplayWindow::new(64),
-            srtcp_replay_window: ReplayWindow::new(64),
+            srtcp_replay_windows: HashMap::new(),
             local_roc: RocTracker::new(),
             remote_roc: RocTracker::new(),
             local_srtcp_index: 0,
-            remote_srtcp_index: 0,
         }
     }
 
@@ -434,11 +437,10 @@ impl SrtpContext {
             local_key: Some(local_key),
             remote_key: Some(remote_key),
             replay_window: ReplayWindow::new(64),
-            srtcp_replay_window: ReplayWindow::new(64),
+            srtcp_replay_windows: HashMap::new(),
             local_roc: RocTracker::new(),
             remote_roc: RocTracker::new(),
             local_srtcp_index: 0,
-            remote_srtcp_index: 0,
         }
     }
 
@@ -1274,15 +1276,18 @@ impl SrtpContext {
             ));
         }
 
-        // SRTCP replay protection (RFC 3711 Section 3.4)
-        // Check if this index has been seen before
-        if self.srtcp_replay_window.check(srtcp_index as u64) {
-            counter!("forge_srtcp_replay_attacks_blocked_total").increment(1);
-            return Err(ForgeError::Srtp("SRTCP replay attack detected".to_string()));
-        }
-
         // Extract SSRC
         let ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+
+        // SRTCP replay protection (RFC 3711 Section 3.4), per SSRC: each
+        // SSRC has its own SRTCP index space, so an unseen SSRC is never a
+        // replay even if another SSRC has already advanced past its index.
+        if let Some(window) = self.srtcp_replay_windows.get(&ssrc) {
+            if window.check(srtcp_index as u64) {
+                counter!("forge_srtcp_replay_attacks_blocked_total").increment(1);
+                return Err(ForgeError::Srtp("SRTCP replay attack detected".to_string()));
+            }
+        }
 
         // Derive session keys
         let derived_keys = key_material.derive_srtcp_session_keys(ssrc, srtcp_index as u64)?;
@@ -1307,11 +1312,12 @@ impl SrtpContext {
                 )?,
         };
 
-        // Update SRTCP replay window and highest index
-        self.srtcp_replay_window.update(srtcp_index as u64);
-        if srtcp_index > self.remote_srtcp_index {
-            self.remote_srtcp_index = srtcp_index;
-        }
+        // Update this SSRC's replay window only after successful
+        // authentication, so forged packets cannot create or advance windows
+        self.srtcp_replay_windows
+            .entry(ssrc)
+            .or_insert_with(|| ReplayWindow::new(64))
+            .update(srtcp_index as u64);
 
         // Increment metrics counter
         counter!("forge_srtcp_packets_decrypted_total").increment(1);
@@ -2014,6 +2020,54 @@ mod tests {
         // Decrypt
         let decrypted = decrypt_ctx.unprotect_rtcp(&srtcp_packet).unwrap();
         assert_eq!(decrypted, rtcp_packet);
+    }
+
+    /// Regression test for issue #97: the SRTCP replay window must be
+    /// per-SSRC (RFC 3711 Section 3.4). When the inbound RTCP SSRC changes
+    /// mid-session (e.g. carrier ringback → answered stream), the new SSRC's
+    /// low SRTCP indices must not be rejected as replays of the old SSRC's.
+    #[test]
+    fn test_srtcp_replay_window_is_per_ssrc() {
+        let master_key = vec![0x3Cu8; 16];
+        let master_salt = vec![0xC3u8; 14];
+        let profile = SrtpProfile::Aes128CmHmacSha1_80;
+        let make_key =
+            || SrtpKeyMaterial::new(master_key.clone(), master_salt.clone(), profile).unwrap();
+
+        // Two senders sharing the same key material but using different
+        // SSRCs — each starts its SRTCP index space from zero.
+        let mut sender_a = SrtpContext::new();
+        sender_a.set_local_key(make_key());
+        let mut sender_b = SrtpContext::new();
+        sender_b.set_local_key(make_key());
+
+        let mut receiver = SrtpContext::new();
+        receiver.set_remote_key(make_key());
+
+        let rtcp_a = create_test_rtcp_packet(0xAAAA0001);
+        let rtcp_b = create_test_rtcp_packet(0xBBBB0002);
+
+        // SSRC A sends a few RTCP packets, advancing its index past B's.
+        let mut last_a = Vec::new();
+        for _ in 0..3 {
+            last_a = sender_a.protect_rtcp(&rtcp_a).unwrap();
+            receiver.unprotect_rtcp(&last_a).unwrap();
+        }
+
+        // SSRC B's first packets carry low indices (<= A's high-water mark).
+        // With a shared replay window these were falsely flagged as replays.
+        for _ in 0..3 {
+            let srtcp_b = sender_b.protect_rtcp(&rtcp_b).unwrap();
+            receiver
+                .unprotect_rtcp(&srtcp_b)
+                .expect("fresh SSRC's low SRTCP index must not be treated as a replay");
+        }
+
+        // Genuine replays are still caught for each SSRC independently.
+        assert!(receiver.unprotect_rtcp(&last_a).is_err());
+        let srtcp_b = sender_b.protect_rtcp(&rtcp_b).unwrap();
+        receiver.unprotect_rtcp(&srtcp_b).unwrap();
+        assert!(receiver.unprotect_rtcp(&srtcp_b).is_err());
     }
 
     /// Test authentication failure detection

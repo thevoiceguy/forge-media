@@ -17,7 +17,34 @@ impl MetricsHandle {
     /// Initialize Prometheus metrics exporter
     pub fn init() -> Self {
         let handle = PROM_HANDLE.get_or_init(|| {
-            PrometheusBuilder::new()
+            let handle = PrometheusBuilder::new()
+                // Per-metric buckets. Full matchers win over the generic
+                // suffix matchers below regardless of insertion order.
+                .set_buckets_for_metric(
+                    Matcher::Full(forge_engine::metrics::M_VAD_NEURAL_INFERENCE.to_string()),
+                    &forge_engine::metrics::VAD_NEURAL_INFERENCE_SECONDS_BUCKETS,
+                )
+                .unwrap()
+                .set_buckets_for_metric(
+                    Matcher::Full(forge_engine::metrics::M_TRANSCODING_DURATION.to_string()),
+                    &forge_engine::metrics::TRANSCODING_DURATION_SECONDS_BUCKETS,
+                )
+                .unwrap()
+                .set_buckets_for_metric(
+                    Matcher::Full(forge_conference::metrics::M_MIXING_DURATION.to_string()),
+                    &forge_conference::metrics::MIXING_DURATION_SECONDS_BUCKETS,
+                )
+                .unwrap()
+                .set_buckets_for_metric(
+                    Matcher::Full(crate::metrics::M_WEBRTC_ESTABLISHMENT.to_string()),
+                    &crate::metrics::WEBRTC_ESTABLISHMENT_SECONDS_BUCKETS,
+                )
+                .unwrap()
+                .set_buckets_for_metric(
+                    Matcher::Full(crate::metrics::M_SDP_NEGOTIATION_DURATION.to_string()),
+                    &crate::metrics::SDP_NEGOTIATION_SECONDS_BUCKETS,
+                )
+                .unwrap()
                 // Configure histogram buckets for latency metrics
                 .set_buckets_for_metric(
                     Matcher::Suffix("duration_seconds".to_string()),
@@ -36,7 +63,11 @@ impl MetricsHandle {
                 )
                 .unwrap()
                 .install_recorder()
-                .expect("Failed to install Prometheus recorder")
+                .expect("Failed to install Prometheus recorder");
+            // Descriptions only reach a recorder that is already
+            // installed, so this must come after install_recorder().
+            crate::metrics::describe_metrics();
+            handle
         });
 
         Self {

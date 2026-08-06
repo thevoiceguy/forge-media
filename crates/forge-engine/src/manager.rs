@@ -95,6 +95,7 @@ pub struct SessionManager {
 impl SessionManager {
     /// Create a new session manager
     pub fn new(config: SessionManagerConfig, event_bus: Option<Arc<EventBus>>) -> Arc<Self> {
+        crate::metrics::describe_metrics();
         let port_pool = Arc::new(PortPool::new(config.port_pool_config.clone()));
 
         let manager = Arc::new(Self {
@@ -120,6 +121,7 @@ impl SessionManager {
         event_bus: Option<Arc<EventBus>>,
         ha_backend: Arc<HABackend>,
     ) -> Arc<Self> {
+        crate::metrics::describe_metrics();
         let port_pool = Arc::new(PortPool::new(config.port_pool_config.clone()));
 
         let manager = Arc::new(Self {
@@ -144,6 +146,7 @@ impl SessionManager {
         xdp_config: forge_core::config::XdpConfig,
         event_bus: Option<Arc<EventBus>>,
     ) -> Arc<Self> {
+        crate::metrics::describe_metrics();
         let port_pool = Arc::new(PortPool::new(config.port_pool_config.clone()));
 
         // Try to initialize XDP if enabled
@@ -206,6 +209,7 @@ impl SessionManager {
         event_bus: Option<Arc<EventBus>>,
         ha_backend: Arc<HABackend>,
     ) -> Arc<Self> {
+        crate::metrics::describe_metrics();
         let port_pool = Arc::new(PortPool::new(config.port_pool_config.clone()));
 
         // Try to initialize XDP if enabled

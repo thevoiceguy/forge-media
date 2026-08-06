@@ -337,11 +337,11 @@ async fn create_session(
     let sdp_negotiation_result = if let Some(ref offer_text) = request.sdp_offer {
         // Start timing SDP negotiation
         let negotiation_start = std::time::Instant::now();
-        counter!("sdp_negotiation_total").increment(1);
+        counter!("forge_sdp_negotiation_total").increment(1);
 
         // Validate that local_address is provided
         let local_addr = request.local_address.as_ref().ok_or_else(|| {
-            counter!("sdp_negotiation_failures_total", "reason" => "missing_local_address")
+            counter!("forge_sdp_negotiation_failures_total", "reason" => "missing_local_address")
                 .increment(1);
             ApiError::InvalidRequest(
                 "local_address is required when sdp_offer is provided".to_string(),
@@ -355,7 +355,7 @@ async fn create_session(
             "audio-opus" => forge_sdp::profiles::SdpProfile::audio_opus(),
             "audio-all" => forge_sdp::profiles::SdpProfile::audio_all(),
             _ => {
-                counter!("sdp_negotiation_failures_total", "reason" => "invalid_profile")
+                counter!("forge_sdp_negotiation_failures_total", "reason" => "invalid_profile")
                     .increment(1);
                 return Err(ApiError::InvalidRequest(format!(
                     "Unknown SDP profile: {}. Valid values: audio-only, audio-opus, audio-all",
@@ -369,7 +369,7 @@ async fn create_session(
         // Parse SDP offer
         use forge_sdp::SessionDescriptionExt;
         let offer = forge_sdp::SessionDescription::from_str(offer_text).map_err(|e| {
-            counter!("sdp_negotiation_failures_total", "reason" => "parse_error").increment(1);
+            counter!("forge_sdp_negotiation_failures_total", "reason" => "parse_error").increment(1);
             ApiError::InvalidRequest(format!("Invalid SDP offer: {}", e))
         })?;
 
@@ -381,7 +381,7 @@ async fn create_session(
             forge_sdp::SessionDescription::negotiate_answer(&offer, &local_caps, local_addr)
                 .map_err(|e| match e {
                     forge_sdp::SdpError::NoCommonCodec => {
-                        counter!("sdp_negotiation_failures_total", "reason" => "no_common_codec")
+                        counter!("forge_sdp_negotiation_failures_total", "reason" => "no_common_codec")
                             .increment(1);
                         ApiError::NotAcceptable(
                             "No common codec found between offer and local capabilities"
@@ -389,7 +389,7 @@ async fn create_session(
                         )
                     }
                     _ => {
-                        counter!("sdp_negotiation_failures_total", "reason" => "negotiation_error")
+                        counter!("forge_sdp_negotiation_failures_total", "reason" => "negotiation_error")
                             .increment(1);
                         ApiError::InvalidRequest(format!("SDP negotiation failed: {}", e))
                     }
@@ -417,7 +417,7 @@ async fn create_session(
                 // codec name through a closed enum of known values and send
                 // anything unexpected to a fixed "other" bucket.
                 for codec_name in &codec_names {
-                    counter!("sdp_codecs_negotiated_total", "codec" => canonical_codec_label(codec_name)).increment(1);
+                    counter!("forge_sdp_codecs_negotiated_total", "codec" => canonical_codec_label(codec_name)).increment(1);
                 }
             }
 
@@ -444,7 +444,7 @@ async fn create_session(
 
         // Record successful negotiation duration
         let negotiation_duration = negotiation_start.elapsed();
-        histogram!("sdp_negotiation_duration_seconds").record(negotiation_duration.as_secs_f64());
+        histogram!("forge_sdp_negotiation_duration_seconds").record(negotiation_duration.as_secs_f64());
 
         tracing::info!(
             "SDP negotiation successful: negotiated {:?} in {:?}",

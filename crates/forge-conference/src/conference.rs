@@ -1390,6 +1390,7 @@ impl ConferenceBridge {
         mixer_options: forge_mixer::MixerOptions,
     ) -> Result<Self> {
         info!("Creating conference bridge");
+        crate::metrics::describe_metrics();
 
         Ok(Self {
             rooms: Arc::new(DashMap::new()),

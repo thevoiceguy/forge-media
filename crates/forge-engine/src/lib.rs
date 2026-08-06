@@ -10,6 +10,7 @@ pub mod forwarding;
 pub mod injection;
 pub mod manager;
 pub mod media_bridge;
+pub mod metrics;
 #[cfg(feature = "ai")]
 pub mod persistence;
 pub mod session;

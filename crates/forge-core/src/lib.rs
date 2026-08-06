@@ -21,6 +21,8 @@
 pub mod config;
 pub mod error;
 pub mod events;
+#[doc(hidden)]
+pub mod metrics_scan;
 pub mod traits;
 pub mod types;
 

@@ -4,6 +4,7 @@
 //! jitter buffering, and RTCP processing.
 
 pub mod jitter;
+pub mod metrics;
 pub mod port_pool;
 pub mod rtcp;
 pub mod rtp;

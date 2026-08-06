@@ -151,7 +151,7 @@ async fn create_connection(
         .validate()
         .map_err(|e| ApiError::InvalidRequest(format!("Validation failed: {}", e)))?;
 
-    counter!("webrtc_connections_created_total").increment(1);
+    counter!("forge_webrtc_connections_created_total").increment(1);
 
     // Use provided STUN servers or default
     let stun_servers = request
@@ -243,7 +243,7 @@ async fn delete_connection(
         .remove_connection(&connection_id)
         .ok_or_else(|| ApiError::ConnectionNotFound(connection_id.clone()))?;
 
-    counter!("webrtc_connections_deleted_total").increment(1);
+    counter!("forge_webrtc_connections_deleted_total").increment(1);
 
     // Update active connections gauge
     let active_count = state.webrtc_manager.connection_count();

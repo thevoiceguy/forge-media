@@ -7,6 +7,7 @@ pub mod error;
 pub mod events;
 #[cfg(feature = "ha")]
 pub mod ha;
+pub mod metrics;
 pub mod middleware;
 pub mod response;
 pub mod routes;

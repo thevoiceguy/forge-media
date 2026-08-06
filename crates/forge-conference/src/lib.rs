@@ -9,6 +9,7 @@ mod audio_feedback;
 mod conference;
 mod config;
 mod dtmf_commands;
+pub mod metrics;
 mod pin_auth;
 mod room_config;
 

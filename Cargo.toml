@@ -82,7 +82,7 @@ reqwest = { version = "0.12", features = ["json"] }
 aes = "0.9"
 aes-gcm = "0.11"
 hmac = "0.12"
-sha1 = "0.10"
+sha1 = "0.11"
 sha2 = "0.10"
 # NOTE: the siphon-rs submodule crates inherit this rand via
 # `workspace = true` (they're path deps inside this workspace dir), so

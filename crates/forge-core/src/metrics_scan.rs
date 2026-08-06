@@ -53,8 +53,8 @@ pub fn facade_emissions(source: &str) -> Vec<FacadeEmission> {
 /// recursively. Panics on I/O errors — this only runs in tests.
 pub fn facade_emissions_in_dir(dir: &std::path::Path) -> Vec<FacadeEmission> {
     let mut out = Vec::new();
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
     for entry in entries {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
@@ -89,6 +89,25 @@ pub fn non_literal_emissions(source: &str) -> usize {
             if !main[at + needle.len()..].trim_start().starts_with('"') {
                 count += 1;
             }
+        }
+    }
+    count
+}
+
+/// Sum [`non_literal_emissions`] over every `.rs` file under `dir`,
+/// recursively. Panics on I/O errors — this only runs in tests.
+pub fn non_literal_emissions_in_dir(dir: &std::path::Path) -> usize {
+    let mut count = 0;
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            count += non_literal_emissions_in_dir(&path);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            count += non_literal_emissions(&src);
         }
     }
     count

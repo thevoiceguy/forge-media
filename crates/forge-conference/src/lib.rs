@@ -7,9 +7,9 @@ use thiserror::Error;
 mod ai_manager;
 mod audio_feedback;
 mod conference;
-pub mod metrics;
 mod config;
 mod dtmf_commands;
+pub mod metrics;
 mod pin_auth;
 mod room_config;
 

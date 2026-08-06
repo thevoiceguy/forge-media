@@ -12,7 +12,6 @@
 //! (the normal order) get `# HELP` lines for free.
 
 use metrics::describe_counter;
-use std::sync::Once;
 
 pub const M_SRTP_PACKETS_ENCRYPTED: &str = "forge_srtp_packets_encrypted_total";
 pub const M_SRTP_PACKETS_DECRYPTED: &str = "forge_srtp_packets_decrypted_total";
@@ -43,43 +42,41 @@ pub const ALL_HISTOGRAMS: &[&str] = &[];
 
 /// Register a description for every metric family this crate emits.
 ///
-/// Idempotent; call after a `metrics` recorder is installed.
+/// Idempotent and cheap. Descriptions only reach the recorder installed
+/// at call time, so call it (again) once your recorder is installed.
 pub fn describe_metrics() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        describe_counter!(
-            M_SRTP_PACKETS_ENCRYPTED,
-            "RTP packets successfully SRTP-protected on the outbound path."
-        );
-        describe_counter!(
-            M_SRTP_PACKETS_DECRYPTED,
-            "Inbound SRTP packets successfully unprotected (auth + decrypt)."
-        );
-        describe_counter!(
-            M_SRTP_REPLAY_BLOCKED,
-            "Inbound SRTP packets rejected by replay protection."
-        );
-        describe_counter!(
-            M_SRTCP_PACKETS_ENCRYPTED,
-            "RTCP packets successfully SRTCP-protected on the outbound path."
-        );
-        describe_counter!(
-            M_SRTCP_PACKETS_DECRYPTED,
-            "Inbound SRTCP packets successfully unprotected (auth + decrypt)."
-        );
-        describe_counter!(
-            M_SRTCP_REPLAY_BLOCKED,
-            "Inbound SRTCP packets rejected by replay protection."
-        );
-        describe_counter!(
-            M_RTP_LATCH_LEARNED,
-            "Remote media endpoints learned via symmetric-RTP latching."
-        );
-        describe_counter!(
-            M_RTP_LATCH_REJECTED,
-            "Datagrams rejected by symmetric-RTP latching rules."
-        );
-    });
+    describe_counter!(
+        M_SRTP_PACKETS_ENCRYPTED,
+        "RTP packets successfully SRTP-protected on the outbound path."
+    );
+    describe_counter!(
+        M_SRTP_PACKETS_DECRYPTED,
+        "Inbound SRTP packets successfully unprotected (auth + decrypt)."
+    );
+    describe_counter!(
+        M_SRTP_REPLAY_BLOCKED,
+        "Inbound SRTP packets rejected by replay protection."
+    );
+    describe_counter!(
+        M_SRTCP_PACKETS_ENCRYPTED,
+        "RTCP packets successfully SRTCP-protected on the outbound path."
+    );
+    describe_counter!(
+        M_SRTCP_PACKETS_DECRYPTED,
+        "Inbound SRTCP packets successfully unprotected (auth + decrypt)."
+    );
+    describe_counter!(
+        M_SRTCP_REPLAY_BLOCKED,
+        "Inbound SRTCP packets rejected by replay protection."
+    );
+    describe_counter!(
+        M_RTP_LATCH_LEARNED,
+        "Remote media endpoints learned via symmetric-RTP latching."
+    );
+    describe_counter!(
+        M_RTP_LATCH_REJECTED,
+        "Datagrams rejected by symmetric-RTP latching rules."
+    );
 }
 
 #[cfg(test)]
@@ -120,8 +117,7 @@ mod tests {
             );
         }
 
-        let emitted_names: BTreeSet<&str> =
-            emitted.iter().map(|(_, name)| name.as_str()).collect();
+        let emitted_names: BTreeSet<&str> = emitted.iter().map(|(_, name)| name.as_str()).collect();
         for name in listed {
             assert!(
                 emitted_names.contains(name),
@@ -134,28 +130,11 @@ mod tests {
     #[test]
     fn every_emission_uses_a_string_literal() {
         let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut non_literal = 0;
-        for entry in walk(&src_dir) {
-            let src = std::fs::read_to_string(&entry).unwrap();
-            non_literal += forge_core::metrics_scan::non_literal_emissions(&src);
-        }
         assert_eq!(
-            non_literal, 0,
+            forge_core::metrics_scan::non_literal_emissions_in_dir(&src_dir),
+            0,
             "emission macros must take a string-literal name so the self-scan \
              (and plain grep) can see them"
         );
-    }
-
-    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                out.extend(walk(&path));
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                out.push(path);
-            }
-        }
-        out
     }
 }

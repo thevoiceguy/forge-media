@@ -18,7 +18,6 @@
 //! normal order) get `# HELP` lines for free.
 
 use metrics::{describe_counter, describe_gauge, describe_histogram};
-use std::sync::Once;
 
 pub const M_ACTIVE_SESSIONS: &str = "forge_active_sessions";
 pub const M_AI_AUDIO_BYTES_SENT: &str = "forge_ai_audio_bytes_sent_total";
@@ -147,8 +146,9 @@ pub const VAD_NEURAL_INFERENCE_SECONDS_BUCKETS: [f64; 8] =
 /// plus forge-rtp's (this crate re-emits two of its latch counters and
 /// is the natural init choke point for embedded use).
 ///
-/// Idempotent; call after a `metrics` recorder is installed. Every
-/// `SessionManager` constructor calls this.
+/// Idempotent and cheap. Descriptions only reach the recorder installed
+/// at call time, so call it (again) once your recorder is installed.
+/// Every `SessionManager` constructor calls this.
 ///
 /// Histogram buckets cannot be set from here — they are exporter
 /// configuration. Consumers using `metrics-exporter-prometheus` should
@@ -156,186 +156,192 @@ pub const VAD_NEURAL_INFERENCE_SECONDS_BUCKETS: [f64; 8] =
 /// `set_buckets_for_metric`; see the bucket consts above and
 /// `docs/METRICS.md`.
 pub fn describe_metrics() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        forge_rtp::metrics::describe_metrics();
+    forge_rtp::metrics::describe_metrics();
 
-        describe_gauge!(M_ACTIVE_SESSIONS, "Media sessions currently active on this engine.");
-        describe_counter!(
-            M_AI_AUDIO_PACKETS_SENT,
-            "Locally generated audio packets sent whose source is the AI stream \
-             (subset of forge_generated_audio_packets_sent_total)."
-        );
-        describe_counter!(
-            M_AI_AUDIO_BYTES_SENT,
-            "Locally generated audio wire bytes sent whose source is the AI \
-             stream (subset of forge_generated_audio_bytes_sent_total)."
-        );
-        describe_counter!(
-            M_DTLS_HANDSHAKES_COMPLETED,
-            "DTLS-SRTP handshakes completed successfully."
-        );
-        describe_counter!(M_DTLS_HANDSHAKES_FAILED, "DTLS-SRTP handshakes failed.");
-        describe_counter!(
-            M_DTLS_DROPPED_NO_LEG,
-            "DTLS packets dropped because no leg of the session has DTLS configured \
-             (stale or misrouted traffic)."
-        );
-        describe_counter!(
-            M_DTLS_PACKETS_RECEIVED,
-            "DTLS packets received on media sockets and routed to a handshake."
-        );
-        describe_counter!(M_DTLS_SEND_ERRORS, "Errors sending DTLS handshake packets.");
-        describe_counter!(
-            M_DTMF_DUPLICATES_SUPPRESSED,
-            "DTMF events suppressed because the other detection method already \
-             reported the digit, by method and digit."
-        );
-        describe_counter!(
-            M_DTMF_EVENTS,
-            "DTMF digit events detected, by method (rfc2833, inband) and digit."
-        );
-        describe_counter!(
-            M_DTMF_INBAND_EVENTS,
-            "In-band (audio-analysis) DTMF events detected, by digit and event_type."
-        );
-        describe_counter!(
-            M_DTMF_INBAND_PACKETS,
-            "Audio packets run through the in-band DTMF detector."
-        );
-        describe_counter!(
-            M_DTMF_RFC2833_EVENTS,
-            "RFC 2833 telephone-event DTMF events detected, by digit and event_type."
-        );
-        describe_counter!(
-            M_DTMF_RFC2833_INJECTED_PACKETS,
-            "Locally generated RFC 2833 telephone-event packets injected into the \
-             outbound RTP stream."
-        );
-        describe_counter!(
-            M_DTMF_RFC2833_INJECTED_BYTES,
-            "Bytes of locally generated RFC 2833 telephone-event packets injected \
-             into the outbound RTP stream."
-        );
-        describe_counter!(
-            M_DTMF_RFC2833_PACKETS,
-            "RFC 2833 telephone-event packets received and consumed by detection."
-        );
-        describe_counter!(
-            M_DTMF_RFC2833_RELAYED,
-            "RFC 2833 telephone-event packets relayed to the peer through the \
-             normal forwarding path instead of being consumed."
-        );
-        describe_counter!(
-            M_GENERATED_AUDIO_PACKETS_SENT,
-            "Locally generated (not forwarded) audio packets sent, by source \
-             (ai, media_bridge_audio, media_bridge_dtmf)."
-        );
-        describe_counter!(
-            M_GENERATED_AUDIO_BYTES_SENT,
-            "Locally generated (not forwarded) audio bytes sent, by source. \
-             Wire bytes: full packet length including header and any SRTP \
-             overhead."
-        );
-        describe_counter!(
-            M_GENERATED_MEDIA_PACKETS_SENT,
-            "All locally generated media packets sent — audio plus injected \
-             telephone-events — by source."
-        );
-        describe_counter!(
-            M_GENERATED_MEDIA_BYTES_SENT,
-            "All locally generated media bytes sent — audio plus injected \
-             telephone-events — by source. Wire bytes: full packet length \
-             including header and any SRTP overhead."
-        );
-        describe_counter!(M_RTCP_PACKETS_RECEIVED, "RTCP packets received.");
-        describe_counter!(M_RTCP_BYTES_RECEIVED, "RTCP bytes received.");
-        describe_counter!(M_RTCP_PACKETS_SENT, "RTCP packets sent (locally originated).");
-        describe_counter!(M_RTCP_BYTES_SENT, "RTCP bytes sent (locally originated).");
-        describe_counter!(
-            M_RTCP_SENDER_PACKETS,
-            "Running sum of the cumulative sender packet counts carried in \
-             received RTCP Sender Reports. Grows with every SR received; not a \
-             wire packet count."
-        );
-        describe_counter!(
-            M_RTCP_SENDER_BYTES,
-            "Running sum of the cumulative sender octet counts carried in \
-             received RTCP Sender Reports. Grows with every SR received; not a \
-             wire byte count."
-        );
-        describe_counter!(M_RTCP_SR_SENT, "RTCP Sender Reports originated locally.");
-        describe_gauge!(
-            M_RTCP_HIGHEST_SEQ,
-            "Extended highest sequence number from the most recent received RTCP \
-             report block."
-        );
-        describe_gauge!(
-            M_RTCP_JITTER,
-            "Peer-reported interarrival jitter (RTP timestamp units) from the \
-             most recent received RTCP report block."
-        );
-        describe_gauge!(
-            M_RTCP_LOSS_FRACTION,
-            "Peer-reported fraction of packets lost (0.0-1.0) from the most \
-             recent received RTCP report block."
-        );
-        describe_gauge!(
-            M_RTCP_PACKETS_LOST,
-            "Peer-reported cumulative packets lost from the most recent received \
-             RTCP report block (a gauge because the peer's cumulative value can \
-             decrease with late arrivals)."
-        );
-        describe_counter!(M_RTP_PACKETS_RECEIVED, "RTP packets received.");
-        describe_counter!(M_RTP_BYTES_RECEIVED, "RTP payload bytes received.");
-        describe_counter!(M_RTP_PACKETS_SENT, "RTP packets forwarded to the peer.");
-        describe_counter!(M_RTP_BYTES_SENT, "RTP payload bytes forwarded to the peer.");
-        describe_counter!(
-            M_RTP_UNSUPPORTED_FIRST_BYTE,
-            "Datagrams dropped from media sockets whose first byte marks them as \
-             neither RTP/RTCP nor DTLS."
-        );
-        describe_counter!(
-            M_SRTP_PROTECT_ERRORS,
-            "SRTP protect (encrypt) failures on the outbound path."
-        );
-        describe_counter!(
-            M_SRTP_UNPROTECT_ERRORS,
-            "SRTP unprotect (auth/decrypt) failures on the inbound path."
-        );
-        describe_counter!(
-            M_SRTCP_PROTECT_ERRORS,
-            "SRTCP protect (encrypt) failures on the outbound path."
-        );
-        describe_counter!(
-            M_SRTCP_UNPROTECT_ERRORS,
-            "SRTCP unprotect (auth/decrypt) failures on the inbound path."
-        );
-        describe_counter!(
-            M_TRANSCODING_PACKETS,
-            "Packets transcoded between codecs, by from_codec and to_codec."
-        );
-        describe_counter!(
-            M_TRANSCODING_BYTES,
-            "Output bytes produced by transcoding, by from_codec and to_codec."
-        );
-        describe_counter!(M_TRANSCODING_ERRORS, "Transcode failures, by from_codec and to_codec.");
-        describe_histogram!(
-            M_TRANSCODING_DURATION,
-            "Wall time of one transcode operation, by from_codec and to_codec."
-        );
-        describe_counter!(M_VAD_ERRORS, "VAD processing errors, by backend.");
-        describe_counter!(
-            M_VAD_WINDOWS,
-            "VAD analysis windows processed, by backend (the energy backend \
-             counts one window per frame)."
-        );
-        describe_histogram!(
-            M_VAD_NEURAL_INFERENCE,
-            "Wall time of one neural-VAD process call, covering the model \
-             windows completed by one audio frame (usually one)."
-        );
-    });
+    describe_gauge!(
+        M_ACTIVE_SESSIONS,
+        "Media sessions currently active on this engine."
+    );
+    describe_counter!(
+        M_AI_AUDIO_PACKETS_SENT,
+        "Locally generated audio packets sent whose source is the AI stream \
+         (subset of forge_generated_audio_packets_sent_total)."
+    );
+    describe_counter!(
+        M_AI_AUDIO_BYTES_SENT,
+        "Locally generated audio wire bytes sent whose source is the AI \
+         stream (subset of forge_generated_audio_bytes_sent_total)."
+    );
+    describe_counter!(
+        M_DTLS_HANDSHAKES_COMPLETED,
+        "DTLS-SRTP handshakes completed successfully."
+    );
+    describe_counter!(M_DTLS_HANDSHAKES_FAILED, "DTLS-SRTP handshakes failed.");
+    describe_counter!(
+        M_DTLS_DROPPED_NO_LEG,
+        "DTLS packets dropped because no leg of the session has DTLS configured \
+         (stale or misrouted traffic)."
+    );
+    describe_counter!(
+        M_DTLS_PACKETS_RECEIVED,
+        "DTLS packets received on media sockets and routed to a handshake."
+    );
+    describe_counter!(M_DTLS_SEND_ERRORS, "Errors sending DTLS handshake packets.");
+    describe_counter!(
+        M_DTMF_DUPLICATES_SUPPRESSED,
+        "DTMF events suppressed because the other detection method already \
+         reported the digit, by method and digit."
+    );
+    describe_counter!(
+        M_DTMF_EVENTS,
+        "DTMF digit events detected, by method (rfc2833, inband) and digit."
+    );
+    describe_counter!(
+        M_DTMF_INBAND_EVENTS,
+        "In-band (audio-analysis) DTMF events detected, by digit and event_type."
+    );
+    describe_counter!(
+        M_DTMF_INBAND_PACKETS,
+        "Audio packets run through the in-band DTMF detector."
+    );
+    describe_counter!(
+        M_DTMF_RFC2833_EVENTS,
+        "RFC 2833 telephone-event DTMF events detected, by digit and event_type."
+    );
+    describe_counter!(
+        M_DTMF_RFC2833_INJECTED_PACKETS,
+        "Locally generated RFC 2833 telephone-event packets injected into the \
+         outbound RTP stream."
+    );
+    describe_counter!(
+        M_DTMF_RFC2833_INJECTED_BYTES,
+        "Bytes of locally generated RFC 2833 telephone-event packets injected \
+         into the outbound RTP stream."
+    );
+    describe_counter!(
+        M_DTMF_RFC2833_PACKETS,
+        "RFC 2833 telephone-event packets received and consumed by detection."
+    );
+    describe_counter!(
+        M_DTMF_RFC2833_RELAYED,
+        "RFC 2833 telephone-event packets relayed to the peer through the \
+         normal forwarding path instead of being consumed."
+    );
+    describe_counter!(
+        M_GENERATED_AUDIO_PACKETS_SENT,
+        "Locally generated (not forwarded) audio packets sent, by source \
+         (ai, media_bridge_audio, media_bridge_dtmf)."
+    );
+    describe_counter!(
+        M_GENERATED_AUDIO_BYTES_SENT,
+        "Locally generated (not forwarded) audio bytes sent, by source. \
+         Wire bytes: full packet length including header and any SRTP \
+         overhead."
+    );
+    describe_counter!(
+        M_GENERATED_MEDIA_PACKETS_SENT,
+        "All locally generated media packets sent — audio plus injected \
+         telephone-events — by source."
+    );
+    describe_counter!(
+        M_GENERATED_MEDIA_BYTES_SENT,
+        "All locally generated media bytes sent — audio plus injected \
+         telephone-events — by source. Wire bytes: full packet length \
+         including header and any SRTP overhead."
+    );
+    describe_counter!(M_RTCP_PACKETS_RECEIVED, "RTCP packets received.");
+    describe_counter!(M_RTCP_BYTES_RECEIVED, "RTCP bytes received.");
+    describe_counter!(
+        M_RTCP_PACKETS_SENT,
+        "RTCP packets sent (locally originated)."
+    );
+    describe_counter!(M_RTCP_BYTES_SENT, "RTCP bytes sent (locally originated).");
+    describe_counter!(
+        M_RTCP_SENDER_PACKETS,
+        "Running sum of the cumulative sender packet counts carried in \
+         received RTCP Sender Reports. Grows with every SR received; not a \
+         wire packet count."
+    );
+    describe_counter!(
+        M_RTCP_SENDER_BYTES,
+        "Running sum of the cumulative sender octet counts carried in \
+         received RTCP Sender Reports. Grows with every SR received; not a \
+         wire byte count."
+    );
+    describe_counter!(M_RTCP_SR_SENT, "RTCP Sender Reports originated locally.");
+    describe_gauge!(
+        M_RTCP_HIGHEST_SEQ,
+        "Extended highest sequence number from the most recent received RTCP \
+         report block."
+    );
+    describe_gauge!(
+        M_RTCP_JITTER,
+        "Peer-reported interarrival jitter (RTP timestamp units) from the \
+         most recent received RTCP report block."
+    );
+    describe_gauge!(
+        M_RTCP_LOSS_FRACTION,
+        "Peer-reported fraction of packets lost (0.0-1.0) from the most \
+         recent received RTCP report block."
+    );
+    describe_gauge!(
+        M_RTCP_PACKETS_LOST,
+        "Peer-reported cumulative packets lost from the most recent received \
+         RTCP report block (a gauge because the peer's cumulative value can \
+         decrease with late arrivals)."
+    );
+    describe_counter!(M_RTP_PACKETS_RECEIVED, "RTP packets received.");
+    describe_counter!(M_RTP_BYTES_RECEIVED, "RTP payload bytes received.");
+    describe_counter!(M_RTP_PACKETS_SENT, "RTP packets forwarded to the peer.");
+    describe_counter!(M_RTP_BYTES_SENT, "RTP payload bytes forwarded to the peer.");
+    describe_counter!(
+        M_RTP_UNSUPPORTED_FIRST_BYTE,
+        "Datagrams dropped from media sockets whose first byte marks them as \
+         neither RTP/RTCP nor DTLS."
+    );
+    describe_counter!(
+        M_SRTP_PROTECT_ERRORS,
+        "SRTP protect (encrypt) failures on the outbound path."
+    );
+    describe_counter!(
+        M_SRTP_UNPROTECT_ERRORS,
+        "SRTP unprotect (auth/decrypt) failures on the inbound path."
+    );
+    describe_counter!(
+        M_SRTCP_PROTECT_ERRORS,
+        "SRTCP protect (encrypt) failures on the outbound path."
+    );
+    describe_counter!(
+        M_SRTCP_UNPROTECT_ERRORS,
+        "SRTCP unprotect (auth/decrypt) failures on the inbound path."
+    );
+    describe_counter!(
+        M_TRANSCODING_PACKETS,
+        "Packets transcoded between codecs, by from_codec and to_codec."
+    );
+    describe_counter!(
+        M_TRANSCODING_BYTES,
+        "Output bytes produced by transcoding, by from_codec and to_codec."
+    );
+    describe_counter!(
+        M_TRANSCODING_ERRORS,
+        "Transcode failures, by from_codec and to_codec."
+    );
+    describe_histogram!(
+        M_TRANSCODING_DURATION,
+        "Wall time of one transcode operation, by from_codec and to_codec."
+    );
+    describe_counter!(M_VAD_ERRORS, "VAD processing errors, by backend.");
+    describe_counter!(
+        M_VAD_WINDOWS,
+        "VAD analysis windows processed, by backend (the energy backend \
+         counts one window per frame)."
+    );
+    describe_histogram!(
+        M_VAD_NEURAL_INFERENCE,
+        "Wall time of one neural-VAD process call, covering the model \
+         windows completed by one audio frame (usually one)."
+    );
 }
 
 #[cfg(test)]
@@ -386,8 +392,7 @@ mod tests {
             );
         }
 
-        let emitted_names: BTreeSet<&str> =
-            emitted.iter().map(|(_, name)| name.as_str()).collect();
+        let emitted_names: BTreeSet<&str> = emitted.iter().map(|(_, name)| name.as_str()).collect();
         for name in own {
             assert!(
                 emitted_names.contains(name),
@@ -400,28 +405,11 @@ mod tests {
     #[test]
     fn every_emission_uses_a_string_literal() {
         let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut non_literal = 0;
-        for entry in walk(&src_dir) {
-            let src = std::fs::read_to_string(&entry).unwrap();
-            non_literal += forge_core::metrics_scan::non_literal_emissions(&src);
-        }
         assert_eq!(
-            non_literal, 0,
+            forge_core::metrics_scan::non_literal_emissions_in_dir(&src_dir),
+            0,
             "emission macros must take a string-literal name so the self-scan \
              (and plain grep) can see them"
         );
-    }
-
-    fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                out.extend(walk(&path));
-            } else if path.extension().is_some_and(|ext| ext == "rs") {
-                out.push(path);
-            }
-        }
-        out
     }
 }

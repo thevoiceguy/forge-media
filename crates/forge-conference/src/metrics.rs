@@ -13,7 +13,6 @@
 //! `# HELP` lines for free.
 
 use metrics::{describe_counter, describe_gauge, describe_histogram};
-use std::sync::Once;
 
 pub const M_ROOMS_CREATED: &str = "forge_conference_rooms_created_total";
 pub const M_ROOMS_DELETED: &str = "forge_conference_rooms_deleted_total";
@@ -60,52 +59,53 @@ pub const MIXING_DURATION_SECONDS_BUCKETS: [f64; 8] =
 
 /// Register a description for every metric family this crate emits.
 ///
-/// Idempotent; call after a `metrics` recorder is installed.
+/// Idempotent and cheap. Descriptions only reach the recorder installed
+/// at call time, so call it (again) once your recorder is installed.
 /// `ConferenceBridge::new` calls this.
 pub fn describe_metrics() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        describe_counter!(M_ROOMS_CREATED, "Conference rooms created.");
-        describe_counter!(M_ROOMS_DELETED, "Conference rooms deleted.");
-        describe_gauge!(M_ROOMS_ACTIVE, "Conference rooms currently active.");
-        describe_counter!(
-            M_PARTICIPANTS_JOINED,
-            "Participants joined to a conference room, by room_id."
-        );
-        describe_counter!(
-            M_PARTICIPANTS_LEFT,
-            "Participants departed from a conference room, by room_id."
-        );
-        describe_gauge!(
-            M_PARTICIPANTS_ACTIVE,
-            "Participants currently in a conference room, by room_id."
-        );
-        describe_counter!(
-            M_MIX_OPERATIONS,
-            "Mixer passes executed (one output frame each), by room_id."
-        );
-        describe_histogram!(M_MIXING_DURATION, "Wall time of one mixer pass, by room_id.");
-        describe_counter!(
-            M_RECORDINGS_STARTED,
-            "Room-level conference recordings started, by room_id."
-        );
-        describe_counter!(
-            M_RECORDINGS_STOPPED,
-            "Room-level conference recordings stopped, by room_id."
-        );
-        describe_gauge!(
-            M_RECORDINGS_ACTIVE,
-            "Whether a room-level recording is running (0 or 1), by room_id."
-        );
-        describe_counter!(
-            M_PARTICIPANT_RECORDINGS_STARTED,
-            "Per-participant recordings started, by room_id and participant_id."
-        );
-        describe_counter!(
-            M_PARTICIPANT_RECORDINGS_STOPPED,
-            "Per-participant recordings stopped, by room_id and participant_id."
-        );
-    });
+    describe_counter!(M_ROOMS_CREATED, "Conference rooms created.");
+    describe_counter!(M_ROOMS_DELETED, "Conference rooms deleted.");
+    describe_gauge!(M_ROOMS_ACTIVE, "Conference rooms currently active.");
+    describe_counter!(
+        M_PARTICIPANTS_JOINED,
+        "Participants joined to a conference room, by room_id."
+    );
+    describe_counter!(
+        M_PARTICIPANTS_LEFT,
+        "Participants departed from a conference room, by room_id."
+    );
+    describe_gauge!(
+        M_PARTICIPANTS_ACTIVE,
+        "Participants currently in a conference room, by room_id."
+    );
+    describe_counter!(
+        M_MIX_OPERATIONS,
+        "Mixer passes executed (one output frame each), by room_id."
+    );
+    describe_histogram!(
+        M_MIXING_DURATION,
+        "Wall time of one mixer pass, by room_id."
+    );
+    describe_counter!(
+        M_RECORDINGS_STARTED,
+        "Room-level conference recordings started, by room_id."
+    );
+    describe_counter!(
+        M_RECORDINGS_STOPPED,
+        "Room-level conference recordings stopped, by room_id."
+    );
+    describe_gauge!(
+        M_RECORDINGS_ACTIVE,
+        "Whether a room-level recording is running (0 or 1), by room_id."
+    );
+    describe_counter!(
+        M_PARTICIPANT_RECORDINGS_STARTED,
+        "Per-participant recordings started, by room_id and participant_id."
+    );
+    describe_counter!(
+        M_PARTICIPANT_RECORDINGS_STOPPED,
+        "Per-participant recordings stopped, by room_id and participant_id."
+    );
 }
 
 #[cfg(test)]
@@ -146,8 +146,7 @@ mod tests {
             );
         }
 
-        let emitted_names: BTreeSet<&str> =
-            emitted.iter().map(|(_, name)| name.as_str()).collect();
+        let emitted_names: BTreeSet<&str> = emitted.iter().map(|(_, name)| name.as_str()).collect();
         for name in listed {
             assert!(
                 emitted_names.contains(name),

@@ -17,7 +17,6 @@
 //! `MetricsHandle::init` calls it right after installing the recorder.
 
 use metrics::{describe_counter, describe_gauge, describe_histogram};
-use std::sync::Once;
 
 pub const M_WEBRTC_CONNECTIONS_ACTIVE: &str = "forge_webrtc_connections_active";
 pub const M_WEBRTC_CONNECTIONS_CREATED: &str = "forge_webrtc_connections_created_total";
@@ -41,7 +40,10 @@ pub const ALL_COUNTERS: &[&str] = &[
 ];
 
 /// Every gauge family forge-api emits.
-pub const ALL_GAUGES: &[&str] = &[M_WEBRTC_CONNECTIONS_ACTIVE, M_WEBRTC_ICE_CANDIDATES_GATHERED];
+pub const ALL_GAUGES: &[&str] = &[
+    M_WEBRTC_CONNECTIONS_ACTIVE,
+    M_WEBRTC_ICE_CANDIDATES_GATHERED,
+];
 
 /// Every histogram family forge-api emits.
 pub const ALL_HISTOGRAMS: &[&str] = &[M_WEBRTC_ESTABLISHMENT, M_SDP_NEGOTIATION_DURATION];
@@ -63,58 +65,56 @@ pub const SDP_NEGOTIATION_SECONDS_BUCKETS: [f64; 8] =
 /// workspace: this crate's, forge-engine's (which covers forge-rtp),
 /// and forge-conference's.
 ///
-/// Idempotent; call after a `metrics` recorder is installed.
+/// Idempotent and cheap. Descriptions only reach the recorder installed
+/// at call time, so call it (again) once your recorder is installed.
 /// `MetricsHandle::init` does this for the standalone server.
 pub fn describe_metrics() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        forge_engine::metrics::describe_metrics();
-        forge_conference::metrics::describe_metrics();
+    forge_engine::metrics::describe_metrics();
+    forge_conference::metrics::describe_metrics();
 
-        describe_gauge!(
-            M_WEBRTC_CONNECTIONS_ACTIVE,
-            "WebRTC peer connections currently held by the API server."
-        );
-        describe_counter!(
-            M_WEBRTC_CONNECTIONS_CREATED,
-            "WebRTC peer connections created via the API."
-        );
-        describe_counter!(
-            M_WEBRTC_CONNECTIONS_DELETED,
-            "WebRTC peer connections deleted via the API."
-        );
-        describe_counter!(
-            M_WEBRTC_ICE_CANDIDATES_ADDED,
-            "Remote ICE candidates added to WebRTC connections via the API."
-        );
-        describe_gauge!(
-            M_WEBRTC_ICE_CANDIDATES_GATHERED,
-            "Local ICE candidates gathered by the most recently created WebRTC \
-             connection (sampled at offer time)."
-        );
-        describe_histogram!(
-            M_WEBRTC_ESTABLISHMENT,
-            "Time from WebRTC connection creation to the remote answer being \
-             applied."
-        );
-        describe_counter!(
-            M_SDP_NEGOTIATIONS,
-            "SDP offer/answer negotiations attempted via the API."
-        );
-        describe_counter!(
-            M_SDP_NEGOTIATION_FAILURES,
-            "SDP negotiations failed, by reason (missing_local_address, \
-             invalid_profile, parse_error, no_common_codec, negotiation_error)."
-        );
-        describe_counter!(
-            M_SDP_CODECS_NEGOTIATED,
-            "Codecs selected by successful SDP negotiations, by codec."
-        );
-        describe_histogram!(
-            M_SDP_NEGOTIATION_DURATION,
-            "Wall time of one SDP parse + negotiation."
-        );
-    });
+    describe_gauge!(
+        M_WEBRTC_CONNECTIONS_ACTIVE,
+        "WebRTC peer connections currently held by the API server."
+    );
+    describe_counter!(
+        M_WEBRTC_CONNECTIONS_CREATED,
+        "WebRTC peer connections created via the API."
+    );
+    describe_counter!(
+        M_WEBRTC_CONNECTIONS_DELETED,
+        "WebRTC peer connections deleted via the API."
+    );
+    describe_counter!(
+        M_WEBRTC_ICE_CANDIDATES_ADDED,
+        "Remote ICE candidates added to WebRTC connections via the API."
+    );
+    describe_gauge!(
+        M_WEBRTC_ICE_CANDIDATES_GATHERED,
+        "Local ICE candidates gathered by the most recently created WebRTC \
+         connection (sampled at offer time)."
+    );
+    describe_histogram!(
+        M_WEBRTC_ESTABLISHMENT,
+        "Time from WebRTC connection creation to the remote answer being \
+         applied."
+    );
+    describe_counter!(
+        M_SDP_NEGOTIATIONS,
+        "SDP offer/answer negotiations attempted via the API."
+    );
+    describe_counter!(
+        M_SDP_NEGOTIATION_FAILURES,
+        "SDP negotiations failed, by reason (missing_local_address, \
+         invalid_profile, parse_error, no_common_codec, negotiation_error)."
+    );
+    describe_counter!(
+        M_SDP_CODECS_NEGOTIATED,
+        "Codecs selected by successful SDP negotiations, by codec."
+    );
+    describe_histogram!(
+        M_SDP_NEGOTIATION_DURATION,
+        "Wall time of one SDP parse + negotiation."
+    );
 }
 
 #[cfg(test)]
@@ -166,8 +166,7 @@ mod tests {
                  ALL_* lists — add it to metrics.rs"
             );
         }
-        let emitted_names: BTreeSet<&str> =
-            emitted.iter().map(|(_, name)| name.as_str()).collect();
+        let emitted_names: BTreeSet<&str> = emitted.iter().map(|(_, name)| name.as_str()).collect();
         for name in listed {
             assert!(
                 emitted_names.contains(name),
@@ -196,6 +195,14 @@ mod tests {
             if !src.is_dir() {
                 continue;
             }
+            assert_eq!(
+                forge_core::metrics_scan::non_literal_emissions_in_dir(&src),
+                0,
+                "a crate under {} emits a metric with a non-string-literal \
+                 name — the scanner (and plain grep) cannot see it, so it \
+                 could ship undescribed; use a string literal",
+                crate_dir.display()
+            );
             for (kind, name) in forge_core::metrics_scan::facade_emissions_in_dir(&src) {
                 seen += 1;
                 assert!(

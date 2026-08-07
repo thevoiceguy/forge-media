@@ -1393,11 +1393,17 @@ impl ForwardingEngine {
                 // Extract and record RTCP statistics
                 match &rtcp_packet {
                     forge_rtp::rtcp::RtcpPacket::SenderReport(sr) => {
-                        // Record sender statistics
-                        counter!("forge_rtcp_sender_packets_total")
-                            .increment(sr.sender_packet_count as u64);
-                        counter!("forge_rtcp_sender_bytes_total")
-                            .increment(sr.sender_octet_count as u64);
+                        // The SR carries cumulative totals (RFC 3550
+                        // §6.4.1); count only what's new since this
+                        // SSRC's previous report, or the counters sum
+                        // running totals and grow quadratically (#103).
+                        let (packets_delta, octets_delta) = session
+                            .rtcp_sr_tracker()
+                            .lock()
+                            .await
+                            .advance(sr.ssrc, sr.sender_packet_count, sr.sender_octet_count);
+                        counter!("forge_rtcp_sender_packets_total").increment(packets_delta);
+                        counter!("forge_rtcp_sender_bytes_total").increment(octets_delta);
 
                         Self::process_report_blocks(
                             session,

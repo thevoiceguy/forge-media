@@ -101,8 +101,8 @@ Label sets are per-family; a family with no labels listed has none.
 | `forge_rtcp_packets_sent_total` | counter | | RTCP packets sent (locally originated). |
 | `forge_rtcp_bytes_sent_total` | counter | | RTCP bytes sent (locally originated). |
 | `forge_rtcp_sender_reports_sent_total` | counter | | RTCP Sender Reports originated locally. |
-| `forge_rtcp_sender_packets_total` | counter | | Running sum of the cumulative sender packet counts carried in received RTCP Sender Reports. Grows with every SR received; not a wire packet count. |
-| `forge_rtcp_sender_bytes_total` | counter | | Running sum of the cumulative sender octet counts carried in received RTCP Sender Reports. Grows with every SR received; not a wire byte count. |
+| `forge_rtcp_sender_packets_total` | counter | | RTP packets peers report having sent, accumulated per-SSRC as deltas of the cumulative sender packet count across received RTCP Sender Reports (RFC 3550 §6.4.1). A count below the previous report reads as a sender restart and re-baselines. |
+| `forge_rtcp_sender_bytes_total` | counter | | RTP payload octets peers report having sent, accumulated per-SSRC as deltas of the cumulative sender octet count across received RTCP Sender Reports (RFC 3550 §6.4.1). Outside a restart the delta wraps with the u32 octet count, so long high-bitrate streams stay accurate. |
 | `forge_rtcp_highest_seq` | gauge | | Extended highest sequence number from the most recent received RTCP report block. |
 | `forge_rtcp_jitter` | gauge | | Peer-reported interarrival jitter (RTP timestamp units) from the most recent received RTCP report block. |
 | `forge_rtcp_packet_loss_fraction` | gauge | | Peer-reported fraction of packets lost (0.0–1.0) from the most recent received RTCP report block. |

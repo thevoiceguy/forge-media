@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Dependencies
+
+- `sha1` 0.10 → 0.11, `hmac` 0.12 → 0.13, `sha2` 0.10 → 0.11 — the coordinated digest-0.11 ecosystem move ([#90](https://github.com/thevoiceguy/forge-media/pull/90) could not land alone: sha1 0.11 and hmac 0.12 sit on incompatible `digest` majors, so `Hmac<Sha1>` in forge-rtp SRTP auth and forge-ice STUN MESSAGE-INTEGRITY failed to compile). `new_from_slice` moved from the `Mac` trait to `KeyInit`; call sites updated, no behavioural change (all SRTP/STUN test vectors pass unchanged). forge-ice's privately-pinned `hmac`/`sha1` now inherit from the workspace so the two halves of `Hmac<Sha1>` can't drift across majors again.
+
 ### Fixed
 
 - **Every `metrics`-facade family now has a description, so `# HELP` lines reach every consumer's exporter** ([#101](https://github.com/thevoiceguy/forge-media/issues/101)). All 79 `counter!`/`gauge!`/`histogram!` families (forge-rtp 8, forge-engine 48, forge-conference 13, forge-api 10) were emitted with no `describe_*!` registration anywhere in the tree, so they rendered as a bare `# TYPE` with no help text through the standalone server and every embedding consumer alike — found live on a SiphonAI 0.48.5 box whose own metrics all carry HELP. Each emitting crate now has a `src/metrics.rs` with name consts, `describe_*!` registrations, and `ALL_COUNTERS`/`ALL_GAUGES`/`ALL_HISTOGRAMS` lists; `SessionManager::new*`, `ConferenceBridge::new`, and the standalone server's `MetricsHandle::init` call the (idempotent, post-recorder) `describe_metrics()` so both deployment shapes get descriptions without new API calls. Coverage is self-detecting in both directions: per-crate self-scan tests walk the crate's sources and fail if an emission site and the lists disagree (including a name emitted under the wrong type, or a non-string-literal name that grep and the scanner couldn't see), and a workspace-wide sweep in forge-api fails if any facade emission in any crate under `crates/` is missing from the describe lists — so a brand-new emitting crate cannot ship undescribed metrics.

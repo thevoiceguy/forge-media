@@ -3,7 +3,7 @@
 
 use bytes::{Buf, BufMut, BytesMut};
 use forge_core::{ForgeError, Result};
-use hmac::{Hmac, Mac};
+use hmac::{digest::KeyInit, Hmac, Mac};
 use rand::rngs::SysRng;
 use rand::TryRng;
 use sha1::Sha1;

@@ -5,7 +5,7 @@ use forge_core::{CallId, EventBus, ForgeError, ForgeEvent, ParticipantId, Result
 use forge_rtp::srtp::SrtpContext;
 use forge_rtp::{PortPair, PortPool, RtpSocketConfig, RtpSocketPair};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -509,6 +509,50 @@ impl RxStreamStats {
     }
 }
 
+/// Turns the cumulative sender counts carried in received RTCP Sender
+/// Reports into per-report deltas, per SSRC.
+///
+/// RFC 3550 §6.4.1 defines an SR's `sender_packet_count` /
+/// `sender_octet_count` as cumulative totals since the sender began
+/// transmission, and §8 scopes them to one SSRC. Feeding them to a
+/// monotonic counter raw sums the running totals — quadratic growth that
+/// measures nothing (issue #103) — and folding multiple SSRCs into one
+/// baseline would corrupt the deltas the same way it corrupted
+/// [`RxStreamStats`] before the per-SSRC re-baseline.
+#[derive(Debug, Default)]
+pub struct SrCounterTracker {
+    /// Last cumulative (packet count, octet count) seen per sender SSRC.
+    last: HashMap<u32, (u32, u32)>,
+}
+
+impl SrCounterTracker {
+    /// Fold one SR's cumulative counts into the tracker and return the
+    /// (packets, octets) delta it contributes to wire-truth counters.
+    ///
+    /// The first SR from an SSRC contributes its full cumulative counts —
+    /// they cover packets sent before the report reached us. A packet
+    /// count below the previous one means the sender restarted (RFC 3550
+    /// resets the counts when the sender's SSRC would change, and some
+    /// stacks reset without changing SSRC), so the new totals are a fresh
+    /// baseline and count in full. The octet count instead wraps its u32
+    /// legitimately mid-stream (§6.4.1 says it "should" be reset by
+    /// wrapping — ~4.3 GB, hours at high bitrates), so outside a restart
+    /// it advances by `wrapping_sub`, which reads a wrap as the small
+    /// forward step it is.
+    pub fn advance(&mut self, ssrc: u32, packet_count: u32, octet_count: u32) -> (u64, u64) {
+        match self.last.insert(ssrc, (packet_count, octet_count)) {
+            None => (packet_count as u64, octet_count as u64),
+            Some((last_packets, _)) if packet_count < last_packets => {
+                (packet_count as u64, octet_count as u64)
+            }
+            Some((last_packets, last_octets)) => (
+                (packet_count - last_packets) as u64,
+                octet_count.wrapping_sub(last_octets) as u64,
+            ),
+        }
+    }
+}
+
 /// RTP state for generated audio injected into a participant leg.
 #[derive(Debug)]
 pub(crate) struct GeneratedRtpState {
@@ -762,6 +806,11 @@ pub struct MediaSession {
     inband_detector: Arc<Mutex<forge_dtmf::GoertzelDetector>>,
     /// DTMF event deduplicator
     dtmf_dedup: Arc<Mutex<forge_dtmf::DtmfDeduplicator>>,
+    /// Per-SSRC delta tracking for the cumulative sender counts in
+    /// received RTCP Sender Reports, so the `forge_rtcp_sender_*_total`
+    /// counters advance by what the peer sent since its last report
+    /// rather than re-adding the running total every SR (issue #103).
+    rtcp_sr_tracker: Arc<Mutex<SrCounterTracker>>,
     /// Voice-activity detector for this session's inbound audio.
     /// One state machine per call; the forwarding loop runs it on
     /// every decoded PCM frame and publishes
@@ -909,6 +958,7 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            rtcp_sr_tracker: Arc::new(Mutex::new(SrCounterTracker::default())),
             vad_detector: Arc::new(Mutex::new(vad_detector)),
             vad_rate_guard_tripped: AtomicBool::new(false),
             speech_started_at: Arc::new(Mutex::new(None)),
@@ -1068,6 +1118,7 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            rtcp_sr_tracker: Arc::new(Mutex::new(SrCounterTracker::default())),
             vad_detector: Arc::new(Mutex::new(vad_detector)),
             vad_rate_guard_tripped: AtomicBool::new(false),
             speech_started_at: Arc::new(Mutex::new(None)),
@@ -1271,6 +1322,7 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            rtcp_sr_tracker: Arc::new(Mutex::new(SrCounterTracker::default())),
             vad_detector: Arc::new(Mutex::new(vad_detector)),
             vad_rate_guard_tripped: AtomicBool::new(false),
             speech_started_at: Arc::new(Mutex::new(None)),
@@ -2600,6 +2652,11 @@ impl MediaSession {
         Arc::clone(&self.recording_mixer)
     }
 
+    /// Per-SSRC delta tracker for received RTCP Sender Report counts.
+    pub(crate) fn rtcp_sr_tracker(&self) -> Arc<Mutex<SrCounterTracker>> {
+        Arc::clone(&self.rtcp_sr_tracker)
+    }
+
     // =====================================================================
     // Call Recording Methods
     // =====================================================================
@@ -2927,6 +2984,7 @@ impl MediaSession {
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
             inband_detector: Arc::new(Mutex::new(forge_dtmf::GoertzelDetector::new(8000, 160))),
             dtmf_dedup: Arc::new(Mutex::new(forge_dtmf::DtmfDeduplicator::new())),
+            rtcp_sr_tracker: Arc::new(Mutex::new(SrCounterTracker::default())),
             vad_detector: Arc::new(Mutex::new(vad_detector)),
             vad_rate_guard_tripped: AtomicBool::new(false),
             speech_started_at: Arc::new(Mutex::new(None)),
@@ -4504,6 +4562,69 @@ mod tests {
                 .err()
                 .expect("bad VAD config must fail session setup");
             assert!(err.to_string().contains("sample rates"), "{err}");
+        }
+    }
+
+    mod sr_counter_tracker {
+        use super::super::SrCounterTracker;
+
+        #[test]
+        fn first_report_contributes_full_cumulative_counts() {
+            let mut t = SrCounterTracker::default();
+            assert_eq!(t.advance(0x1111, 250, 40_000), (250, 40_000));
+        }
+
+        #[test]
+        fn subsequent_reports_contribute_deltas_not_running_totals() {
+            // The #103 shape: 50 pps, an SR every 5 s. Summing the
+            // cumulative counts reads 19 500 after 60 s; the wire truth
+            // is 3 000.
+            let mut t = SrCounterTracker::default();
+            let mut total = 0u64;
+            for sr in 1..=12u32 {
+                total += t.advance(0x1111, sr * 250, sr * 40_000).0;
+            }
+            assert_eq!(total, 3_000);
+        }
+
+        #[test]
+        fn duplicate_report_contributes_nothing() {
+            let mut t = SrCounterTracker::default();
+            t.advance(0x1111, 500, 80_000);
+            assert_eq!(t.advance(0x1111, 500, 80_000), (0, 0));
+        }
+
+        #[test]
+        fn ssrcs_track_independent_baselines() {
+            // Two concurrent senders folded into one baseline would read
+            // the smaller stream's cumulative count as a restart of the
+            // larger's. Each SSRC advances by its own delta.
+            let mut t = SrCounterTracker::default();
+            t.advance(0xAAAA, 1_000, 160_000);
+            t.advance(0xBBBB, 10, 1_600);
+            assert_eq!(t.advance(0xAAAA, 1_250, 200_000), (250, 40_000));
+            assert_eq!(t.advance(0xBBBB, 20, 3_200), (10, 1_600));
+        }
+
+        #[test]
+        fn sender_restart_rebaselines_and_counts_the_new_totals() {
+            let mut t = SrCounterTracker::default();
+            t.advance(0x1111, 3_000, 480_000);
+            // Counts fall back to near zero: the sender restarted. The
+            // new cumulative values are a fresh baseline, counted whole.
+            assert_eq!(t.advance(0x1111, 50, 8_000), (50, 8_000));
+            // And deltas resume from the new baseline.
+            assert_eq!(t.advance(0x1111, 300, 48_000), (250, 40_000));
+        }
+
+        #[test]
+        fn octet_count_wrap_advances_by_the_wrapped_delta() {
+            // §6.4.1 lets the u32 octet count wrap mid-stream while the
+            // packet count keeps climbing. That must read as the small
+            // forward step it is, not a restart or a 4 GB jump.
+            let mut t = SrCounterTracker::default();
+            t.advance(0x1111, 1_000, u32::MAX - 999);
+            assert_eq!(t.advance(0x1111, 1_010, 600), (10, 1_600));
         }
     }
 }

@@ -258,15 +258,16 @@ pub fn describe_metrics() {
     describe_counter!(M_RTCP_BYTES_SENT, "RTCP bytes sent (locally originated).");
     describe_counter!(
         M_RTCP_SENDER_PACKETS,
-        "Running sum of the cumulative sender packet counts carried in \
-         received RTCP Sender Reports. Grows with every SR received; not a \
-         wire packet count."
+        "RTP packets peers report having sent, accumulated per-SSRC as \
+         deltas of the cumulative sender packet count across received RTCP \
+         Sender Reports (RFC 3550 section 6.4.1), restart-aware."
     );
     describe_counter!(
         M_RTCP_SENDER_BYTES,
-        "Running sum of the cumulative sender octet counts carried in \
-         received RTCP Sender Reports. Grows with every SR received; not a \
-         wire byte count."
+        "RTP payload octets peers report having sent, accumulated per-SSRC \
+         as deltas of the cumulative sender octet count across received \
+         RTCP Sender Reports (RFC 3550 section 6.4.1), restart- and \
+         wrap-aware."
     );
     describe_counter!(M_RTCP_SR_SENT, "RTCP Sender Reports originated locally.");
     describe_gauge!(

@@ -28,7 +28,7 @@ bytes = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 
 [build-dependencies]
-aya-build = "0.1"
+aya-build = "0.2"
 
 [features]
 default = []

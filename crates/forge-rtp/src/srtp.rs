@@ -655,7 +655,7 @@ impl SrtpContext {
             .as_ref()
             .ok_or_else(|| ForgeError::Srtp("Missing authentication key".to_string()))?;
 
-        let mut mac = <HmacSha1 as Mac>::new_from_slice(auth_key)
+        let mut mac = <HmacSha1 as KeyInit>::new_from_slice(auth_key)
             .map_err(|e| ForgeError::Srtp(format!("Failed to create HMAC: {}", e)))?;
 
         mac.update(&encrypted);
@@ -877,7 +877,7 @@ impl SrtpContext {
             .as_ref()
             .ok_or_else(|| ForgeError::Srtp("Missing authentication key".to_string()))?;
 
-        let mut mac = <HmacSha1 as Mac>::new_from_slice(auth_key)
+        let mut mac = <HmacSha1 as KeyInit>::new_from_slice(auth_key)
             .map_err(|e| ForgeError::Srtp(format!("Failed to create HMAC: {}", e)))?;
 
         mac.update(encrypted_packet);
@@ -1151,7 +1151,7 @@ impl SrtpContext {
             .as_ref()
             .ok_or_else(|| ForgeError::Srtp("Missing authentication key".to_string()))?;
 
-        let mut mac = <HmacSha1 as Mac>::new_from_slice(auth_key)
+        let mut mac = <HmacSha1 as KeyInit>::new_from_slice(auth_key)
             .map_err(|e| ForgeError::Srtp(format!("Failed to create HMAC: {}", e)))?;
 
         mac.update(&encrypted);
@@ -1345,7 +1345,7 @@ impl SrtpContext {
             .as_ref()
             .ok_or_else(|| ForgeError::Srtp("Missing authentication key".to_string()))?;
 
-        let mut mac = <HmacSha1 as Mac>::new_from_slice(auth_key)
+        let mut mac = <HmacSha1 as KeyInit>::new_from_slice(auth_key)
             .map_err(|e| ForgeError::Srtp(format!("Failed to create HMAC: {}", e)))?;
 
         mac.update(encrypted_packet);

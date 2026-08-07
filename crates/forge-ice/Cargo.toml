@@ -24,7 +24,7 @@ thiserror = { workspace = true }
 
 # Networking
 socket2 = { workspace = true }
-if-addrs = "0.13"
+if-addrs = "0.15"
 
 # Random for STUN transaction IDs
 rand = { workspace = true }

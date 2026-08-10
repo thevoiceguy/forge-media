@@ -13,7 +13,7 @@ sip-sdp = { path = "../../external/siphon-rs/crates/sip-sdp" }
 smol_str = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 rand = { workspace = true }
 forge-ice = { path = "../forge-ice", optional = true }
 

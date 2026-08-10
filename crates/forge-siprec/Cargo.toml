@@ -23,7 +23,7 @@ serde = { workspace = true }
 bytes = { workspace = true }
 uuid = { version = "1.23", features = ["v4"] }
 rand = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 
 # Networking
 tokio-util = { version = "0.7", features = ["codec"] }

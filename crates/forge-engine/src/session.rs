@@ -900,18 +900,16 @@ impl MediaSession {
         from_tag: Option<String>,
         to_tag: Option<String>,
     ) -> Result<Self> {
-        // Allocate ports
-        let ports = port_pool.allocate().await?;
-        let mut port_guard = PortAllocationGuard::new(Arc::clone(port_pool), ports);
+        // Allocate ports and bind them, retrying past any port the host
+        // has handed to a socket outside this pool (#111).
+        let (ports, sockets, mut port_guard) =
+            allocate_and_bind(port_pool, config.socket_config.clone()).await?;
         tracing::info!(
             "Allocated ports for session {}: RTP={}, RTCP={}",
             call_id.0,
             ports.rtp_port,
             ports.rtcp_port
         );
-
-        // Create socket pair
-        let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
         port_guard.disarm();
 
         let default_codec_config = ParticipantCodecConfig::default();
@@ -1062,18 +1060,16 @@ impl MediaSession {
             pt_map.opus
         );
 
-        // Allocate ports
-        let ports = port_pool.allocate().await?;
-        let mut port_guard = PortAllocationGuard::new(Arc::clone(port_pool), ports);
+        // Allocate ports and bind them, retrying past any port the host
+        // has handed to a socket outside this pool (#111).
+        let (ports, sockets, mut port_guard) =
+            allocate_and_bind(port_pool, config.socket_config.clone()).await?;
         tracing::info!(
             "Allocated ports for session {}: RTP={}, RTCP={}",
             call_id.0,
             ports.rtp_port,
             ports.rtcp_port
         );
-
-        // Create socket pair
-        let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
         port_guard.disarm();
 
         let participant_a = Participant {
@@ -1264,18 +1260,16 @@ impl MediaSession {
         from_tag: Option<String>,
         to_tag: Option<String>,
     ) -> Result<Self> {
-        // Allocate ports
-        let ports = port_pool.allocate().await?;
-        let mut port_guard = PortAllocationGuard::new(Arc::clone(port_pool), ports);
+        // Allocate ports and bind them, retrying past any port the host
+        // has handed to a socket outside this pool (#111).
+        let (ports, sockets, mut port_guard) =
+            allocate_and_bind(port_pool, config.socket_config.clone()).await?;
         tracing::info!(
             "Allocated ports for session {}: RTP={}, RTCP={}",
             call_id.0,
             ports.rtp_port,
             ports.rtcp_port
         );
-
-        // Create socket pair
-        let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
         port_guard.disarm();
 
         let default_codec_config = ParticipantCodecConfig::default();
@@ -3288,6 +3282,107 @@ fn codec_name(codec: forge_codecs::AudioCodecType) -> &'static str {
 }
 
 /// Guard that returns allocated ports if construction fails before the session owns them
+/// How many port pairs to try before giving up on a bind.
+///
+/// Five draws against a pool of hundreds or thousands makes the failure
+/// vanishingly unlikely while keeping the work bounded — the point is to
+/// survive a squatter, not to search an exhausted pool (which
+/// `PortPool::allocate` already reports on its own).
+const PORT_BIND_ATTEMPTS: usize = 5;
+
+/// Allocate a port pair and bind its sockets, retrying on `AddrInUse`.
+///
+/// [`PortPool`] tracks only its own bookkeeping, so a port it believes free
+/// can still be held by a socket outside this process: the configured RTP
+/// range normally sits inside the OS ephemeral range
+/// (`net.ipv4.ip_local_port_range`), and any process opening a UDP socket
+/// without an explicit port — a DNS lookup will do — may be handed one.
+/// Failing the whole session for that is wrong when the pool has hundreds
+/// of other pairs free (issue #111).
+///
+/// Rejected pairs are **held, not released**, until this returns, so each
+/// retry draws a different port rather than possibly re-drawing the one
+/// that just failed. The returned guard is still armed; the caller
+/// disarms it once the session owns the ports.
+///
+/// Only `AddrInUse` is retried. Any other bind error returns immediately —
+/// retrying must not paper over a genuine fault.
+async fn allocate_and_bind(
+    port_pool: &Arc<PortPool>,
+    socket_config: RtpSocketConfig,
+) -> Result<(PortPair, RtpSocketPair, PortAllocationGuard)> {
+    // Rejected pairs are collected and released explicitly below, not left
+    // to `PortAllocationGuard`'s `Drop`: that releases through a spawned
+    // task, so the pool would only get them back at some later point the
+    // caller cannot observe. Holding them until we return also guarantees
+    // each retry draws a *different* pair.
+    let mut rejected: Vec<PortPair> = Vec::new();
+    let mut last_conflict = None;
+    let mut bound = None;
+
+    for attempt in 1..=PORT_BIND_ATTEMPTS {
+        let ports = match port_pool.allocate().await {
+            Ok(ports) => ports,
+            Err(e) => {
+                release_all(port_pool, rejected).await;
+                return Err(e);
+            }
+        };
+        let guard = PortAllocationGuard::new(Arc::clone(port_pool), ports);
+
+        match RtpSocketPair::new(ports, socket_config.clone()).await {
+            Ok(sockets) => {
+                bound = Some((ports, sockets, guard));
+                break;
+            }
+            Err(ForgeError::AddrInUse(addr)) => {
+                // The call still succeeds, but the host is handing out
+                // ports this pool considers its own — worth saying out
+                // loud, because the durable fix is reserving the range
+                // (`net.ipv4.ip_local_reserved_ports`).
+                tracing::warn!(
+                    %addr,
+                    attempt,
+                    max_attempts = PORT_BIND_ATTEMPTS,
+                    "RTP port is held outside the pool; drawing another pair"
+                );
+                // Disarm so the guard's `Drop` does not also release it;
+                // `release_all` below owns that, and doing both would hand
+                // the pool the same pair twice.
+                let mut guard = guard;
+                guard.disarm();
+                rejected.push(ports);
+                last_conflict = Some(addr);
+            }
+            Err(e) => {
+                release_all(port_pool, rejected).await;
+                return Err(e);
+            }
+        }
+    }
+
+    release_all(port_pool, rejected).await;
+
+    match bound {
+        Some(bound) => Ok(bound),
+        // Every attempt collided. Report the last conflicting address
+        // rather than a bare "allocation failed" — it is what an operator
+        // needs to find the squatter.
+        None => Err(match last_conflict {
+            Some(addr) => ForgeError::AddrInUse(addr),
+            None => ForgeError::PortAllocationFailed,
+        }),
+    }
+}
+
+/// Hand a batch of pairs back to the pool, awaited, so the caller can rely
+/// on the pool's counts immediately afterwards.
+async fn release_all(port_pool: &Arc<PortPool>, pairs: Vec<PortPair>) {
+    for pair in pairs {
+        port_pool.deallocate(pair).await;
+    }
+}
+
 struct PortAllocationGuard {
     port_pool: Arc<PortPool>,
     ports: PortPair,
@@ -3328,6 +3423,83 @@ impl Drop for PortAllocationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hold every RTP port in a pool, so every draw collides.
+    async fn squat_all(min: u16, max: u16) -> Vec<tokio::net::UdpSocket> {
+        let mut held = Vec::new();
+        let mut p = min;
+        while p < max {
+            if let Ok(s) = tokio::net::UdpSocket::bind(format!("0.0.0.0:{p}")).await {
+                held.push(s);
+            }
+            p += 2;
+        }
+        held
+    }
+
+    /// Sparse squatting — the real-world shape, a few ports of thousands —
+    /// must allocate normally and must not leak the pairs it rejects.
+    ///
+    /// This does **not** reliably exercise the retry: with 5 of 100 pairs
+    /// held, a random draw collides only 5% of the time, so most runs bind
+    /// first try. `a_fully_squatted_pool_reports_the_conflict` is the test
+    /// that forces the loop to run every attempt. Uniform random draw means
+    /// no test can deterministically make the first draw collide and a
+    /// later one succeed, so the two split the job between them.
+    #[tokio::test]
+    async fn sparse_squatting_allocates_normally_and_releases_rejects() {
+        let pool = Arc::new(PortPool::new(PortPoolConfig::new(21000, 21200).unwrap()));
+        let capacity = pool.available_count().await;
+
+        // Hold 5 of the 100 pairs.
+        let mut held = Vec::new();
+        let mut p = 21000;
+        while p < 21010 {
+            if let Ok(s) = tokio::net::UdpSocket::bind(format!("0.0.0.0:{p}")).await {
+                held.push(s);
+            }
+            p += 2;
+        }
+
+        let (ports, _sockets, mut guard) = allocate_and_bind(&pool, RtpSocketConfig::default())
+            .await
+            .expect("a squatted pair must not fail the call");
+        assert_eq!(ports.rtcp_port, ports.rtp_port + 1);
+        guard.disarm();
+
+        // Every pair drawn and rejected along the way is back in the pool —
+        // exactly one (the one we kept) is still out.
+        assert_eq!(
+            pool.available_count().await,
+            capacity - 1,
+            "rejected pairs must be released, not leaked"
+        );
+        drop(held);
+    }
+
+    /// When every pair really is taken, say so with the address rather than
+    /// looping forever or reporting a bare allocation failure.
+    #[tokio::test]
+    async fn a_fully_squatted_pool_reports_the_conflict() {
+        let held = squat_all(21400, 21600).await;
+        // If the host would not let us hold them all, the premise is gone.
+        if held.len() < 100 {
+            return;
+        }
+        let pool = Arc::new(PortPool::new(PortPoolConfig::new(21400, 21600).unwrap()));
+
+        match allocate_and_bind(&pool, RtpSocketConfig::default()).await {
+            Err(ForgeError::AddrInUse(addr)) => {
+                assert!((21400..21600).contains(&addr.port()));
+            }
+            Err(other) => panic!("expected AddrInUse, got {other:?}"),
+            Ok(_) => panic!("no pair was bindable; this must not succeed"),
+        }
+
+        // The failed attempts released their pairs.
+        assert_eq!(pool.available_count().await, pool.config().capacity());
+        drop(held);
+    }
     use forge_rtp::PortPoolConfig;
     use std::net::{SocketAddr, UdpSocket};
 

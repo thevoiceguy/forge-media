@@ -197,9 +197,18 @@ impl RtpSocketPair {
             .set_nonblocking(true)
             .map_err(|e| ForgeError::Network(format!("Failed to set non-blocking: {}", e)))?;
 
-        // Bind the socket
+        // Bind the socket.
+        //
+        // `AddrInUse` is reported as its own error rather than folded into
+        // `Network`: it is the one bind failure a caller can do something
+        // about, by drawing another port from the pool. Every other failure
+        // stays `Network` so that retrying cannot paper over a real fault.
         socket.bind(&addr.into()).map_err(|e| {
-            ForgeError::Network(format!("Failed to bind socket to {}: {}", addr, e))
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                ForgeError::AddrInUse(addr)
+            } else {
+                ForgeError::Network(format!("Failed to bind socket to {}: {}", addr, e))
+            }
         })?;
 
         // Convert to tokio UdpSocket
@@ -450,6 +459,36 @@ fn set_ipv6_tclass(_socket: &socket2::Socket, _tclass: u32) -> std::io::Result<(
 mod tests {
     use super::*;
     use crate::PortPair;
+
+    /// The retry in `forge-engine` keys off this exact variant, so a bind
+    /// conflict must arrive as `AddrInUse` carrying the address — not
+    /// folded into `Network(String)`, which would force the caller to
+    /// match on message text.
+    #[tokio::test]
+    async fn bind_conflict_reports_addr_in_use_with_the_address() {
+        // Hold an EVEN port, then ask forge to bind the same pair.
+        // `PortPair` requires an even RTP port, so keep drawing ephemeral
+        // ports until the OS gives us one — never skip the assertion, since
+        // a test that quietly returns proves nothing.
+        let mut squatter = None;
+        for _ in 0..64 {
+            let s = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+            if s.local_addr().unwrap().port() % 2 == 0 {
+                squatter = Some(s);
+                break;
+            }
+        }
+        let squatter = squatter.expect("64 draws without an even ephemeral port");
+        let rtp_port = squatter.local_addr().unwrap().port();
+
+        // `RtpSocketPair` is not `Debug`, so match rather than `expect_err`.
+        match RtpSocketPair::new(PortPair::new(rtp_port).unwrap(), RtpSocketConfig::default()).await
+        {
+            Err(ForgeError::AddrInUse(addr)) => assert_eq!(addr.port(), rtp_port),
+            Err(other) => panic!("expected AddrInUse, got {other:?}"),
+            Ok(_) => panic!("binding an occupied port must fail"),
+        }
+    }
 
     #[tokio::test]
     async fn test_socket_pair_creation() {

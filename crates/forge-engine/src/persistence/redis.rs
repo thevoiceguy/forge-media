@@ -199,7 +199,9 @@ impl PersistenceBackend for RedisBackend {
         let mut conn = self.conn_manager.clone();
 
         // Try a simple PING command
-        match redis::cmd("PING").query_async::<_, String>(&mut conn).await {
+        // redis 1.0 dropped the connection type parameter from
+        // `query_async`; the remaining generic is the response type.
+        match redis::cmd("PING").query_async::<String>(&mut conn).await {
             Ok(response) if response == "PONG" => Ok(true),
             Ok(_) => {
                 error!("Redis health check got unexpected response");

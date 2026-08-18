@@ -395,7 +395,10 @@ impl RedisHAClient {
                 ForgeError::Internal(format!("Failed to create Sentinel client: {}", e))
             })?;
 
-            match client.get_async_connection().await {
+            // redis 1.0 removed `get_async_connection` (the single-owner
+            // connection); the multiplexed connection is the supported
+            // replacement and is what `ConnectionManager` builds on.
+            match client.get_multiplexed_async_connection().await {
                 Ok(mut conn) => {
                     let response: Vec<String> = redis::cmd("SENTINEL")
                         .arg("get-master-addr-by-name")

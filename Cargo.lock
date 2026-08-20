@@ -4038,7 +4038,7 @@ checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
 name = "sip-auth"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4060,7 +4060,7 @@ dependencies = [
 
 [[package]]
 name = "sip-core"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "bytes",
  "httpdate",
@@ -4073,7 +4073,7 @@ dependencies = [
 
 [[package]]
 name = "sip-dialog"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4101,7 +4101,7 @@ dependencies = [
 
 [[package]]
 name = "sip-observe"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "once_cell",
  "tracing",
@@ -4124,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "sip-ratelimit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "parking_lot",
@@ -4134,7 +4134,7 @@ dependencies = [
 
 [[package]]
 name = "sip-sdp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nom 7.1.3",
  "smol_str",
@@ -4142,7 +4142,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transaction"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4161,7 +4161,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transport"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4176,6 +4176,7 @@ dependencies = [
  "rustls-pki-types",
  "sip-hep",
  "sip-observe",
+ "sip-ratelimit",
  "socket2 0.5.10",
  "tempfile",
  "tokio",
@@ -4186,7 +4187,7 @@ dependencies = [
 
 [[package]]
 name = "sip-uas"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",

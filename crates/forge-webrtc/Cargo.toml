@@ -1,6 +1,6 @@
 [package]
 name = "forge-webrtc"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -11,13 +11,20 @@ forge-core = { path = "../forge-core" }
 forge-rtp = { path = "../forge-rtp", features = ["dtls"] }
 forge-ice = { path = "../forge-ice" }
 forge-sdp = { path = "../forge-sdp", features = ["forge-ice"] }
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time", "net", "rt", "macros"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 dashmap = { workspace = true }
 uuid = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+smol_str = { workspace = true }
 
 [features]
 default = ["dtls"]
 dtls = ["forge-rtp/dtls"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true }

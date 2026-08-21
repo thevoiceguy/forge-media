@@ -60,6 +60,8 @@ pub enum AttributeType {
     IceControlling = 0x802a,
     /// FINGERPRINT (0x8028)
     Fingerprint = 0x8028,
+    /// USE-CANDIDATE (0x0025) - ICE nomination (RFC 8445 §7.1.2.1), zero-length
+    UseCandidate = 0x0025,
 }
 
 impl AttributeType {
@@ -73,6 +75,7 @@ impl AttributeType {
             0x8029 => Some(AttributeType::IceControlled),
             0x802a => Some(AttributeType::IceControlling),
             0x8028 => Some(AttributeType::Fingerprint),
+            0x0025 => Some(AttributeType::UseCandidate),
             _ => None,
         }
     }
@@ -108,6 +111,8 @@ pub enum StunAttribute {
     Fingerprint(u32),
     /// MESSAGE-INTEGRITY attribute
     MessageIntegrity([u8; 20]),
+    /// USE-CANDIDATE attribute (ICE nomination; carries no value)
+    UseCandidate,
     /// Unknown attribute
     Unknown { attr_type: u16, value: Vec<u8> },
 }
@@ -168,6 +173,37 @@ impl StunMessage {
     pub fn add_ice_controlling(&mut self, tie_breaker: u64) {
         self.attributes
             .push(StunAttribute::IceControlling(tie_breaker));
+    }
+
+    /// Add USE-CANDIDATE attribute (RFC 8445 §7.1.2.1). Sent by the
+    /// controlling agent on the check that nominates a pair.
+    pub fn add_use_candidate(&mut self) {
+        if !self.has_use_candidate() {
+            self.attributes.push(StunAttribute::UseCandidate);
+        }
+    }
+
+    /// Whether this message carries USE-CANDIDATE.
+    pub fn has_use_candidate(&self) -> bool {
+        self.attributes
+            .iter()
+            .any(|a| matches!(a, StunAttribute::UseCandidate))
+    }
+
+    /// PRIORITY attribute value, if present.
+    pub fn get_priority(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|a| match a {
+            StunAttribute::Priority(p) => Some(*p),
+            _ => None,
+        })
+    }
+
+    /// USERNAME attribute value, if present.
+    pub fn get_username(&self) -> Option<&str> {
+        self.attributes.iter().find_map(|a| match a {
+            StunAttribute::Username(u) => Some(u.as_str()),
+            _ => None,
+        })
     }
 
     /// Add MESSAGE-INTEGRITY attribute (HMAC-SHA1)
@@ -413,6 +449,7 @@ impl StunMessage {
                     mi.copy_from_slice(attr_value);
                     StunAttribute::MessageIntegrity(mi)
                 }
+                Some(AttributeType::UseCandidate) => StunAttribute::UseCandidate,
                 Some(AttributeType::Fingerprint) => {
                     if attr_len == 4 {
                         let fingerprint = u32::from_be_bytes([
@@ -475,6 +512,7 @@ impl StunAttribute {
             StunAttribute::IceControlled(_) | StunAttribute::IceControlling(_) => 8,
             StunAttribute::MessageIntegrity(_) => 20,
             StunAttribute::Fingerprint(_) => 4,
+            StunAttribute::UseCandidate => 0,
             StunAttribute::Unknown { value, .. } => value.len(),
         }
     }
@@ -531,6 +569,10 @@ impl StunAttribute {
                 buf.put_u16(AttributeType::Fingerprint as u16);
                 buf.put_u16(4); // Length
                 buf.put_u32(*crc);
+            }
+            StunAttribute::UseCandidate => {
+                buf.put_u16(AttributeType::UseCandidate as u16);
+                buf.put_u16(0);
             }
             StunAttribute::Unknown { attr_type, value } => {
                 buf.put_u16(*attr_type);
@@ -726,7 +768,9 @@ pub enum StunServerResponse {
 /// for every incoming Binding Request turns the endpoint into a reflector
 /// with response > request amplification. This server type requires the
 /// incoming request to carry:
-///   * a correct `USERNAME` in the `remote_ufrag:local_ufrag` form,
+///   * a correct `USERNAME` in the `local_ufrag:remote_ufrag` form — RFC 8445
+///     §7.2.2: the sender concatenates *the peer's* (our) ufrag, a colon, and
+///     its own ufrag, so the request we receive starts with our ufrag,
 ///   * a valid `MESSAGE-INTEGRITY` HMAC computed with the local ICE pwd,
 ///   * a correct `FINGERPRINT` (RFC 8489 §14.7).
 ///
@@ -734,12 +778,12 @@ pub enum StunServerResponse {
 /// are only ever generated for requests that prove knowledge of the local
 /// ICE credentials, so an off-path attacker cannot solicit a response.
 pub struct StunServer {
-    /// Local ufrag — the peer's USERNAME must end in `:<local_ufrag>`.
+    /// Local ufrag — the peer's USERNAME must start with `<local_ufrag>:`.
     local_ufrag: String,
     /// Local password — used to verify MESSAGE-INTEGRITY on inbound
     /// requests and to sign MESSAGE-INTEGRITY on outbound responses.
     local_pwd: Vec<u8>,
-    /// Remote ufrag — the peer's USERNAME must start with `<remote_ufrag>:`.
+    /// Remote ufrag — the peer's USERNAME must end in `:<remote_ufrag>`.
     remote_ufrag: String,
 }
 
@@ -771,7 +815,11 @@ impl StunServer {
             return StunServerResponse::Drop("not a Binding Request");
         }
 
-        // USERNAME must be present and shaped `<remote_ufrag>:<local_ufrag>`.
+        // USERNAME must be present and shaped `<local_ufrag>:<remote_ufrag>`
+        // (RFC 8445 §7.2.2, as seen by the receiver). This is the same
+        // string `checks.rs` builds as `{remote}:{local}` on the sending
+        // side; before this fix the two halves of forge-ice disagreed and
+        // every forge↔forge connectivity check was dropped.
         let username = request.attributes.iter().find_map(|a| match a {
             StunAttribute::Username(u) => Some(u.as_str()),
             _ => None,
@@ -781,7 +829,7 @@ impl StunServer {
             None => return StunServerResponse::Drop("missing USERNAME"),
         };
         let mut parts = username.splitn(2, ':');
-        let (req_remote, req_local) = match (parts.next(), parts.next()) {
+        let (req_local, req_remote) = match (parts.next(), parts.next()) {
             (Some(l), Some(r)) => (l, r),
             _ => return StunServerResponse::Drop("malformed USERNAME"),
         };
@@ -1154,7 +1202,7 @@ mod tests {
 
         // (b) Correct USERNAME but wrong MESSAGE-INTEGRITY key.
         let mut m = StunMessage::new_binding_request();
-        m.add_username("remoteuser:localuser".into());
+        m.add_username("localuser:remoteuser".into());
         m.add_message_integrity(b"not-the-right-pwd").unwrap();
         m.add_fingerprint();
         match server.handle_binding_request(&m.serialize(), src) {
@@ -1164,7 +1212,7 @@ mod tests {
 
         // (c) Correct MESSAGE-INTEGRITY but wrong ufrag pair.
         let mut m = StunMessage::new_binding_request();
-        m.add_username("remoteuser:someotherlocal".into());
+        m.add_username("someotherlocal:remoteuser".into());
         m.add_message_integrity(b"localpwd").unwrap();
         m.add_fingerprint();
         match server.handle_binding_request(&m.serialize(), src) {
@@ -1175,7 +1223,7 @@ mod tests {
         // (d) Not a Binding Request (success response injected).
         let mut bogus = StunMessage::new_binding_request();
         bogus.message_type = MessageType::BindingResponse;
-        bogus.add_username("remoteuser:localuser".into());
+        bogus.add_username("localuser:remoteuser".into());
         bogus.add_message_integrity(b"localpwd").unwrap();
         bogus.add_fingerprint();
         match server.handle_binding_request(&bogus.serialize(), src) {
@@ -1193,8 +1241,11 @@ mod tests {
         );
         let src = "192.0.2.5:1234".parse::<SocketAddr>().unwrap();
 
+        // What the peer sends (RFC 8445 §7.2.2): "<our ufrag>:<its ufrag>",
+        // i.e. exactly what checks.rs builds as `{remote}:{local}` from the
+        // peer's point of view.
         let mut m = StunMessage::new_binding_request();
-        m.add_username("remoteuser:localuser".into());
+        m.add_username("localuser:remoteuser".into());
         m.add_message_integrity(b"localpwd").unwrap();
         m.add_fingerprint();
 
@@ -1210,6 +1261,40 @@ mod tests {
             }
             StunServerResponse::Drop(reason) => panic!("server dropped valid req: {}", reason),
         }
+    }
+
+    /// The inverted (pre-fix) order must be rejected: a request whose
+    /// USERNAME starts with the *peer's* ufrag is not addressed to us.
+    #[test]
+    fn test_stun_server_rejects_inverted_username_order() {
+        let server = StunServer::new(
+            "localuser".into(),
+            b"localpwd".to_vec(),
+            "remoteuser".into(),
+        );
+        let src = "192.0.2.5:1234".parse::<SocketAddr>().unwrap();
+        let mut m = StunMessage::new_binding_request();
+        m.add_username("remoteuser:localuser".into());
+        m.add_message_integrity(b"localpwd").unwrap();
+        m.add_fingerprint();
+        assert!(matches!(
+            server.handle_binding_request(&m.serialize(), src),
+            StunServerResponse::Drop(_)
+        ));
+    }
+
+    #[test]
+    fn test_use_candidate_round_trips() {
+        let mut m = StunMessage::new_binding_request();
+        m.add_username("a:b".into());
+        m.add_use_candidate();
+        m.add_ice_controlling(7);
+        m.add_message_integrity(b"pw").unwrap();
+        m.add_fingerprint();
+        let parsed = StunMessage::parse(&m.serialize()).unwrap();
+        assert!(parsed.has_use_candidate());
+        assert!(parsed.verify_message_integrity(b"pw").unwrap());
+        assert_eq!(parsed.get_username(), Some("a:b"));
     }
 
     #[test]

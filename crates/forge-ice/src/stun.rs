@@ -90,6 +90,12 @@ pub struct StunMessage {
     pub transaction_id: [u8; 12],
     /// Attributes
     pub attributes: Vec<StunAttribute>,
+    /// The bytes this message was parsed from (empty for messages built
+    /// locally). MESSAGE-INTEGRITY and FINGERPRINT are verified over these
+    /// exact bytes — RFC 8489 §14.5/§14.7 — because attribute padding bytes
+    /// are arbitrary on the wire and a re-serialisation would not reproduce
+    /// them.
+    raw: Vec<u8>,
 }
 
 /// STUN attribute
@@ -136,21 +142,57 @@ impl StunMessage {
             message_type: MessageType::BindingRequest,
             transaction_id,
             attributes: Vec::new(),
+            raw: Vec::new(),
         }
     }
 
-    /// Add FINGERPRINT attribute (RFC 8489 Section 14.7)
+    /// A message of `message_type` echoing `transaction_id` (responses).
+    pub fn new_with_transaction(message_type: MessageType, transaction_id: [u8; 12]) -> Self {
+        Self {
+            message_type,
+            transaction_id,
+            attributes: Vec::new(),
+            raw: Vec::new(),
+        }
+    }
+
+    /// Add FINGERPRINT attribute (RFC 8489 Section 14.7).
+    ///
+    /// The CRC-32 covers the message up to (not including) the FINGERPRINT
+    /// attribute, with the header's length field already counting the 8
+    /// bytes the attribute will occupy.
     pub fn add_fingerprint(&mut self) {
-        // Serialize message without fingerprint
-        let mut buf = BytesMut::new();
-        self.serialize_without_fingerprint(&mut buf);
-
-        // Calculate CRC-32
-        let crc = crc32(&buf);
-        let fingerprint = crc ^ 0x5354554e; // XOR with "STUN" in ASCII
-
+        self.attributes
+            .retain(|attr| !matches!(attr, StunAttribute::Fingerprint(_)));
+        let input = self.serialize_prefix(self.attributes.len(), 8, None);
+        let fingerprint = crc32(&input) ^ 0x5354_554e; // XOR with "STUN"
         self.attributes
             .push(StunAttribute::Fingerprint(fingerprint));
+    }
+
+    /// Verify the FINGERPRINT attribute (RFC 8489 §14.7) over the bytes this
+    /// message was parsed from. `Ok(false)` when there is no FINGERPRINT.
+    pub fn verify_fingerprint(&self) -> Result<bool> {
+        let Some(fp_index) = self
+            .attributes
+            .iter()
+            .position(|attr| matches!(attr, StunAttribute::Fingerprint(_)))
+        else {
+            return Ok(false);
+        };
+        let expected = match self.attributes[fp_index] {
+            StunAttribute::Fingerprint(v) => v,
+            _ => unreachable!(),
+        };
+        let input = match self.raw_prefix(fp_index, 8) {
+            Some(bytes) => bytes,
+            None => self.serialize_prefix(fp_index, 8, None),
+        };
+        if crc32(&input) ^ 0x5354_554e == expected {
+            Ok(true)
+        } else {
+            Err(ForgeError::Ice("FINGERPRINT mismatch".to_string()))
+        }
     }
 
     /// Add USERNAME attribute
@@ -206,88 +248,67 @@ impl StunMessage {
         })
     }
 
-    /// Add MESSAGE-INTEGRITY attribute (HMAC-SHA1)
+    /// Add MESSAGE-INTEGRITY attribute (HMAC-SHA1, RFC 8489 §14.5).
+    ///
+    /// The HMAC covers the message up to (not including) the
+    /// MESSAGE-INTEGRITY attribute, with the header's length field already
+    /// counting the 24 bytes the attribute will occupy. Any existing
+    /// MESSAGE-INTEGRITY is replaced and an existing FINGERPRINT is dropped
+    /// (it must be recomputed after, and it never precedes MESSAGE-INTEGRITY).
     pub fn add_message_integrity(&mut self, key: &[u8]) -> Result<()> {
-        // Ensure there is only one MESSAGE-INTEGRITY attribute and it precedes FINGERPRINT
+        self.attributes.retain(|attr| {
+            !matches!(
+                attr,
+                StunAttribute::MessageIntegrity(_) | StunAttribute::Fingerprint(_)
+            )
+        });
+        let input = self.serialize_prefix(self.attributes.len(), 24, None);
+        let integrity = hmac_sha1(key, &input)?;
         self.attributes
-            .retain(|attr| !matches!(attr, StunAttribute::MessageIntegrity(_)));
-
-        let mi_index = self
-            .attributes
-            .iter()
-            .position(|attr| matches!(attr, StunAttribute::Fingerprint(_)))
-            .unwrap_or(self.attributes.len());
-
-        self.attributes
-            .insert(mi_index, StunAttribute::MessageIntegrity([0u8; 20]));
-
-        // Serialize without fingerprint and with zeroed integrity value for the HMAC calculation
-        let serialized = self.serialize_internal(false, Some([0u8; 20]));
-
-        let mut mac = Hmac::<Sha1>::new_from_slice(key).map_err(|e| {
-            ForgeError::Ice(format!(
-                "Failed to create HMAC for MESSAGE-INTEGRITY: {}",
-                e
-            ))
-        })?;
-        mac.update(&serialized);
-
-        let result = mac.finalize().into_bytes();
-        let mut integrity = [0u8; 20];
-        integrity.copy_from_slice(&result[..20]);
-
-        if let Some(StunAttribute::MessageIntegrity(existing)) = self
-            .attributes
-            .iter_mut()
-            .find(|attr| matches!(attr, StunAttribute::MessageIntegrity(_)))
-        {
-            *existing = integrity;
-        }
-
+            .push(StunAttribute::MessageIntegrity(integrity));
         Ok(())
     }
 
     /// Verify MESSAGE-INTEGRITY attribute
     ///
     /// Validates the HMAC-SHA1 signature in the MESSAGE-INTEGRITY attribute
-    /// using the provided key. This is used when receiving STUN messages to
-    /// authenticate the sender.
+    /// using the provided key (the ICE password of whoever signed). For a
+    /// parsed message the HMAC is computed over the received bytes, so
+    /// arbitrary attribute padding on the wire is honoured.
     ///
     /// The comparison is **constant-time** (`hmac::Mac::verify_slice` uses
     /// `subtle::ConstantTimeEq` internally). Audit finding C10: the
     /// previous `==` comparison leaked timing information an attacker
     /// could use to probe valid signatures byte-by-byte.
     ///
-    /// # Arguments
-    /// * `key` - The shared secret key for HMAC verification (typically the ICE password)
-    ///
     /// # Returns
     /// * `Ok(true)` - MESSAGE-INTEGRITY is present and valid
     /// * `Ok(false)` - MESSAGE-INTEGRITY is missing (message not authenticated)
     /// * `Err(_)` - MESSAGE-INTEGRITY is present but validation failed
     pub fn verify_message_integrity(&self, key: &[u8]) -> Result<bool> {
-        // Find MESSAGE-INTEGRITY attribute
-        let received_integrity = match self
+        let Some(mi_index) = self
             .attributes
             .iter()
-            .find(|attr| matches!(attr, StunAttribute::MessageIntegrity(_)))
-        {
-            Some(StunAttribute::MessageIntegrity(value)) => value,
-            _ => return Ok(false), // No MESSAGE-INTEGRITY present
+            .position(|attr| matches!(attr, StunAttribute::MessageIntegrity(_)))
+        else {
+            return Ok(false);
         };
-
-        // Serialize message without FINGERPRINT and with zeroed MESSAGE-INTEGRITY
-        let serialized = self.serialize_internal(false, Some([0u8; 20]));
-
-        // Constant-time compare via `verify_slice` (backed by `subtle`).
+        let received = match &self.attributes[mi_index] {
+            StunAttribute::MessageIntegrity(v) => v,
+            _ => unreachable!(),
+        };
+        let input = match self.raw_prefix(mi_index, 24) {
+            Some(bytes) => bytes,
+            None => self.serialize_prefix(mi_index, 24, None),
+        };
         let mut verifier = Hmac::<Sha1>::new_from_slice(key).map_err(|e| {
             ForgeError::Ice(format!(
                 "Failed to create HMAC for MESSAGE-INTEGRITY verification: {}",
                 e
             ))
         })?;
-        verifier.update(&serialized);
-        match verifier.verify_slice(&received_integrity[..]) {
+        verifier.update(&input);
+        match verifier.verify_slice(&received[..]) {
             Ok(()) => Ok(true),
             Err(_) => Err(ForgeError::Ice(
                 "MESSAGE-INTEGRITY verification failed: HMAC mismatch".to_string(),
@@ -295,15 +316,59 @@ impl StunMessage {
         }
     }
 
+    /// The bytes an integrity/fingerprint computation covers, built from
+    /// our own attribute list: the header whose length field counts every
+    /// attribute before `attr_count` **plus** `trailer_len` (the attribute
+    /// being computed), followed by those attributes.
+    fn serialize_prefix(
+        &self,
+        attr_count: usize,
+        trailer_len: usize,
+        integrity_override: Option<[u8; 20]>,
+    ) -> Vec<u8> {
+        let attrs = &self.attributes[..attr_count];
+        let mut attr_length = 0usize;
+        for attr in attrs {
+            attr_length += 4 + attr.value_len() + (4 - (attr.value_len() % 4)) % 4;
+        }
+        let mut buf = BytesMut::with_capacity(20 + attr_length);
+        buf.put_u16(self.message_type as u16);
+        buf.put_u16((attr_length + trailer_len) as u16);
+        buf.put_u32(MAGIC_COOKIE);
+        buf.put_slice(&self.transaction_id);
+        for attr in attrs {
+            attr.serialize(&mut buf, &self.transaction_id, integrity_override.as_ref());
+        }
+        buf.to_vec()
+    }
+
+    /// Same as [`Self::serialize_prefix`] but over the bytes this message was
+    /// parsed from. `None` if the message was built locally.
+    fn raw_prefix(&self, attr_index: usize, trailer_len: usize) -> Option<Vec<u8>> {
+        if self.raw.len() < 20 {
+            return None;
+        }
+        // Walk the wire attributes to find where attribute `attr_index` starts.
+        let mut offset = 20usize;
+        for _ in 0..attr_index {
+            if offset + 4 > self.raw.len() {
+                return None;
+            }
+            let len = u16::from_be_bytes([self.raw[offset + 2], self.raw[offset + 3]]) as usize;
+            offset += 4 + len + (4 - (len % 4)) % 4;
+        }
+        if offset > self.raw.len() {
+            return None;
+        }
+        let mut out = self.raw[..offset].to_vec();
+        let adjusted = (offset - 20 + trailer_len) as u16;
+        out[2..4].copy_from_slice(&adjusted.to_be_bytes());
+        Some(out)
+    }
+
     /// Serialize message to bytes
     pub fn serialize(&self) -> Vec<u8> {
         self.serialize_internal(true, None).to_vec()
-    }
-
-    /// Serialize without fingerprint (for fingerprint calculation)
-    fn serialize_without_fingerprint(&self, buf: &mut BytesMut) {
-        let serialized = self.serialize_internal(false, None);
-        buf.extend_from_slice(&serialized);
     }
 
     fn serialize_internal(
@@ -484,6 +549,7 @@ impl StunMessage {
             message_type,
             transaction_id,
             attributes,
+            raw: data[..20 + msg_length].to_vec(),
         })
     }
 
@@ -748,6 +814,20 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+fn hmac_sha1(key: &[u8], input: &[u8]) -> Result<[u8; 20]> {
+    let mut mac = Hmac::<Sha1>::new_from_slice(key).map_err(|e| {
+        ForgeError::Ice(format!(
+            "Failed to create HMAC for MESSAGE-INTEGRITY: {}",
+            e
+        ))
+    })?;
+    mac.update(input);
+    let result = mac.finalize().into_bytes();
+    let mut integrity = [0u8; 20];
+    integrity.copy_from_slice(&result[..20]);
+    Ok(integrity)
+}
+
 /// Decision emitted by [`StunServer::handle_binding_request`] for an
 /// incoming STUN Binding Request.
 #[derive(Debug)]
@@ -844,11 +924,8 @@ impl StunServer {
         }
 
         // Build the Binding Success Response mirroring the transaction ID.
-        let mut response = StunMessage {
-            message_type: MessageType::BindingResponse,
-            transaction_id: request.transaction_id,
-            attributes: Vec::new(),
-        };
+        let mut response =
+            StunMessage::new_with_transaction(MessageType::BindingResponse, request.transaction_id);
         response
             .attributes
             .push(StunAttribute::XorMappedAddress(source));
@@ -1281,6 +1358,62 @@ mod tests {
             server.handle_binding_request(&m.serialize(), src),
             StunServerResponse::Drop(_)
         ));
+    }
+
+    /// RFC 5769 §2.1 — sample request with MESSAGE-INTEGRITY and
+    /// FINGERPRINT (software "STUN test client", username "evtj:h6vY",
+    /// password "VOkJxbRl1RmTxUk/WvJxBt"). USERNAME is space-padded on the
+    /// wire, which is why verification must run over the received bytes.
+    const RFC5769_REQUEST: [u8; 108] = [
+        0x00, 0x01, 0x00, 0x58, 0x21, 0x12, 0xa4, 0x42, 0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34, 0xd6,
+        0x86, 0xfa, 0x87, 0xdf, 0xae, 0x80, 0x22, 0x00, 0x10, 0x53, 0x54, 0x55, 0x4e, 0x20, 0x74,
+        0x65, 0x73, 0x74, 0x20, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x00, 0x24, 0x00, 0x04, 0x6e,
+        0x00, 0x01, 0xff, 0x80, 0x29, 0x00, 0x08, 0x93, 0x2f, 0xf9, 0xb1, 0x51, 0x26, 0x3b, 0x36,
+        0x00, 0x06, 0x00, 0x09, 0x65, 0x76, 0x74, 0x6a, 0x3a, 0x68, 0x36, 0x76, 0x59, 0x20, 0x20,
+        0x20, 0x00, 0x08, 0x00, 0x14, 0x9a, 0xea, 0xa7, 0x0c, 0xbf, 0xd8, 0xcb, 0x56, 0x78, 0x1e,
+        0xf2, 0xb5, 0xb2, 0xd3, 0xf2, 0x49, 0xc1, 0xb5, 0x71, 0xa2, 0x80, 0x28, 0x00, 0x04, 0xe5,
+        0x7a, 0x3b, 0xcf,
+    ];
+
+    #[test]
+    fn test_rfc5769_request_integrity_and_fingerprint_verify() {
+        let m = StunMessage::parse(&RFC5769_REQUEST).unwrap();
+        assert_eq!(m.get_username(), Some("evtj:h6vY"));
+        assert_eq!(m.get_priority(), Some(0x6e0001ff));
+        assert!(m
+            .verify_message_integrity(b"VOkJxbRl1RmTxUk/WvJxBt")
+            .unwrap());
+        assert!(m.verify_fingerprint().unwrap());
+        assert!(m.verify_message_integrity(b"wrong password").is_err());
+    }
+
+    #[test]
+    fn test_rfc5769_request_recomputed_locally() {
+        // Rebuild the same attributes (zero padding on USERNAME is still a
+        // valid encoding) and check our own MI/FINGERPRINT verify after a
+        // parse round trip — the wire form differs only in padding bytes.
+        let mut m = StunMessage::new_binding_request();
+        m.transaction_id = [
+            0xb7, 0xe7, 0xa7, 0x01, 0xbc, 0x34, 0xd6, 0x86, 0xfa, 0x87, 0xdf, 0xae,
+        ];
+        m.attributes.push(StunAttribute::Unknown {
+            attr_type: 0x8022,
+            value: b"STUN test client".to_vec(),
+        });
+        m.add_priority(0x6e0001ff);
+        m.add_ice_controlled(0x932ff9b151263b36);
+        m.add_username("evtj:h6vY".into());
+        m.add_message_integrity(b"VOkJxbRl1RmTxUk/WvJxBt").unwrap();
+        m.add_fingerprint();
+        let bytes = m.serialize();
+        assert_eq!(bytes.len(), RFC5769_REQUEST.len());
+        // Header and everything up to the USERNAME padding is byte-identical.
+        assert_eq!(&bytes[..73], &RFC5769_REQUEST[..73]);
+        let back = StunMessage::parse(&bytes).unwrap();
+        assert!(back
+            .verify_message_integrity(b"VOkJxbRl1RmTxUk/WvJxBt")
+            .unwrap());
+        assert!(back.verify_fingerprint().unwrap());
     }
 
     #[test]

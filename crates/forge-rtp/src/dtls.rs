@@ -256,9 +256,19 @@ impl DtlsContext {
             .check_private_key()
             .map_err(|e| ForgeError::Internal(format!("Private key check failed: {}", e)))?;
 
-        // Set cipher suites (prefer ECDHE for forward secrecy)
+        // Cipher suites: ECDHE for forward secrecy, for *both* certificate
+        // types. Browsers and webrtc-rs present ECDSA (P-256) certificates;
+        // offering only ECDHE-RSA made a peer acting as DTLS server pick an
+        // RSA suite it could not honour with its ECDSA certificate, and the
+        // handshake died in tls_post_process_server_certificate with "wrong
+        // certificate type".
         builder
-            .set_cipher_list("ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384")
+            .set_cipher_list(
+                "ECDHE-ECDSA-AES128-GCM-SHA256:\
+                 ECDHE-RSA-AES128-GCM-SHA256:\
+                 ECDHE-ECDSA-AES256-GCM-SHA384:\
+                 ECDHE-RSA-AES256-GCM-SHA384",
+            )
             .map_err(|e| ForgeError::Internal(format!("Failed to set cipher list: {}", e)))?;
 
         // Configure SRTP protection profiles (for key export). Offer the

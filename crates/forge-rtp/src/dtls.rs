@@ -7,9 +7,10 @@
 use openssl::{
     asn1::Asn1Time,
     bn::{BigNum, MsbOption},
+    ec::{EcGroup, EcKey},
     hash::MessageDigest,
+    nid::Nid,
     pkey::PKey,
-    rsa::Rsa,
     ssl::{Ssl, SslContext, SslContextBuilder, SslMethod, SslVerifyMode, SslVersion},
     x509::{X509Builder, X509NameBuilder},
 };
@@ -42,11 +43,15 @@ impl DtlsCertificate {
     pub fn generate() -> Result<Self> {
         info!("Generating DTLS certificate");
 
-        // Generate RSA key pair (2048 bits)
-        let rsa = Rsa::generate(2048)
-            .map_err(|e| ForgeError::Internal(format!("Failed to generate RSA key: {}", e)))?;
-
-        let pkey = PKey::from_rsa(rsa)
+        // ECDSA P-256 key pair — what browsers and webrtc-rs present, and
+        // ~100× faster to generate than RSA-2048, which matters for an
+        // endpoint that creates a certificate per peer connection. The
+        // cipher list in `DtlsContext::new` offers ECDHE-ECDSA first.
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)
+            .map_err(|e| ForgeError::Internal(format!("Failed to load P-256: {}", e)))?;
+        let ec = EcKey::generate(&group)
+            .map_err(|e| ForgeError::Internal(format!("Failed to generate EC key: {}", e)))?;
+        let pkey = PKey::from_ec_key(ec)
             .map_err(|e| ForgeError::Internal(format!("Failed to create PKey: {}", e)))?;
 
         // Create X.509 certificate builder

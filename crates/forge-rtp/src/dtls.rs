@@ -622,6 +622,50 @@ impl DtlsConnection {
         Ok((client_keys, server_keys))
     }
 
+    /// Drive DTLS retransmission (RFC 6347 §4.2.4) when no packet has
+    /// arrived for a while. With memory BIOs OpenSSL cannot run its own
+    /// timer, so the owner of the socket calls this periodically during
+    /// the handshake; any flight OpenSSL decides to resend comes back as
+    /// bytes to put on the wire. Returns an empty vector when nothing is
+    /// due.
+    #[cfg(feature = "dtls")]
+    pub fn handle_timeout(&mut self) -> Result<Vec<u8>> {
+        use openssl_sys::{BIO_ctrl, BIO_read, SSL_ctrl, SSL_get_wbio};
+        // DTLS_CTRL_HANDLE_TIMEOUT (ssl.h); stable across OpenSSL 1.1/3.x.
+        const DTLS_CTRL_HANDLE_TIMEOUT: std::os::raw::c_int = 74;
+        const BIO_CTRL_PENDING: std::os::raw::c_int = 10;
+
+        if self.state != DtlsState::Handshaking {
+            return Ok(Vec::new());
+        }
+        unsafe {
+            let ssl_ptr = self.ssl.as_ptr();
+            let ret = SSL_ctrl(ssl_ptr, DTLS_CTRL_HANDLE_TIMEOUT, 0, std::ptr::null_mut());
+            if ret < 0 {
+                self.state = DtlsState::Failed;
+                return Err(ForgeError::Internal(
+                    "DTLS retransmission timer failed".to_string(),
+                ));
+            }
+            let mut outgoing = Vec::new();
+            let wbio = SSL_get_wbio(ssl_ptr);
+            if !wbio.is_null() {
+                let pending = BIO_ctrl(wbio, BIO_CTRL_PENDING, 0, std::ptr::null_mut()) as usize;
+                if pending > 0 {
+                    outgoing.resize(pending, 0);
+                    let read = BIO_read(wbio, outgoing.as_mut_ptr() as *mut _, pending as i32);
+                    if read > 0 {
+                        outgoing.truncate(read as usize);
+                        debug!("DTLS retransmitting {} bytes", outgoing.len());
+                    } else {
+                        outgoing.clear();
+                    }
+                }
+            }
+            Ok(outgoing)
+        }
+    }
+
     /// Mark handshake as complete (for testing)
     #[cfg(test)]
     pub fn mark_connected(&mut self) {

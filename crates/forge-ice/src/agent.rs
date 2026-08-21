@@ -390,6 +390,61 @@ impl IceAgent {
             .any(|pair| pair.state == PairState::Succeeded)
     }
 
+    /// Form pairs only for combinations that do not exist yet, keeping the
+    /// state of pairs already formed (trickle ICE, RFC 8838 §3: remote
+    /// candidates arrive one at a time after checks have started).
+    pub fn form_candidate_pairs_incremental(&mut self) {
+        let mut added = 0usize;
+        for local in &self.local_candidates {
+            for remote in &self.remote_candidates {
+                if local.component != remote.component || local.protocol != remote.protocol {
+                    continue;
+                }
+                let exists = self.candidate_pairs.iter().any(|p| {
+                    p.local.ip == local.ip
+                        && p.local.port == local.port
+                        && p.remote.ip == remote.ip
+                        && p.remote.port == remote.port
+                });
+                if exists {
+                    continue;
+                }
+                self.candidate_pairs
+                    .push(CandidatePair::new(local.clone(), remote.clone()));
+                added += 1;
+            }
+        }
+        if added > 0 {
+            // Stable sort keeps the relative order of equal-priority pairs.
+            self.candidate_pairs
+                .sort_by_key(|pair| std::cmp::Reverse(pair.priority));
+            debug!("Formed {} new candidate pairs (incremental)", added);
+        }
+    }
+
+    /// Mutable access to the pair list for an external check scheduler.
+    pub fn candidate_pairs_mut(&mut self) -> &mut Vec<CandidatePair> {
+        &mut self.candidate_pairs
+    }
+
+    /// Whether this agent is in the controlling role.
+    pub fn is_controlling(&self) -> bool {
+        self.controlling
+    }
+
+    /// The ICE tie-breaker value (RFC 8445 §7.1.2.2 role-conflict attributes).
+    pub fn tie_breaker(&self) -> u64 {
+        self.tie_breaker
+    }
+
+    /// Remote ICE credentials, once set.
+    pub fn get_remote_credentials(&self) -> Option<(&str, &str)> {
+        match (&self.remote_ufrag, &self.remote_pwd) {
+            (Some(u), Some(p)) => Some((u.as_str(), p.as_str())),
+            _ => None,
+        }
+    }
+
     /// Get component ID
     pub fn component(&self) -> u16 {
         self.component

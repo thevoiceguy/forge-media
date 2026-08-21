@@ -1842,17 +1842,21 @@ dependencies = [
 
 [[package]]
 name = "forge-webrtc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "bytes",
  "dashmap",
  "forge-core",
  "forge-ice",
  "forge-rtp",
  "forge-sdp",
+ "parking_lot",
  "serde",
+ "smol_str",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

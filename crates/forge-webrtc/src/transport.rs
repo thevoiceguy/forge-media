@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use forge_ice::candidate::{CandidatePair, CandidateType, PairState};
 use forge_ice::stun::{MessageType, StunMessage, StunServer, StunServerResponse};
-use forge_ice::{IceAgent, IceCandidate, Protocol};
+use forge_ice::{IceAgent, IceCandidate, Protocol, TurnClient, TurnInbound, TurnServer};
 use forge_rtp::dtls::{DtlsCertificate, DtlsConnection, DtlsContext, DtlsRole, DtlsState};
 use forge_rtp::{RtpPacket, SrtpContext};
 use parking_lot::Mutex;
@@ -75,6 +75,9 @@ pub enum IceRole {
 pub struct TransportConfig {
     /// STUN servers for server-reflexive candidates (`stun:host:port`).
     pub stun_servers: Vec<String>,
+    /// TURN servers for relay candidates — the fallback when STUN cannot punch
+    /// a path (symmetric NAT on both ends). Empty = no relay candidates.
+    pub turn_servers: Vec<TurnServer>,
     /// Tick period; at most one new connectivity check is sent per tick
     /// (RFC 8445 §6.1.4.2 Ta pacing).
     pub check_interval: Duration,
@@ -96,6 +99,7 @@ impl Default for TransportConfig {
     fn default() -> Self {
         Self {
             stun_servers: vec![],
+            turn_servers: vec![],
             check_interval: Duration::from_millis(20),
             rto: Duration::from_millis(500),
             max_attempts: 7,
@@ -108,6 +112,23 @@ impl Default for TransportConfig {
 }
 
 type Outgoing = Vec<(Vec<u8>, SocketAddr)>;
+
+/// A command to a TURN actor task (the task owns the `TurnClient` and is the
+/// sole reader of its socket, so control ops and relayed media never race two
+/// reads).
+enum TurnCmd {
+    /// Relay `bytes` to `peer` (a check, DTLS flight, keepalive or media).
+    Send(SocketAddr, Vec<u8>),
+    /// Install a permission so the relay will forward this peer both ways.
+    Permission(SocketAddr),
+}
+
+/// Outer-side handle to one TURN allocation/actor.
+struct TurnHandle {
+    tx: mpsc::Sender<TurnCmd>,
+    /// The relayed transport address — this allocation's `relay` candidate.
+    relayed_addr: SocketAddr,
+}
 
 /// Per-remote-address checklist entry.
 struct RemoteEntry {
@@ -786,6 +807,13 @@ pub struct Transport {
     inner: Arc<Mutex<Inner>>,
     socket: Arc<UdpSocket>,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// One handle per TURN allocation (empty when no TURN servers configured).
+    turn: Arc<Vec<TurnHandle>>,
+    /// Remote address → index of the TURN allocation that reaches it. A remote
+    /// relay candidate is routed through our relay (relay↔relay, the path that
+    /// survives symmetric NAT); a peer we first heard from over a relay is
+    /// pinned to that relay so replies take the same path.
+    routes: Arc<Mutex<HashMap<SocketAddr, usize>>>,
 }
 
 impl Transport {
@@ -798,6 +826,9 @@ impl Transport {
         state: Arc<Mutex<ConnectionState>>,
     ) -> Result<(Transport, mpsc::Receiver<TransportEvent>)> {
         let mut agent = IceAgent::new(1, 0, vec![]);
+        if !cfg.turn_servers.is_empty() {
+            agent.set_turn_servers(cfg.turn_servers.clone());
+        }
         agent
             .gather_candidates()
             .await
@@ -805,6 +836,9 @@ impl Transport {
         let socket = agent
             .get_socket()
             .ok_or_else(|| WebRtcError::IceError("ICE agent has no socket".into()))?;
+        // Take ownership of the TURN allocations gathered above; each becomes an
+        // actor task that owns its socket.
+        let turn_clients = agent.take_turn_clients();
         let local_addr = socket
             .local_addr()
             .map_err(|e| WebRtcError::IceError(e.to_string()))?;
@@ -890,12 +924,40 @@ impl Transport {
         }
 
         let inner = Arc::new(Mutex::new(inner));
+
+        // One command channel + handle per TURN allocation.
+        let mut turn_handles = Vec::with_capacity(turn_clients.len());
+        let mut turn_rx = Vec::with_capacity(turn_clients.len());
+        for client in &turn_clients {
+            let (tx, rx) = mpsc::channel::<TurnCmd>(256);
+            turn_handles.push(TurnHandle {
+                tx,
+                relayed_addr: client.relayed_addr(),
+            });
+            turn_rx.push(rx);
+        }
+
         let transport = Transport {
             inner,
             socket,
             tasks: Arc::new(Mutex::new(Vec::new())),
+            turn: Arc::new(turn_handles),
+            routes: Arc::new(Mutex::new(HashMap::new())),
         };
         transport.flush(initial_out).await;
+
+        // One actor task per TURN allocation: sole reader of its socket,
+        // classifying relayed media vs control responses and serving Send /
+        // Permission commands.
+        for (index, (client, rx)) in turn_clients.into_iter().zip(turn_rx).enumerate() {
+            debug!(
+                "turn actor {index} backs relay candidate {}",
+                transport.turn[index].relayed_addr
+            );
+            let t = transport.clone();
+            let handle = tokio::spawn(turn_actor(client, rx, t, index));
+            transport.tasks.lock().push(handle);
+        }
 
         // Receive task.
         let t = transport.clone();
@@ -942,8 +1004,25 @@ impl Transport {
 
     async fn flush(&self, out: Outgoing) {
         for (bytes, to) in out {
-            if let Err(e) = self.socket.send_to(&bytes, to).await {
-                trace!("send to {to} failed: {e}");
+            // Copy the route out before any await — never hold the sync lock
+            // across `.send`.
+            let route = self.routes.lock().get(&to).copied();
+            match route {
+                Some(i) => {
+                    if self.turn[i]
+                        .tx
+                        .send(TurnCmd::Send(to, bytes))
+                        .await
+                        .is_err()
+                    {
+                        trace!("turn actor {i} gone; dropped packet to {to}");
+                    }
+                }
+                None => {
+                    if let Err(e) = self.socket.send_to(&bytes, to).await {
+                        trace!("send to {to} failed: {e}");
+                    }
+                }
             }
         }
     }
@@ -1022,12 +1101,33 @@ impl Transport {
         for c in candidates {
             g.add_remote_candidate(c.clone());
         }
+        drop(g);
+        for c in candidates {
+            self.route_relay_remote(c);
+        }
         Ok(())
     }
 
     /// Add a trickled remote candidate.
     pub fn add_remote_candidate(&self, cand: IceCandidate) {
-        self.inner.lock().add_remote_candidate(cand);
+        self.inner.lock().add_remote_candidate(cand.clone());
+        self.route_relay_remote(&cand);
+    }
+
+    /// Route a remote *relay* candidate through our own relay (relay↔relay is
+    /// the path that survives symmetric NAT) and install the permission the
+    /// relay needs to forward it. No-op without a TURN allocation.
+    fn route_relay_remote(&self, cand: &IceCandidate) {
+        if self.turn.is_empty()
+            || cand.typ != CandidateType::Relay
+            || cand.protocol != Protocol::Udp
+            || cand.component != 1
+        {
+            return;
+        }
+        let addr = SocketAddr::new(cand.ip, cand.port);
+        self.routes.lock().insert(addr, 0);
+        let _ = self.turn[0].tx.try_send(TurnCmd::Permission(addr));
     }
 
     /// Nominated remote address, once ICE has completed.
@@ -1047,10 +1147,20 @@ impl Transport {
             self.inner
                 .lock()
                 .protect_rtp(payload_type, marker, timestamp, payload)?;
-        self.socket
-            .send_to(&bytes, to)
-            .await
-            .map_err(|e| WebRtcError::Internal(format!("send: {e}")))?;
+        let route = self.routes.lock().get(&to).copied();
+        match route {
+            Some(i) => self.turn[i]
+                .tx
+                .send(TurnCmd::Send(to, bytes))
+                .await
+                .map_err(|_| WebRtcError::Internal("turn actor gone".into()))?,
+            None => {
+                self.socket
+                    .send_to(&bytes, to)
+                    .await
+                    .map_err(|e| WebRtcError::Internal(format!("send: {e}")))?;
+            }
+        }
         Ok(())
     }
 
@@ -1074,6 +1184,110 @@ impl Transport {
         }
         for t in self.tasks.lock().drain(..) {
             t.abort();
+        }
+    }
+}
+
+/// One TURN allocation's actor: the sole reader of its socket. Classifies each
+/// inbound datagram as relayed media (fed into the shared `Inner`) or a control
+/// response, and serves `Send` / `Permission` commands from the transport.
+/// Keeping it single-tasked is what lets control ops and media share one socket
+/// without two readers racing for the same datagram.
+async fn turn_actor(
+    mut client: TurnClient,
+    mut cmds: mpsc::Receiver<TurnCmd>,
+    transport: Transport,
+    index: usize,
+) {
+    let server = client.server_addr();
+    // Cloned socket handle: awaited in `select!` without borrowing `client`, so
+    // the branch handlers stay free to call `&mut` control ops.
+    let sock = client.socket_arc();
+    let mut buf = vec![0u8; 2048];
+    // Refresh the allocation (lifetime 600 s) and renew permissions (300 s)
+    // well inside their windows.
+    let mut maint = tokio::time::interval(Duration::from_secs(200));
+    maint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    maint.tick().await; // consume the immediate first tick
+
+    loop {
+        tokio::select! {
+            r = sock.recv_from(&mut buf) => {
+                let (len, from) = match r {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                match client.handle_inbound(&buf[..len], from) {
+                    TurnInbound::Relayed(peer, data) => {
+                        // Replies to this peer take the same relay path.
+                        transport.routes.lock().insert(peer, index);
+                        let out = transport
+                            .inner
+                            .lock()
+                            .handle_packet(&data, peer, Instant::now());
+                        actor_flush(&client, &transport, index, out).await;
+                    }
+                    TurnInbound::StaleNonce => {
+                        // Nonce refreshed in place; periodic maintenance below
+                        // re-sends refresh/permissions with the new nonce.
+                    }
+                    TurnInbound::ControlError(code) => {
+                        trace!("turn {index}: control error {code}");
+                    }
+                    _ => {}
+                }
+            }
+            cmd = cmds.recv() => match cmd {
+                Some(TurnCmd::Send(peer, bytes)) => {
+                    let _ = client.send_to(peer, &bytes).await;
+                }
+                Some(TurnCmd::Permission(peer)) => {
+                    if let Ok(req) = client.permission_request(peer) {
+                        let _ = sock.send_to(&req, server).await;
+                    }
+                }
+                None => break, // transport dropped
+            },
+            _ = maint.tick() => {
+                if let Ok(req) = client.refresh_request(600) {
+                    let _ = sock.send_to(&req, server).await;
+                }
+                let peers: Vec<SocketAddr> = transport
+                    .routes
+                    .lock()
+                    .iter()
+                    .filter(|(_, i)| **i == index)
+                    .map(|(a, _)| *a)
+                    .collect();
+                for p in peers {
+                    if let Ok(req) = client.permission_request(p) {
+                        let _ = sock.send_to(&req, server).await;
+                    }
+                }
+            }
+        }
+        if transport.inner.lock().closed {
+            break;
+        }
+    }
+}
+
+/// Flush `Outgoing` produced while the actor holds `client`: datagrams bound
+/// for this allocation go straight through `client`; anything else is routed
+/// back through the transport (its socket or another actor).
+async fn actor_flush(client: &TurnClient, transport: &Transport, index: usize, out: Outgoing) {
+    for (bytes, to) in out {
+        let route = transport.routes.lock().get(&to).copied();
+        match route {
+            Some(i) if i == index => {
+                let _ = client.send_to(to, &bytes).await;
+            }
+            Some(i) => {
+                let _ = transport.turn[i].tx.try_send(TurnCmd::Send(to, bytes));
+            }
+            None => {
+                let _ = transport.socket.send_to(&bytes, to).await;
+            }
         }
     }
 }

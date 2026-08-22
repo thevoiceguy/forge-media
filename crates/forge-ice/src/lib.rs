@@ -97,4 +97,4 @@ pub mod turn;
 
 pub use agent::IceAgent;
 pub use candidate::{CandidateType, IceCandidate, Protocol};
-pub use turn::{TurnClient, TurnServer};
+pub use turn::{TurnClient, TurnInbound, TurnServer};

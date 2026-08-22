@@ -140,6 +140,37 @@ impl IceCandidate {
         }
     }
 
+    /// Create a new relay candidate from a TURN allocation.
+    ///
+    /// `ip`/`port` are the relayed transport address (XOR-RELAYED-ADDRESS);
+    /// `rel_ip`/`rel_port` are the server-reflexive address the TURN server
+    /// observed (XOR-MAPPED-ADDRESS), reported as `raddr`/`rport` per RFC 8445.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_relay(
+        foundation: String,
+        component: u16,
+        protocol: Protocol,
+        ip: IpAddr,
+        port: u16,
+        rel_ip: IpAddr,
+        rel_port: u16,
+        local_pref: u16,
+    ) -> Self {
+        let priority = Self::compute_priority(CandidateType::Relay, local_pref, component);
+
+        Self {
+            foundation,
+            component,
+            protocol,
+            priority,
+            ip,
+            port,
+            typ: CandidateType::Relay,
+            rel_addr: Some(rel_ip),
+            rel_port: Some(rel_port),
+        }
+    }
+
     /// Compute candidate priority per RFC 8445 Section 5.1.2
     ///
     /// priority = (2^24) * (type preference) +

@@ -18,6 +18,12 @@ use tracing::{debug, warn};
 const MAGIC_COOKIE: u32 = 0x2112A442;
 
 /// STUN message types
+///
+/// The Binding method (RFC 8489) plus the TURN methods (RFC 8656 §17): Allocate,
+/// Refresh, CreatePermission and ChannelBind are request/response transactions;
+/// Send and Data are indications (no response). The 16-bit encoding interleaves
+/// the 12-bit method with the 2-bit class (bits C1=0x0100, C0=0x0010): request
+/// `0b00`, indication `0b01`, success `0b10`, error `0b11`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum MessageType {
@@ -27,6 +33,34 @@ pub enum MessageType {
     BindingResponse = 0x0101,
     /// Binding Error Response (0x0111)
     BindingErrorResponse = 0x0111,
+    /// TURN Allocate Request (0x0003) — RFC 8656 §6
+    AllocateRequest = 0x0003,
+    /// TURN Allocate Success Response (0x0103)
+    AllocateResponse = 0x0103,
+    /// TURN Allocate Error Response (0x0113) — carries 401 with REALM/NONCE
+    AllocateErrorResponse = 0x0113,
+    /// TURN Refresh Request (0x0004) — RFC 8656 §7
+    RefreshRequest = 0x0004,
+    /// TURN Refresh Success Response (0x0104)
+    RefreshResponse = 0x0104,
+    /// TURN Refresh Error Response (0x0114)
+    RefreshErrorResponse = 0x0114,
+    /// TURN CreatePermission Request (0x0008) — RFC 8656 §9
+    CreatePermissionRequest = 0x0008,
+    /// TURN CreatePermission Success Response (0x0108)
+    CreatePermissionResponse = 0x0108,
+    /// TURN CreatePermission Error Response (0x0118)
+    CreatePermissionErrorResponse = 0x0118,
+    /// TURN ChannelBind Request (0x0009) — RFC 8656 §11
+    ChannelBindRequest = 0x0009,
+    /// TURN ChannelBind Success Response (0x0109)
+    ChannelBindResponse = 0x0109,
+    /// TURN ChannelBind Error Response (0x0119)
+    ChannelBindErrorResponse = 0x0119,
+    /// TURN Send Indication (0x0016) — RFC 8656 §10, no response
+    SendIndication = 0x0016,
+    /// TURN Data Indication (0x0017) — RFC 8656 §10, server→client
+    DataIndication = 0x0017,
 }
 
 impl MessageType {
@@ -35,8 +69,27 @@ impl MessageType {
             0x0001 => Some(MessageType::BindingRequest),
             0x0101 => Some(MessageType::BindingResponse),
             0x0111 => Some(MessageType::BindingErrorResponse),
+            0x0003 => Some(MessageType::AllocateRequest),
+            0x0103 => Some(MessageType::AllocateResponse),
+            0x0113 => Some(MessageType::AllocateErrorResponse),
+            0x0004 => Some(MessageType::RefreshRequest),
+            0x0104 => Some(MessageType::RefreshResponse),
+            0x0114 => Some(MessageType::RefreshErrorResponse),
+            0x0008 => Some(MessageType::CreatePermissionRequest),
+            0x0108 => Some(MessageType::CreatePermissionResponse),
+            0x0118 => Some(MessageType::CreatePermissionErrorResponse),
+            0x0009 => Some(MessageType::ChannelBindRequest),
+            0x0109 => Some(MessageType::ChannelBindResponse),
+            0x0119 => Some(MessageType::ChannelBindErrorResponse),
+            0x0016 => Some(MessageType::SendIndication),
+            0x0017 => Some(MessageType::DataIndication),
             _ => None,
         }
+    }
+
+    /// Whether this is an error-class response (class bits `0b11`).
+    pub fn is_error(self) -> bool {
+        (self as u16) & 0x0110 == 0x0110
     }
 }
 
@@ -62,6 +115,24 @@ pub enum AttributeType {
     Fingerprint = 0x8028,
     /// USE-CANDIDATE (0x0025) - ICE nomination (RFC 8445 §7.1.2.1), zero-length
     UseCandidate = 0x0025,
+    /// ERROR-CODE (0x0009) - RFC 8489 §14.8 (used by TURN 401/438/…)
+    ErrorCode = 0x0009,
+    /// REALM (0x0014) - RFC 8489 §14.9 (long-term credential mechanism)
+    Realm = 0x0014,
+    /// NONCE (0x0015) - RFC 8489 §14.10
+    Nonce = 0x0015,
+    /// CHANNEL-NUMBER (0x000C) - RFC 8656 §14.1
+    ChannelNumber = 0x000C,
+    /// LIFETIME (0x000D) - RFC 8656 §14.2
+    Lifetime = 0x000D,
+    /// XOR-PEER-ADDRESS (0x0012) - RFC 8656 §14.3
+    XorPeerAddress = 0x0012,
+    /// DATA (0x0013) - RFC 8656 §14.4
+    Data = 0x0013,
+    /// XOR-RELAYED-ADDRESS (0x0016) - RFC 8656 §14.5
+    XorRelayedAddress = 0x0016,
+    /// REQUESTED-TRANSPORT (0x0019) - RFC 8656 §14.7
+    RequestedTransport = 0x0019,
 }
 
 impl AttributeType {
@@ -76,6 +147,15 @@ impl AttributeType {
             0x802a => Some(AttributeType::IceControlling),
             0x8028 => Some(AttributeType::Fingerprint),
             0x0025 => Some(AttributeType::UseCandidate),
+            0x0009 => Some(AttributeType::ErrorCode),
+            0x0014 => Some(AttributeType::Realm),
+            0x0015 => Some(AttributeType::Nonce),
+            0x000C => Some(AttributeType::ChannelNumber),
+            0x000D => Some(AttributeType::Lifetime),
+            0x0012 => Some(AttributeType::XorPeerAddress),
+            0x0013 => Some(AttributeType::Data),
+            0x0016 => Some(AttributeType::XorRelayedAddress),
+            0x0019 => Some(AttributeType::RequestedTransport),
             _ => None,
         }
     }
@@ -119,6 +199,24 @@ pub enum StunAttribute {
     MessageIntegrity([u8; 20]),
     /// USE-CANDIDATE attribute (ICE nomination; carries no value)
     UseCandidate,
+    /// ERROR-CODE attribute: (code, reason). Code = class*100 + number.
+    ErrorCode(u16, String),
+    /// REALM attribute (long-term credential mechanism)
+    Realm(String),
+    /// NONCE attribute (opaque server-issued bytes)
+    Nonce(Vec<u8>),
+    /// CHANNEL-NUMBER attribute (TURN ChannelBind)
+    ChannelNumber(u16),
+    /// LIFETIME attribute (TURN allocation/permission lifetime, seconds)
+    Lifetime(u32),
+    /// XOR-PEER-ADDRESS attribute (TURN peer, XOR-encoded like XOR-MAPPED-ADDRESS)
+    XorPeerAddress(SocketAddr),
+    /// DATA attribute (TURN Send/Data indication payload)
+    Data(Vec<u8>),
+    /// XOR-RELAYED-ADDRESS attribute (the allocation's relayed transport address)
+    XorRelayedAddress(SocketAddr),
+    /// REQUESTED-TRANSPORT attribute (protocol number; 17 = UDP)
+    RequestedTransport(u8),
     /// Unknown attribute
     Unknown { attr_type: u16, value: Vec<u8> },
 }
@@ -140,6 +238,22 @@ impl StunMessage {
 
         Self {
             message_type: MessageType::BindingRequest,
+            transaction_id,
+            attributes: Vec::new(),
+            raw: Vec::new(),
+        }
+    }
+
+    /// A new request-class message of `message_type` with a fresh CSPRNG
+    /// transaction ID (RFC 8489 §6). Used for TURN Allocate/Refresh/
+    /// CreatePermission/ChannelBind and Send indications.
+    pub fn new_request(message_type: MessageType) -> Self {
+        let mut transaction_id = [0u8; 12];
+        SysRng
+            .try_fill_bytes(&mut transaction_id)
+            .expect("OS RNG must not fail");
+        Self {
+            message_type,
             transaction_id,
             attributes: Vec::new(),
             raw: Vec::new(),
@@ -531,6 +645,38 @@ impl StunMessage {
                         }
                     }
                 }
+                Some(AttributeType::ErrorCode) if attr_len >= 4 => {
+                    let code = (attr_value[2] as u16) * 100 + attr_value[3] as u16;
+                    let reason = String::from_utf8_lossy(&attr_value[4..]).into_owned();
+                    StunAttribute::ErrorCode(code, reason)
+                }
+                Some(AttributeType::Realm) => {
+                    StunAttribute::Realm(String::from_utf8_lossy(attr_value).into_owned())
+                }
+                Some(AttributeType::Nonce) => StunAttribute::Nonce(attr_value.to_vec()),
+                Some(AttributeType::ChannelNumber) if attr_len >= 2 => {
+                    StunAttribute::ChannelNumber(u16::from_be_bytes([attr_value[0], attr_value[1]]))
+                }
+                Some(AttributeType::Lifetime) if attr_len >= 4 => {
+                    StunAttribute::Lifetime(u32::from_be_bytes([
+                        attr_value[0],
+                        attr_value[1],
+                        attr_value[2],
+                        attr_value[3],
+                    ]))
+                }
+                Some(AttributeType::XorPeerAddress) => {
+                    let addr = parse_xor_mapped_address(attr_value, &transaction_id)?;
+                    StunAttribute::XorPeerAddress(addr)
+                }
+                Some(AttributeType::Data) => StunAttribute::Data(attr_value.to_vec()),
+                Some(AttributeType::XorRelayedAddress) => {
+                    let addr = parse_xor_mapped_address(attr_value, &transaction_id)?;
+                    StunAttribute::XorRelayedAddress(addr)
+                }
+                Some(AttributeType::RequestedTransport) if attr_len >= 1 => {
+                    StunAttribute::RequestedTransport(attr_value[0])
+                }
                 _ => StunAttribute::Unknown {
                     attr_type,
                     value: attr_value.to_vec(),
@@ -562,6 +708,62 @@ impl StunMessage {
         }
         None
     }
+
+    /// XOR-RELAYED-ADDRESS (the allocation's relayed transport address).
+    pub fn get_xor_relayed_address(&self) -> Option<SocketAddr> {
+        self.attributes.iter().find_map(|a| match a {
+            StunAttribute::XorRelayedAddress(addr) => Some(*addr),
+            _ => None,
+        })
+    }
+
+    /// XOR-PEER-ADDRESS (peer in a Data/Send indication).
+    pub fn get_xor_peer_address(&self) -> Option<SocketAddr> {
+        self.attributes.iter().find_map(|a| match a {
+            StunAttribute::XorPeerAddress(addr) => Some(*addr),
+            _ => None,
+        })
+    }
+
+    /// LIFETIME in seconds.
+    pub fn get_lifetime(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|a| match a {
+            StunAttribute::Lifetime(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    /// REALM string (long-term credential challenge).
+    pub fn get_realm(&self) -> Option<&str> {
+        self.attributes.iter().find_map(|a| match a {
+            StunAttribute::Realm(v) => Some(v.as_str()),
+            _ => None,
+        })
+    }
+
+    /// NONCE bytes (long-term credential challenge).
+    pub fn get_nonce(&self) -> Option<&[u8]> {
+        self.attributes.iter().find_map(|a| match a {
+            StunAttribute::Nonce(v) => Some(v.as_slice()),
+            _ => None,
+        })
+    }
+
+    /// ERROR-CODE as `(code, reason)`, e.g. `(401, "Unauthorized")`.
+    pub fn get_error_code(&self) -> Option<(u16, &str)> {
+        self.attributes.iter().find_map(|a| match a {
+            StunAttribute::ErrorCode(code, reason) => Some((*code, reason.as_str())),
+            _ => None,
+        })
+    }
+
+    /// DATA payload (from a Data indication).
+    pub fn get_data(&self) -> Option<&[u8]> {
+        self.attributes.iter().find_map(|a| match a {
+            StunAttribute::Data(v) => Some(v.as_slice()),
+            _ => None,
+        })
+    }
 }
 
 impl StunAttribute {
@@ -579,6 +781,19 @@ impl StunAttribute {
             StunAttribute::MessageIntegrity(_) => 20,
             StunAttribute::Fingerprint(_) => 4,
             StunAttribute::UseCandidate => 0,
+            StunAttribute::ErrorCode(_, reason) => 4 + reason.len(),
+            StunAttribute::Realm(value) => value.len(),
+            StunAttribute::Nonce(value) => value.len(),
+            StunAttribute::ChannelNumber(_) => 4,
+            StunAttribute::Lifetime(_) => 4,
+            StunAttribute::XorPeerAddress(addr) | StunAttribute::XorRelayedAddress(addr) => {
+                match addr.ip() {
+                    IpAddr::V4(_) => 8,
+                    IpAddr::V6(_) => 20,
+                }
+            }
+            StunAttribute::Data(value) => value.len(),
+            StunAttribute::RequestedTransport(_) => 4,
             StunAttribute::Unknown { value, .. } => value.len(),
         }
     }
@@ -639,6 +854,69 @@ impl StunAttribute {
             StunAttribute::UseCandidate => {
                 buf.put_u16(AttributeType::UseCandidate as u16);
                 buf.put_u16(0);
+            }
+            StunAttribute::ErrorCode(code, reason) => {
+                let reason_bytes = reason.as_bytes();
+                buf.put_u16(AttributeType::ErrorCode as u16);
+                buf.put_u16((4 + reason_bytes.len()) as u16);
+                buf.put_u16(0); // reserved
+                buf.put_u8((code / 100) as u8); // class (RFC 8489 §14.8)
+                buf.put_u8((code % 100) as u8); // number
+                buf.put_slice(reason_bytes);
+                for _ in 0..((4 - (reason_bytes.len() % 4)) % 4) {
+                    buf.put_u8(0);
+                }
+            }
+            StunAttribute::Realm(value) => {
+                let b = value.as_bytes();
+                buf.put_u16(AttributeType::Realm as u16);
+                buf.put_u16(b.len() as u16);
+                buf.put_slice(b);
+                for _ in 0..((4 - (b.len() % 4)) % 4) {
+                    buf.put_u8(0);
+                }
+            }
+            StunAttribute::Nonce(value) => {
+                buf.put_u16(AttributeType::Nonce as u16);
+                buf.put_u16(value.len() as u16);
+                buf.put_slice(value);
+                for _ in 0..((4 - (value.len() % 4)) % 4) {
+                    buf.put_u8(0);
+                }
+            }
+            StunAttribute::ChannelNumber(n) => {
+                buf.put_u16(AttributeType::ChannelNumber as u16);
+                buf.put_u16(4);
+                buf.put_u16(*n);
+                buf.put_u16(0); // RFFU
+            }
+            StunAttribute::Lifetime(secs) => {
+                buf.put_u16(AttributeType::Lifetime as u16);
+                buf.put_u16(4);
+                buf.put_u32(*secs);
+            }
+            StunAttribute::XorPeerAddress(addr) => {
+                buf.put_u16(AttributeType::XorPeerAddress as u16);
+                serialize_xor_mapped_address(buf, *addr, transaction_id);
+            }
+            StunAttribute::Data(value) => {
+                buf.put_u16(AttributeType::Data as u16);
+                buf.put_u16(value.len() as u16);
+                buf.put_slice(value);
+                for _ in 0..((4 - (value.len() % 4)) % 4) {
+                    buf.put_u8(0);
+                }
+            }
+            StunAttribute::XorRelayedAddress(addr) => {
+                buf.put_u16(AttributeType::XorRelayedAddress as u16);
+                serialize_xor_mapped_address(buf, *addr, transaction_id);
+            }
+            StunAttribute::RequestedTransport(proto) => {
+                buf.put_u16(AttributeType::RequestedTransport as u16);
+                buf.put_u16(4);
+                buf.put_u8(*proto);
+                buf.put_u8(0); // RFFU
+                buf.put_u16(0); // RFFU
             }
             StunAttribute::Unknown { attr_type, value } => {
                 buf.put_u16(*attr_type);
@@ -1428,6 +1706,82 @@ mod tests {
         assert!(parsed.has_use_candidate());
         assert!(parsed.verify_message_integrity(b"pw").unwrap());
         assert_eq!(parsed.get_username(), Some("a:b"));
+    }
+
+    #[test]
+    fn test_turn_attributes_round_trip() {
+        let relayed = "203.0.113.9:49160".parse::<SocketAddr>().unwrap();
+        let peer = "198.51.100.7:5004".parse::<SocketAddr>().unwrap();
+        let mapped = "192.0.2.1:40000".parse::<SocketAddr>().unwrap();
+
+        let mut m = StunMessage::new_request(MessageType::AllocateRequest);
+        m.attributes.push(StunAttribute::RequestedTransport(17));
+        m.attributes.push(StunAttribute::Lifetime(600));
+        m.attributes.push(StunAttribute::XorRelayedAddress(relayed));
+        m.attributes.push(StunAttribute::XorPeerAddress(peer));
+        m.attributes.push(StunAttribute::XorMappedAddress(mapped));
+        m.attributes.push(StunAttribute::ChannelNumber(0x4001));
+        m.attributes.push(StunAttribute::Realm("forge.test".into()));
+        m.attributes
+            .push(StunAttribute::Nonce(b"nonce-bytes-123".to_vec()));
+        m.attributes.push(StunAttribute::Data(vec![1, 2, 3, 4, 5]));
+
+        let parsed = StunMessage::parse(&m.serialize()).unwrap();
+        assert_eq!(parsed.message_type, MessageType::AllocateRequest);
+        assert_eq!(parsed.get_xor_relayed_address(), Some(relayed));
+        assert_eq!(parsed.get_xor_peer_address(), Some(peer));
+        assert_eq!(parsed.get_xor_mapped_address(), Some(mapped));
+        assert_eq!(parsed.get_lifetime(), Some(600));
+        assert_eq!(parsed.get_realm(), Some("forge.test"));
+        assert_eq!(parsed.get_nonce(), Some(&b"nonce-bytes-123"[..]));
+        assert_eq!(parsed.get_data(), Some(&[1u8, 2, 3, 4, 5][..]));
+        assert!(parsed
+            .attributes
+            .iter()
+            .any(|a| matches!(a, StunAttribute::ChannelNumber(0x4001))));
+        assert!(parsed
+            .attributes
+            .iter()
+            .any(|a| matches!(a, StunAttribute::RequestedTransport(17))));
+    }
+
+    #[test]
+    fn test_error_code_round_trip_and_class() {
+        let mut m =
+            StunMessage::new_with_transaction(MessageType::AllocateErrorResponse, [7u8; 12]);
+        m.attributes
+            .push(StunAttribute::ErrorCode(401, "Unauthorized".into()));
+        m.attributes.push(StunAttribute::Realm("forge.test".into()));
+        m.attributes.push(StunAttribute::Nonce(b"abc".to_vec()));
+
+        assert!(m.message_type.is_error());
+        assert!(!MessageType::AllocateResponse.is_error());
+
+        let parsed = StunMessage::parse(&m.serialize()).unwrap();
+        assert_eq!(parsed.get_error_code(), Some((401, "Unauthorized")));
+        assert_eq!(parsed.get_realm(), Some("forge.test"));
+    }
+
+    #[test]
+    fn test_long_term_credential_message_integrity() {
+        // MESSAGE-INTEGRITY under the long-term mechanism keys on
+        // MD5(username:realm:password), not the raw password.
+        let key = crate::turn::long_term_key("alice", "forge.test", "s3cr3t");
+        let mut m = StunMessage::new_request(MessageType::CreatePermissionRequest);
+        m.attributes.push(StunAttribute::XorPeerAddress(
+            "198.51.100.7:5004".parse().unwrap(),
+        ));
+        m.attributes.push(StunAttribute::Username("alice".into()));
+        m.attributes.push(StunAttribute::Realm("forge.test".into()));
+        m.attributes.push(StunAttribute::Nonce(b"nonce".to_vec()));
+        m.add_message_integrity(&key).unwrap();
+        m.add_fingerprint();
+
+        let parsed = StunMessage::parse(&m.serialize()).unwrap();
+        assert!(parsed.verify_message_integrity(&key).unwrap());
+        assert!(parsed.verify_fingerprint().unwrap());
+        let wrong = crate::turn::long_term_key("alice", "forge.test", "nope");
+        assert!(parsed.verify_message_integrity(&wrong).is_err());
     }
 
     #[test]

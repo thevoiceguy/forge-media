@@ -501,7 +501,7 @@ impl SessionRecordingClient {
 
     /// Pause the recording (RFC 7866 §5.6).
     ///
-    /// Marks the session paused — subsequent [`forward_rtp`] calls drop
+    /// Marks the session paused — subsequent [`Self::forward_rtp`] calls drop
     /// packets at the SRC boundary — and notifies the SRS by synthesising a
     /// re-INVITE whose SDP advertises `a=recording:on` + `a=recording-paused`.
     ///
@@ -596,7 +596,7 @@ impl SessionRecordingClient {
     }
 
     /// Mute a participant for consent reasons (audit finding C13). Their
-    /// audio stops being forwarded to the SRS until [`unmute_participant`]
+    /// audio stops being forwarded to the SRS until [`Self::unmute_participant`]
     /// is called. Used to satisfy "recording consent" opt-outs — the
     /// session stays up for other participants so the call isn't torn down.
     pub async fn mute_participant(&self, session_id: &str, participant_id: &str) -> Result<()> {
@@ -608,7 +608,7 @@ impl SessionRecordingClient {
         Ok(())
     }
 
-    /// Reverse of [`mute_participant`].
+    /// Reverse of [`Self::mute_participant`].
     pub async fn unmute_participant(&self, session_id: &str, participant_id: &str) -> Result<()> {
         let mut state = self
             .active_sessions

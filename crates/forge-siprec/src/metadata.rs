@@ -285,7 +285,7 @@ impl RecordingSession {
     ///
     /// # Errors
     ///
-    /// Returns an error if the payload exceeds [`MAX_METADATA_BYTES`],
+    /// Returns an error if the payload exceeds [`RecordingSession::MAX_METADATA_BYTES`],
     /// contains a DTD / entity declaration, or fails to deserialize.
     pub fn from_xml(xml: &str) -> Result<Self, quick_xml::DeError> {
         if let Err(reason) = validate_siprec_xml(xml) {

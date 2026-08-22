@@ -2559,7 +2559,8 @@ impl MediaSession {
         &self.srtp_b
     }
 
-    /// DTLS-SRTP leg for participant A. `None` until [`enable_dtls`]
+    /// DTLS-SRTP leg for participant A. `None` until
+    /// [`MediaSession::enable_dtls`]
     /// installs it. The RTP recv loop checks this on every packet and
     /// demuxes DTLS bytes here when a leg is present.
     #[cfg(feature = "dtls")]

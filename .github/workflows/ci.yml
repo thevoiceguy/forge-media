@@ -518,8 +518,30 @@ jobs:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build documentation
-        run: cargo doc --all-features --no-deps --workspace
-
-      - name: Check for broken links
-        run: cargo doc --all-features --no-deps --workspace 2>&1 | grep -i "warning.*broken" && exit 1 || exit 0
+      - name: Build documentation (broken intra-doc links are errors)
+        # Two things used to be wrong here, and they hid each other.
+        #
+        # The link check grepped for `warning.*broken`, but rustdoc's
+        # wording is `unresolved link to \`Foo\`` — the word "broken"
+        # appears only in the lint *name*, which is not printed unless the
+        # note line is shown. So the grep never matched, `|| exit 0`
+        # swallowed the result, and the job passed with eleven unresolved
+        # links standing in the tree. Denying the lint by name is what the
+        # step was always trying to express, and rustdoc reports it against
+        # the offending line instead of us re-deriving it from stderr.
+        #
+        # And `--workspace` documents the `external/siphon-rs` submodule,
+        # which is governed separately — with the lint actually enforcing,
+        # its doc warnings would fail our CI for something we do not own.
+        # Enumerate workspace-owned packages, the same pattern the
+        # fmt/clippy/test jobs already use.
+        run: |
+          set -eo pipefail
+          members=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.manifest_path | contains("external/") | not) | .name')
+          PKGS=""
+          for pkg in $members; do
+            PKGS="$PKGS -p $pkg"
+          done
+          RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" \
+            cargo doc --all-features --no-deps $PKGS

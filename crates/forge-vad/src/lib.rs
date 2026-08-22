@@ -4,9 +4,11 @@
 //!
 //! - [`VadDetector`] (default): energy (RMS) + zero-crossing-rate
 //!   analysis with hysteresis and an adaptive noise-floor estimator.
-//!   Zero external runtime dependencies — it runs synchronously,
-//!   allocates a fixed-size sliding window, and is safe to call from
-//!   a per-frame audio loop.
+//!   Nothing runs behind your back — it is synchronous, allocates a
+//!   fixed-size sliding window once, and is safe to call from a
+//!   per-frame audio loop. (The crate depends on `forge-core` for the
+//!   event types named below and `thiserror`; neither is reached on the
+//!   detection path.)
 //! - [`NeuralVadDetector`] (Cargo feature `neural`, off by default):
 //!   the Silero VAD neural network via the pure-Rust `tract-onnx`
 //!   runtime, for materially fewer acoustic false positives (coughs,
@@ -16,8 +18,8 @@
 //!
 //! `forge-engine`'s RTP forwarding loop runs the detector on each
 //! decoded inbound PCM frame and publishes
-//! `forge_core::ForgeEvent::SpeechStarted` /
-//! `forge_core::ForgeEvent::SpeechStopped` on state transitions
+//! [`forge_core::ForgeEvent::SpeechStarted`] /
+//! [`forge_core::ForgeEvent::SpeechStopped`] on state transitions
 //! (one event per transition, debounced by hysteresis). External
 //! consumers (`siphon-ai`, `forge-ai-stream`'s OpenAI / Anthropic
 //! / Deepgram / ElevenLabs adapters) subscribe to the event bus.

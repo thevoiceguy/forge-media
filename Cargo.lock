@@ -1837,6 +1837,7 @@ dependencies = [
 name = "forge-vad"
 version = "0.2.0"
 dependencies = [
+ "forge-core",
  "thiserror 2.0.20",
  "tract-onnx",
 ]

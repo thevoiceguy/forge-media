@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`forge-vad` depends on `forge-core`, and its two `ForgeEvent::Speech*` references are live intra-doc links again.** [#122](https://github.com/thevoiceguy/forge-media/pull/122) made them plain code spans because the dependency was absent; this adds it and restores the links. The dependency is types-only — the crate still never constructs or publishes an event, `VadDetector::process` returns a `(VadState, f32)` and `forge-engine`'s forwarding loop is what maps transitions onto `ForgeEvent::SpeechStarted` / `SpeechStopped`.
+
+  It costs nothing in practice: every consumer of `forge-vad` (`forge-engine`, `forge-ai-stream`, and downstream `siphon-ai`) already depends on `forge-core`, so **`Cargo.lock` moves by one line and no new crate enters the graph**. The property the [2026-05 extraction](https://github.com/thevoiceguy/forge-media/commit/d36df52) was protecting is intact either way — that was about not dragging `forge-ai-stream`'s OpenAI / Anthropic / Deepgram / ElevenLabs WebSocket clients into provider-neutral consumers, which `forge-core` does not do. The crate docs' "zero external runtime dependencies" line, which described the detector's hot-path behaviour rather than the manifest, is reworded to say what it actually meant: synchronous, one fixed-size allocation, nothing reached on the detection path.
+
 ### Fixed
 
 - **CI's "Check for broken links" step never checked anything, and eleven unresolved intra-doc links had accumulated behind it.** The step ran `cargo doc … | grep -i "warning.*broken" && exit 1 || exit 0`, but rustdoc's wording is `unresolved link to \`Foo\`` — "broken" appears only in the lint's *name*, which is not printed on the warning line. The grep therefore never matched, `|| exit 0` swallowed the result, and the job passed unconditionally. It now denies the lint by name (`RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links"`), which is what the step was always trying to express and reports against the offending line instead of re-deriving it from stderr. The step is also scoped to workspace-owned packages the way the fmt/clippy/test jobs already are, since `--workspace` documents the `external/siphon-rs` submodule and its doc warnings are governed separately.

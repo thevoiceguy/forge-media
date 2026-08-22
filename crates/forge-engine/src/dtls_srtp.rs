@@ -1,6 +1,6 @@
 //! DTLS-SRTP on the SIP-side RTP socket (RFC 5763 / RFC 5764).
 //!
-//! Driven by the existing [`ForwardingEngine`] recv loop, not a separate task —
+//! Driven by the existing [`crate::ForwardingEngine`] recv loop, not a separate task —
 //! the loop demuxes incoming packets by first byte (RFC 5764 §5.1.2) and
 //! routes DTLS into [`DtlsLeg::feed`]. On handshake completion, the
 //! derived SRTP master keys are installed into the existing
@@ -76,7 +76,8 @@ pub enum HandshakeOutcome {
 
 /// Per-leg DTLS state. One per `ParticipantLabel` on a `MediaSession`.
 ///
-/// Constructed by [`enable_dtls`], driven by `feed` from the recv loop,
+/// Constructed by [`crate::MediaSession::enable_dtls`], driven by `feed`
+/// from the recv loop,
 /// drained by `extract_keys_for_role` when the handshake completes.
 pub struct DtlsLeg {
     conn: DtlsConnection,

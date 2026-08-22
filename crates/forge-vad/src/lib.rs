@@ -16,8 +16,8 @@
 //!
 //! `forge-engine`'s RTP forwarding loop runs the detector on each
 //! decoded inbound PCM frame and publishes
-//! [`forge_core::ForgeEvent::SpeechStarted`] /
-//! [`forge_core::ForgeEvent::SpeechStopped`] on state transitions
+//! `forge_core::ForgeEvent::SpeechStarted` /
+//! `forge_core::ForgeEvent::SpeechStopped` on state transitions
 //! (one event per transition, debounced by hysteresis). External
 //! consumers (`siphon-ai`, `forge-ai-stream`'s OpenAI / Anthropic
 //! / Deepgram / ElevenLabs adapters) subscribe to the event bus.

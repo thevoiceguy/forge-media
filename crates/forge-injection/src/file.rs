@@ -186,14 +186,14 @@ impl FileSource {
     ///
     /// **Do not call this with attacker-influenced input.** This is the
     /// raw file-open path — the sandboxing / canonicalisation happens in
-    /// [`open_in_sandbox`]. Prefer that constructor.
+    /// [`Self::open_in_sandbox`]. Prefer that constructor.
     pub fn open_trusted(path: impl AsRef<Path>) -> Result<Self> {
         Self::new_inner(path.as_ref())
     }
 
     /// Create a new file source from a path.
     ///
-    /// **Deprecated:** prefer [`open_in_sandbox`]. This method performs
+    /// **Deprecated:** prefer [`Self::open_in_sandbox`]. This method performs
     /// **no path validation** and should only be used for trusted input
     /// (test fixtures, operator-controlled absolute paths). Exists purely
     /// for backward compatibility.

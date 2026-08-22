@@ -2,11 +2,17 @@
 
 use crate::candidate::{CandidateType, IceCandidate, Protocol};
 use crate::stun::StunClient;
+use crate::turn::{TurnClient, TurnServer};
 use forge_core::Result;
 use if_addrs::get_if_addrs;
 use std::net::{IpAddr, SocketAddr};
 use tokio::net::lookup_host;
 use tracing::{debug, warn};
+
+/// Local preference assigned to relay candidates (RFC 8445 §5.1.2). Any u16 is
+/// valid; relay is already lowest by *type* preference (0), so this only orders
+/// relay candidates among themselves.
+const RELAY_LOCAL_PREF: u16 = 32768;
 
 /// Gather host candidates from local network interfaces
 ///
@@ -205,6 +211,75 @@ pub async fn gather_server_reflexive_candidates(
     }
 
     Ok(candidates)
+}
+
+/// Gather relay candidates by allocating on the configured TURN servers.
+///
+/// For each server, performs a TURN Allocate (long-term credential handshake)
+/// and turns the resulting relayed transport address into a `relay` candidate.
+/// Returns the candidates alongside the live [`TurnClient`]s, which the caller
+/// must keep: dropping a client closes its socket and, once refreshes stop, the
+/// allocation expires. Each allocation binds its own OS-assigned local socket,
+/// so multiple TURN servers never contend for a port.
+///
+/// A server that fails to allocate is logged and skipped, not fatal — a relay
+/// is a fallback, and one unreachable TURN server should not sink gathering.
+pub async fn gather_relay_candidates(
+    turn_servers: &[TurnServer],
+    component: u16,
+) -> Result<(Vec<IceCandidate>, Vec<TurnClient>)> {
+    let mut candidates = Vec::new();
+    let mut clients = Vec::new();
+
+    if turn_servers.is_empty() {
+        debug!("No TURN servers configured, skipping relay gathering");
+        return Ok((candidates, clients));
+    }
+
+    let mut foundation_counter = 2000; // above host (1..) and srflx (1000..)
+    let bind = SocketAddr::from(([0u8, 0, 0, 0], 0)); // OS-assigned per allocation
+
+    for server in turn_servers {
+        match TurnClient::allocate(bind, server).await {
+            Ok(client) => {
+                let relayed = client.relayed_addr();
+                // raddr/rport: the server-reflexive address the TURN server saw,
+                // falling back to the local base if it sent no XOR-MAPPED-ADDRESS.
+                let (rel_ip, rel_port) = client
+                    .mapped_addr()
+                    .map(|m| (m.ip(), m.port()))
+                    .or_else(|| client.base_addr().ok().map(|b| (b.ip(), b.port())))
+                    .unwrap_or((relayed.ip(), relayed.port()));
+
+                let foundation = foundation_counter.to_string();
+                foundation_counter += 1;
+
+                let candidate = IceCandidate::new_relay(
+                    foundation,
+                    component,
+                    Protocol::Udp,
+                    relayed.ip(),
+                    relayed.port(),
+                    rel_ip,
+                    rel_port,
+                    RELAY_LOCAL_PREF,
+                );
+
+                debug!(
+                    "Gathered relay candidate: {} via TURN {}",
+                    candidate, server.uri
+                );
+                candidates.push(candidate);
+                clients.push(client);
+            }
+            Err(e) => {
+                warn!("TURN allocation on '{}' failed: {}", server.uri, e);
+            }
+        }
+    }
+
+    debug!("Gathered {} relay candidate(s)", candidates.len());
+    Ok((candidates, clients))
 }
 
 /// Check if an interface is usable for ICE candidates

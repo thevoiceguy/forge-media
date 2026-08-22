@@ -620,6 +620,10 @@ impl Inner {
                     e.nominating = false;
                 }
             }
+            // TURN message types (Allocate/Refresh/…) never arrive on this ICE
+            // socket — the TurnClient owns the TURN transaction on its own
+            // socket — so anything else here is unexpected and ignored.
+            _ => {}
         }
     }
 

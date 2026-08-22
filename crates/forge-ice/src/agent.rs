@@ -2,7 +2,10 @@
 
 use crate::candidate::{CandidatePair, IceCandidate, PairState};
 use crate::checks::{perform_checks, IceAuthContext};
-use crate::gather::{gather_host_candidates, gather_server_reflexive_candidates};
+use crate::gather::{
+    gather_host_candidates, gather_relay_candidates, gather_server_reflexive_candidates,
+};
+use crate::turn::{TurnClient, TurnServer};
 use forge_core::Result;
 use rand::rngs::SysRng;
 use rand::TryRng;
@@ -38,6 +41,11 @@ pub struct IceAgent {
     local_port: u16,
     /// Bound UDP socket (created during gathering)
     socket: Option<std::sync::Arc<UdpSocket>>,
+    /// TURN servers to allocate relay candidates on (empty = STUN-only).
+    turn_servers: Vec<TurnServer>,
+    /// Live TURN allocations backing the relay candidates, retained so the
+    /// allocations stay open. Each holds its own relaying socket.
+    turn_clients: Vec<TurnClient>,
 }
 
 impl IceAgent {
@@ -74,7 +82,16 @@ impl IceAgent {
             component,
             local_port,
             socket: None,
+            turn_servers: Vec::new(),
+            turn_clients: Vec::new(),
         }
+    }
+
+    /// Configure TURN servers to allocate relay candidates on during
+    /// gathering. Relay candidates are the fallback ICE needs when STUN cannot
+    /// punch a path (e.g. symmetric NAT on both ends). No-op if left unset.
+    pub fn set_turn_servers(&mut self, turn_servers: Vec<TurnServer>) {
+        self.turn_servers = turn_servers;
     }
 
     /// Generate random ICE credentials (ufrag and password)
@@ -199,14 +216,43 @@ impl IceAgent {
             debug!("  ServerReflexive: {}", candidate);
         }
 
+        // Gather relay candidates via TURN (fallback for un-punchable NATs).
+        let (relay_candidates, turn_clients) =
+            gather_relay_candidates(&self.turn_servers, self.component).await?;
+
+        info!("Gathered {} relay candidates", relay_candidates.len());
+
+        for candidate in &relay_candidates {
+            debug!("  Relay: {}", candidate);
+        }
+
         // Store all candidates
         self.local_candidates.clear();
         self.local_candidates.extend(host_candidates);
         self.local_candidates.extend(srflx_candidates);
+        self.local_candidates.extend(relay_candidates);
+
+        // Retain the TURN allocations so they stay open for media relaying.
+        self.turn_clients = turn_clients;
 
         info!("Total local candidates: {}", self.local_candidates.len());
 
         Ok(())
+    }
+
+    /// The live TURN allocations backing this agent's relay candidates, in the
+    /// same order they were gathered. A relay `local` candidate carries media
+    /// by sending through the matching client's [`TurnClient::send_to`] /
+    /// [`TurnClient::recv_from`]; the media transport routes to it when the
+    /// nominated local candidate is of type `Relay`.
+    pub fn turn_clients(&self) -> &[TurnClient] {
+        &self.turn_clients
+    }
+
+    /// Take ownership of the TURN allocations (e.g. to hand them to the media
+    /// transport). The agent stops tracking them afterward.
+    pub fn take_turn_clients(&mut self) -> Vec<TurnClient> {
+        std::mem::take(&mut self.turn_clients)
     }
 
     /// Add a remote candidate

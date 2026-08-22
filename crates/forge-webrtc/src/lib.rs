@@ -47,7 +47,7 @@ pub mod peer;
 pub mod sdp;
 pub mod transport;
 
-pub use forge_ice::IceCandidate;
+pub use forge_ice::{IceCandidate, TurnServer};
 pub use peer::{
     AudioSender, ConnectionState, PeerConfig, PeerConnection, PeerEvent, SignalingState,
 };

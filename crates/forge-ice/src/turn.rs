@@ -40,7 +40,7 @@ use crate::stun::{MessageType, StunAttribute, StunMessage};
 use forge_core::{ForgeError, Result};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
@@ -150,7 +150,7 @@ async fn resolve_turn_server(uri: &str) -> Result<SocketAddr> {
 ///
 /// See the [module docs](self) for the flow and threading model.
 pub struct TurnClient {
-    socket: UdpSocket,
+    socket: Arc<UdpSocket>,
     server: SocketAddr,
     username: String,
     password: String,
@@ -168,6 +168,25 @@ pub struct TurnClient {
     pending_media: Mutex<VecDeque<(SocketAddr, Vec<u8>)>>,
 }
 
+/// The outcome of feeding one inbound datagram to [`TurnClient::handle_inbound`]
+/// — the single-reader counterpart to [`TurnClient::recv_from`], for callers
+/// that drive the TURN socket from their own event loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnInbound {
+    /// Relayed application data from `peer` (unwrapped from ChannelData or a
+    /// Data indication).
+    Relayed(SocketAddr, Vec<u8>),
+    /// A control response reported 401/438: the nonce (and realm/key) were
+    /// refreshed in place, and the caller should resend the pending request.
+    StaleNonce,
+    /// A control transaction (permission / channel-bind / refresh) succeeded.
+    ControlSuccess,
+    /// A control transaction failed with this STUN error code.
+    ControlError(u16),
+    /// Not TURN traffic this client handles.
+    Ignored,
+}
+
 impl TurnClient {
     /// Allocate a relayed transport address on `server`.
     ///
@@ -181,7 +200,7 @@ impl TurnClient {
             .map_err(|e| ForgeError::Ice(format!("Failed to bind TURN socket: {e}")))?;
 
         let mut client = TurnClient {
-            socket,
+            socket: Arc::new(socket),
             server: server_addr,
             username: server.username.clone(),
             password: server.password.clone(),
@@ -322,6 +341,95 @@ impl TurnClient {
         let granted = resp.get_lifetime().unwrap_or(lifetime);
         self.lifetime = granted;
         Ok(granted)
+    }
+
+    // ---- sans-I/O interface for an external event loop --------------------
+    //
+    // `allocate` performs the one blocking handshake up front (it establishes
+    // realm/nonce/key). Afterwards a caller that owns its own read loop can
+    // build authenticated control requests, send them to `server_addr()`, and
+    // classify inbound datagrams with `handle_inbound` — so a single task both
+    // reads relayed media and completes control transactions on one socket,
+    // instead of `recv_from` and a control call racing two reads.
+
+    /// The socket this allocation was made from (bind it into your select loop).
+    pub fn socket(&self) -> &UdpSocket {
+        &self.socket
+    }
+
+    /// A cloned handle to the allocation's socket, so an event loop can await
+    /// reads on it without borrowing the client (leaving the client free for
+    /// `&mut` control ops in the same task).
+    pub fn socket_arc(&self) -> Arc<UdpSocket> {
+        Arc::clone(&self.socket)
+    }
+
+    /// The TURN server address every framed request/datagram is sent to.
+    pub fn server_addr(&self) -> SocketAddr {
+        self.server
+    }
+
+    /// Build a signed CreatePermission request for `peer` (RFC 8656 §9). Send
+    /// the bytes to [`Self::server_addr`]; the response arrives via
+    /// [`Self::handle_inbound`].
+    pub fn permission_request(&self, peer: SocketAddr) -> Result<Vec<u8>> {
+        let mut msg = StunMessage::new_request(MessageType::CreatePermissionRequest);
+        msg.attributes.push(StunAttribute::XorPeerAddress(peer));
+        self.add_auth(&mut msg)?;
+        Ok(msg.serialize())
+    }
+
+    /// Build a signed Refresh request with `lifetime` seconds (0 deletes).
+    pub fn refresh_request(&self, lifetime: u32) -> Result<Vec<u8>> {
+        let mut msg = StunMessage::new_request(MessageType::RefreshRequest);
+        msg.attributes.push(StunAttribute::Lifetime(lifetime));
+        self.add_auth(&mut msg)?;
+        Ok(msg.serialize())
+    }
+
+    /// Classify one datagram read from the TURN socket. Relayed media becomes
+    /// `Relayed(peer, data)`; a 401/438 error refreshes the nonce in place and
+    /// returns `StaleNonce`; other control responses map to success/error.
+    pub fn handle_inbound(&mut self, pkt: &[u8], from: SocketAddr) -> TurnInbound {
+        if from != self.server {
+            return TurnInbound::Ignored;
+        }
+        if is_channel_data(pkt) {
+            if let Some((channel, data)) = decode_channel_data(pkt) {
+                if let Some(peer) = self.peer_for_channel(channel) {
+                    return TurnInbound::Relayed(peer, data.to_vec());
+                }
+            }
+            return TurnInbound::Ignored;
+        }
+        let Ok(msg) = StunMessage::parse(pkt) else {
+            return TurnInbound::Ignored;
+        };
+        if msg.message_type == MessageType::DataIndication {
+            if let (Some(peer), Some(data)) = (msg.get_xor_peer_address(), msg.get_data()) {
+                return TurnInbound::Relayed(peer, data.to_vec());
+            }
+            return TurnInbound::Ignored;
+        }
+        if msg.message_type.is_error() {
+            let code = msg.get_error_code().map(|(c, _)| c).unwrap_or(0);
+            // 401/438 carry a fresh NONCE (and possibly REALM) and no
+            // MESSAGE-INTEGRITY; adopt them so the caller can resend.
+            if code == 401 || code == 438 {
+                if let Some(n) = msg.get_nonce() {
+                    self.nonce = n.to_vec();
+                }
+                if let Some(r) = msg.get_realm() {
+                    if r != self.realm {
+                        self.realm = r.to_string();
+                        self.key = long_term_key(&self.username, &self.realm, &self.password);
+                    }
+                }
+                return TurnInbound::StaleNonce;
+            }
+            return TurnInbound::ControlError(code);
+        }
+        TurnInbound::ControlSuccess
     }
 
     /// Relay `data` to `peer`. Uses a ChannelData frame when a channel is bound
@@ -722,6 +830,55 @@ mod tests {
 
         // Refresh keeps the allocation alive.
         assert_eq!(client.refresh(600).await.expect("refresh"), 600);
+    }
+
+    #[tokio::test]
+    async fn sans_io_interface_against_mock() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        tokio::spawn(mock_turn_server(
+            server,
+            "alice".into(),
+            "forge.test".into(),
+            "s3cr3t".into(),
+        ));
+        let ts = TurnServer::new(format!("turn:{server_addr}"), "alice", "s3cr3t");
+        let mut client = TurnClient::allocate("127.0.0.1:0".parse().unwrap(), &ts)
+            .await
+            .expect("allocate");
+
+        let peer: SocketAddr = "198.51.100.7:5004".parse().unwrap();
+
+        // Build + send a permission request, classify the response via handle_inbound.
+        let req = client.permission_request(peer).expect("build permission");
+        client
+            .socket()
+            .send_to(&req, client.server_addr())
+            .await
+            .unwrap();
+        let mut buf = [0u8; 1024];
+        let (n, from) = timeout(Duration::from_secs(2), client.socket().recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            client.handle_inbound(&buf[..n], from),
+            TurnInbound::ControlSuccess
+        );
+
+        // Relayed media (mock echoes a Data indication) classifies as Relayed.
+        client.send_to(peer, b"sans-io").await.unwrap();
+        let (n, from) = timeout(Duration::from_secs(2), client.socket().recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        match client.handle_inbound(&buf[..n], from) {
+            TurnInbound::Relayed(p, d) => {
+                assert_eq!(p, peer);
+                assert_eq!(d, b"sans-io");
+            }
+            other => panic!("expected Relayed, got {other:?}"),
+        }
     }
 
     /// Live interop against a real TURN server (e.g. coturn). Ignored by

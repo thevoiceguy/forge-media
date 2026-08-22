@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`PortPool::allocate_reserving(min_free)` and `MediaSessionConfig::min_free_port_pairs`: a reserved band in the RTP port pool** (downstream: [thevoiceguy/siphon-ai#556](https://github.com/thevoiceguy/siphon-ai/issues/556)). A media server that both answers and originates calls draws both directions from one pool, first-come-first-served. A surge in one direction can therefore starve the other *completely*, and the direction that wins shows no symptom at all while it happens — from its point of view nothing failed. Measured downstream on a pool shrunk to 60 calls with 50 inbound + 20 outbound offered: inbound established 50/50 and stayed healthy for the whole window while 10 of 20 originations failed. The starved side is typically the one with a deadline attached (a scheduled callback, a notification), which is the opposite of how an operator would prioritise it.
+
+  `allocate_reserving(min_free)` allocates only if at least `min_free` pairs would remain available afterwards; `allocate()` is now exactly `allocate_reserving(0)` and is unchanged for every existing caller, including taking the pool's last pair. Sessions reach it through the new `MediaSessionConfig::min_free_port_pairs` (default `0`), which sits beside `socket_config` because the floor is decided per call and not per manager — the same `SessionManager` gates one direction and not the other.
+
+  This belongs in the pool rather than in each caller because a caller's own `available_count()`-then-`allocate()` is two critical sections: `K` concurrent callers can each read the same free count and dip up to `K-1` pairs below the floor before any of them lands. Evaluating the floor under the lock that removes the port makes it exact for the same single `Mutex` acquisition — pinned by a test that races 64 gated callers at a 50-pair pool and demands *exactly* the floor left standing.
+
+  The floor composes with the [#111](https://github.com/thevoiceguy/forge-media/issues/111) bind-retry: pairs rejected for `AddrInUse` are held rather than released, so mid-retry the pool reads up to four pairs lower than it will settle at, and `allocate_and_bind` discounts them before comparing. Without that, one squatted port would turn an allocation that leaves the floor perfectly intact into a spurious refusal. An exhausted pool and a pool at its floor are the same `ForgeError::ResourceLimit` variant — both mean "no port for *you*, right now" — but carry different messages, because one says buy more ports and the other says the reservation is working.
+
 ### Dependencies
 
 - `sha1` 0.10 → 0.11, `hmac` 0.12 → 0.13, `sha2` 0.10 → 0.11 — the coordinated digest-0.11 ecosystem move ([#90](https://github.com/thevoiceguy/forge-media/pull/90) could not land alone: sha1 0.11 and hmac 0.12 sit on incompatible `digest` majors, so `Hmac<Sha1>` in forge-rtp SRTP auth and forge-ice STUN MESSAGE-INTEGRITY failed to compile). `new_from_slice` moved from the `Mac` trait to `KeyInit`; call sites updated, no behavioural change (all SRTP/STUN test vectors pass unchanged). forge-ice's privately-pinned `hmac`/`sha1` now inherit from the workspace so the two halves of `Hmac<Sha1>` can't drift across majors again.

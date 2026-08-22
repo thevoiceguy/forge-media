@@ -165,12 +165,68 @@ impl PortPool {
     ///
     /// Returns the next available RTP/RTCP port pair, or an error if the pool is exhausted.
     pub async fn allocate(&self) -> Result<PortPair> {
+        self.allocate_reserving(0).await
+    }
+
+    /// Allocate a port pair only if at least `min_free` pairs would still be
+    /// available afterwards.
+    ///
+    /// This is the primitive behind a **reserved band**: a caller that must
+    /// not consume the whole pool passes the floor it has to leave behind,
+    /// while a privileged caller keeps using [`allocate`](Self::allocate)
+    /// (equivalently, `allocate_reserving(0)`) and may draw the pool dry.
+    ///
+    /// The motivating case is a media server that both answers and
+    /// originates calls out of one pool. Allocation is first-come-first-served,
+    /// so a surge of answered calls can starve origination *completely* — and
+    /// the answering side shows no symptom while it happens, because from its
+    /// point of view nothing failed. The direction that gets starved is
+    /// usually the one with a deadline attached (a scheduled callback, a
+    /// notification), which is the opposite of how an operator would
+    /// prioritise it. Gating one direction on a floor lets the pool express
+    /// that intent.
+    ///
+    /// # Why this belongs in the pool
+    ///
+    /// A caller *can* approximate it with
+    /// [`available_count`](Self::available_count) followed by `allocate`, but
+    /// the read and the allocation are then two separate critical sections:
+    /// `K` concurrent callers can each observe the same free count and dip up
+    /// to `K-1` pairs below the floor before any of them lands. Evaluating the
+    /// floor under the same lock that removes the port makes the guarantee
+    /// exact, at no extra cost — it is the same `Mutex` acquisition either way.
+    ///
+    /// `min_free == 0` is exactly [`allocate`](Self::allocate). A `min_free`
+    /// at or above [`PortPoolConfig::capacity`] means this caller can never
+    /// allocate; that is the caller's policy to validate, not something this
+    /// method second-guesses.
+    ///
+    /// # Errors
+    ///
+    /// [`ForgeError::ResourceLimit`] when the pool is empty, and — with a
+    /// distinct message naming the floor — when it is merely at the floor.
+    /// The two are deliberately the same variant (both mean "no port for
+    /// *you*, right now"), but the message differs because they call for
+    /// different operator action: one is a pool that needs to be bigger, the
+    /// other is a reservation doing its job.
+    pub async fn allocate_reserving(&self, min_free: usize) -> Result<PortPair> {
         let mut state = self.state.lock().await;
 
         if state.available.is_empty() {
             return Err(ForgeError::ResourceLimit(
                 "No available ports in pool".to_string(),
             ));
+        }
+
+        // `>` and not `>=`: taking one pair must leave `min_free` behind, so
+        // the last allocation this caller may make is the one from
+        // `min_free + 1` available.
+        if state.available.len() <= min_free {
+            return Err(ForgeError::ResourceLimit(format!(
+                "Port pool at its reserved floor: {} pair(s) available, {} reserved",
+                state.available.len(),
+                min_free
+            )));
         }
 
         // Choose a random available port to reduce predictability
@@ -397,5 +453,128 @@ mod tests {
 
         // Should be able to allocate again
         assert!(pool.allocate().await.is_ok());
+    }
+
+    // ─── reserved floor (allocate_reserving) ─────────────────────────────
+
+    /// The floor is the whole point: a gated caller must be refused *while
+    /// pairs are still free*, and those pairs must remain usable by an
+    /// ungated one.
+    #[tokio::test]
+    async fn reserving_refuses_at_the_floor_and_leaves_the_band_usable() {
+        let pool = PortPool::new(PortPoolConfig::new(11000, 11100).unwrap()); // 50 pairs
+        let floor = 10;
+
+        // A gated caller gets capacity - floor pairs and no more.
+        for i in 0..40 {
+            pool.allocate_reserving(floor)
+                .await
+                .unwrap_or_else(|e| panic!("gated allocation {i} of 40 must succeed: {e}"));
+        }
+        assert_eq!(pool.available_count().await, floor);
+
+        let refused = pool.allocate_reserving(floor).await;
+        assert!(
+            refused.is_err(),
+            "the 41st gated allocation must be refused with the floor still free"
+        );
+        assert_eq!(
+            pool.available_count().await,
+            floor,
+            "a refusal must not consume a pair"
+        );
+
+        // The reserved band belongs to ungated callers, all of it.
+        for i in 0..floor {
+            pool.allocate()
+                .await
+                .unwrap_or_else(|e| panic!("reserved pair {i} must be allocatable: {e}"));
+        }
+        assert!(pool.is_exhausted().await);
+    }
+
+    /// `allocate()` is `allocate_reserving(0)` — the historical behaviour has
+    /// to survive the refactor, including taking the pool's last pair.
+    #[tokio::test]
+    async fn a_zero_floor_is_plain_allocate() {
+        let pool = PortPool::new(PortPoolConfig::new(11200, 11300).unwrap()); // 50 pairs
+        for _ in 0..50 {
+            pool.allocate_reserving(0).await.expect("drains the pool");
+        }
+        assert!(pool.is_exhausted().await);
+        assert!(pool.allocate_reserving(0).await.is_err());
+    }
+
+    /// Empty and at-the-floor are the same variant but must not read the
+    /// same: one says buy more ports, the other says the reservation is
+    /// working. An operator reading a log needs to tell them apart.
+    #[tokio::test]
+    async fn floor_and_exhaustion_report_differently() {
+        let pool = PortPool::new(PortPoolConfig::new(11400, 11500).unwrap()); // 50 pairs
+        for _ in 0..49 {
+            pool.allocate().await.unwrap();
+        }
+
+        let at_floor = pool
+            .allocate_reserving(1)
+            .await
+            .expect_err("1 free, floor 1 — refused");
+        assert!(
+            at_floor.to_string().contains("reserved floor"),
+            "floor refusal must name the floor: {at_floor}"
+        );
+
+        pool.allocate().await.unwrap();
+        let empty = pool
+            .allocate_reserving(1)
+            .await
+            .expect_err("pool is now empty");
+        assert!(
+            empty.to_string().contains("No available ports"),
+            "an empty pool must still report exhaustion, not a floor: {empty}"
+        );
+    }
+
+    /// A floor at or above capacity locks the gated caller out entirely.
+    /// That is the caller's policy error to validate, but it must fail
+    /// cleanly rather than panic or wrap around.
+    #[tokio::test]
+    async fn a_floor_at_capacity_admits_nobody() {
+        let pool = PortPool::new(PortPoolConfig::new(11600, 11700).unwrap()); // 50 pairs
+        assert!(pool.allocate_reserving(50).await.is_err());
+        assert!(pool.allocate_reserving(usize::MAX).await.is_err());
+        assert_eq!(
+            pool.available_count().await,
+            50,
+            "refusals must not consume the pool"
+        );
+        assert!(pool.allocate().await.is_ok(), "ungated callers unaffected");
+    }
+
+    /// The reason this lives in the pool rather than in a caller's
+    /// check-then-allocate: the floor holds under concurrency. 64 gated
+    /// callers racing on a 50-pair pool with a floor of 20 must leave
+    /// *exactly* 20, not "about 20".
+    #[tokio::test]
+    async fn the_floor_holds_under_concurrent_allocation() {
+        let pool = Arc::new(PortPool::new(PortPoolConfig::new(11800, 11900).unwrap()));
+        let floor = 20;
+
+        let mut tasks = Vec::new();
+        for _ in 0..64 {
+            let pool = Arc::clone(&pool);
+            tasks.push(tokio::spawn(async move {
+                pool.allocate_reserving(floor).await.is_ok()
+            }));
+        }
+        let mut granted = 0;
+        for t in tasks {
+            if t.await.unwrap() {
+                granted += 1;
+            }
+        }
+
+        assert_eq!(granted, 30, "capacity 50 minus a floor of 20");
+        assert_eq!(pool.available_count().await, floor);
     }
 }

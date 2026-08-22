@@ -123,6 +123,19 @@ pub struct MediaSessionConfig {
     /// `None` (the default) disables snapshot publication entirely; the
     /// per-packet counters are still maintained either way.
     pub media_stats_interval: Option<Duration>,
+    /// RTP port pairs this session must leave free in the pool — the
+    /// **reserved floor** described on [`PortPool::allocate_reserving`].
+    ///
+    /// `0` (the default) is unrestricted: the session may take the pool's
+    /// last pair, which is the historical behaviour. A non-zero value makes
+    /// session creation fail with [`ForgeError::ResourceLimit`] while that
+    /// many pairs are still free, holding them for callers that pass `0`.
+    ///
+    /// This sits beside [`socket_config`](Self::socket_config) rather than in
+    /// a new argument to `create_session_*` because it is decided per call,
+    /// not per manager: a server that both answers and originates gates one
+    /// direction and not the other, from the same [`crate::SessionManager`].
+    pub min_free_port_pairs: usize,
 }
 
 impl Default for MediaSessionConfig {
@@ -134,6 +147,7 @@ impl Default for MediaSessionConfig {
             vad_config: VadConfig::default(),
             transcoding_config: TranscodingConfig::default(),
             media_stats_interval: None,
+            min_free_port_pairs: 0,
         }
     }
 }
@@ -902,8 +916,12 @@ impl MediaSession {
     ) -> Result<Self> {
         // Allocate ports and bind them, retrying past any port the host
         // has handed to a socket outside this pool (#111).
-        let (ports, sockets, mut port_guard) =
-            allocate_and_bind(port_pool, config.socket_config.clone()).await?;
+        let (ports, sockets, mut port_guard) = allocate_and_bind(
+            port_pool,
+            config.socket_config.clone(),
+            config.min_free_port_pairs,
+        )
+        .await?;
         tracing::info!(
             "Allocated ports for session {}: RTP={}, RTCP={}",
             call_id.0,
@@ -1062,8 +1080,12 @@ impl MediaSession {
 
         // Allocate ports and bind them, retrying past any port the host
         // has handed to a socket outside this pool (#111).
-        let (ports, sockets, mut port_guard) =
-            allocate_and_bind(port_pool, config.socket_config.clone()).await?;
+        let (ports, sockets, mut port_guard) = allocate_and_bind(
+            port_pool,
+            config.socket_config.clone(),
+            config.min_free_port_pairs,
+        )
+        .await?;
         tracing::info!(
             "Allocated ports for session {}: RTP={}, RTCP={}",
             call_id.0,
@@ -1262,8 +1284,12 @@ impl MediaSession {
     ) -> Result<Self> {
         // Allocate ports and bind them, retrying past any port the host
         // has handed to a socket outside this pool (#111).
-        let (ports, sockets, mut port_guard) =
-            allocate_and_bind(port_pool, config.socket_config.clone()).await?;
+        let (ports, sockets, mut port_guard) = allocate_and_bind(
+            port_pool,
+            config.socket_config.clone(),
+            config.min_free_port_pairs,
+        )
+        .await?;
         tracing::info!(
             "Allocated ports for session {}: RTP={}, RTCP={}",
             call_id.0,
@@ -3310,6 +3336,7 @@ const PORT_BIND_ATTEMPTS: usize = 5;
 async fn allocate_and_bind(
     port_pool: &Arc<PortPool>,
     socket_config: RtpSocketConfig,
+    min_free_pairs: usize,
 ) -> Result<(PortPair, RtpSocketPair, PortAllocationGuard)> {
     // Rejected pairs are collected and released explicitly below, not left
     // to `PortAllocationGuard`'s `Drop`: that releases through a spawned
@@ -3321,7 +3348,14 @@ async fn allocate_and_bind(
     let mut bound = None;
 
     for attempt in 1..=PORT_BIND_ATTEMPTS {
-        let ports = match port_pool.allocate().await {
+        // The floor has to be measured against the pool as it will be once
+        // this call returns, not as it is mid-retry. Rejected pairs are held
+        // rather than released (see above), so on attempt `k` the pool reads
+        // `k-1` pairs lower than it will settle at — asking for the full
+        // floor here would refuse an allocation that in fact leaves it
+        // intact. Discount the pairs we are about to give back.
+        let floor = min_free_pairs.saturating_sub(rejected.len());
+        let ports = match port_pool.allocate_reserving(floor).await {
             Ok(ports) => ports,
             Err(e) => {
                 release_all(port_pool, rejected).await;
@@ -3461,7 +3495,7 @@ mod tests {
             p += 2;
         }
 
-        let (ports, _sockets, mut guard) = allocate_and_bind(&pool, RtpSocketConfig::default())
+        let (ports, _sockets, mut guard) = allocate_and_bind(&pool, RtpSocketConfig::default(), 0)
             .await
             .expect("a squatted pair must not fail the call");
         assert_eq!(ports.rtcp_port, ports.rtp_port + 1);
@@ -3488,7 +3522,7 @@ mod tests {
         }
         let pool = Arc::new(PortPool::new(PortPoolConfig::new(21400, 21600).unwrap()));
 
-        match allocate_and_bind(&pool, RtpSocketConfig::default()).await {
+        match allocate_and_bind(&pool, RtpSocketConfig::default(), 0).await {
             Err(ForgeError::AddrInUse(addr)) => {
                 assert!((21400..21600).contains(&addr.port()));
             }
@@ -3498,6 +3532,104 @@ mod tests {
 
         // The failed attempts released their pairs.
         assert_eq!(pool.available_count().await, pool.config().capacity());
+        drop(held);
+    }
+
+    // ─── reserved floor (MediaSessionConfig::min_free_port_pairs) ────────
+
+    /// A session config carrying a floor must be refused while that many
+    /// pairs are still free, and the band must stay usable by a session
+    /// that carries none.
+    #[tokio::test]
+    async fn a_session_floor_holds_pairs_back_for_ungated_callers() {
+        let pool = Arc::new(PortPool::new(PortPoolConfig::new(21800, 22000).unwrap()));
+        let capacity = pool.config().capacity(); // 100 pairs
+        let floor = 90;
+
+        let mut guards = Vec::new();
+        for i in 0..(capacity - floor) {
+            let (_, _, mut g) = allocate_and_bind(&pool, RtpSocketConfig::default(), floor)
+                .await
+                .unwrap_or_else(|e| panic!("gated bind {i} must succeed: {e}"));
+            g.disarm();
+            guards.push(g);
+        }
+
+        assert!(
+            allocate_and_bind(&pool, RtpSocketConfig::default(), floor)
+                .await
+                .is_err(),
+            "gated caller must be refused with {floor} pairs still free"
+        );
+        assert_eq!(pool.available_count().await, floor);
+
+        // Ungated callers reach into the band.
+        let (_, _, mut g) = allocate_and_bind(&pool, RtpSocketConfig::default(), 0)
+            .await
+            .expect("an ungated caller may use the reserved band");
+        g.disarm();
+        assert_eq!(pool.available_count().await, floor - 1);
+    }
+
+    /// The retry-accounting case (#111 meets the floor). Pairs rejected for
+    /// an `AddrInUse` bind are *held* until the call returns, so mid-retry
+    /// the pool reads low. If the floor were compared against that transient
+    /// count, a squatted port would turn an allocation that leaves the floor
+    /// perfectly intact into a spurious refusal.
+    ///
+    /// Pinned at the tightest floor there is — `capacity - 1`, so exactly one
+    /// pair may be out at a time. Under that floor a single rejected draw is
+    /// enough to make the un-discounted comparison refuse, so the buggy
+    /// version fails on the first iteration that retries.
+    ///
+    /// Half the pairs are squatted, making a retry ~50% likely per iteration;
+    /// over 40 iterations the chance of never exercising one is ~1e-12.
+    ///
+    /// An iteration whose five draws *all* collide is `AddrInUse` — #111's
+    /// own attempt limit, nothing to do with the floor — and is skipped, so
+    /// the random draw can at worst make this vacuous and can never make it
+    /// flake red. The assertion is narrow on purpose: under a floor this
+    /// call can satisfy, a retry must never come back `ResourceLimit`.
+    #[tokio::test]
+    async fn a_rejected_pair_does_not_count_against_the_floor() {
+        let pool = Arc::new(PortPool::new(PortPoolConfig::new(22200, 22400).unwrap()));
+        let capacity = pool.config().capacity(); // 100 pairs
+
+        // Squat the RTCP half of the lower 50 pairs.
+        let mut held = Vec::new();
+        let mut p = 22201; // odd = RTCP
+        while p < 22300 {
+            if let Ok(s) = tokio::net::UdpSocket::bind(format!("0.0.0.0:{p}")).await {
+                held.push(s);
+            }
+            p += 2;
+        }
+        if held.len() < 25 {
+            return; // host would not let us set the premise up
+        }
+
+        for i in 0..40 {
+            match allocate_and_bind(&pool, RtpSocketConfig::default(), capacity - 1).await {
+                Ok((ports, sockets, mut guard)) => {
+                    guard.disarm();
+                    drop(sockets);
+                    pool.deallocate(ports).await;
+                }
+                // Every one of the five draws hit a squatted pair. That is
+                // the attempt limit, not the floor.
+                Err(ForgeError::AddrInUse(_)) => {}
+                Err(e) => panic!(
+                    "iteration {i}: a rejected pair was counted against the floor \
+                     (pool has {capacity} pairs, floor {}, one allocation): {e}",
+                    capacity - 1
+                ),
+            }
+            assert_eq!(
+                pool.available_count().await,
+                capacity,
+                "iteration {i}: every rejected draw must be back in the pool"
+            );
+        }
         drop(held);
     }
     use forge_rtp::PortPoolConfig;

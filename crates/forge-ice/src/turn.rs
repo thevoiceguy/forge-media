@@ -753,4 +753,65 @@ mod tests {
         // Clean up: LIFETIME=0 deletes the allocation.
         let _ = client.refresh(0).await;
     }
+
+    /// Live relay round-trip through a real TURN server: allocate, permit +
+    /// channel-bind a loopback peer, then relay bytes both directions through
+    /// the server. Ignored by default; needs a server that permits loopback
+    /// peers (coturn: `--allow-loopback-peers`).
+    #[tokio::test]
+    #[ignore = "requires a live TURN server that allows loopback peers"]
+    async fn live_turn_relay_roundtrip() {
+        let uri = std::env::var("FORGE_TURN_URI").expect("FORGE_TURN_URI");
+        let user = std::env::var("FORGE_TURN_USER").unwrap_or_default();
+        let pass = std::env::var("FORGE_TURN_PASS").unwrap_or_default();
+        let ts = TurnServer::new(uri, user, pass);
+
+        let mut client = TurnClient::allocate("127.0.0.1:0".parse().unwrap(), &ts)
+            .await
+            .expect("allocate");
+        let relayed = client.relayed_addr();
+        println!("allocated relay {relayed}");
+
+        // A plain UDP peer on loopback.
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+
+        client
+            .create_permission(peer_addr)
+            .await
+            .expect("permission");
+        let channel = client.bind_channel(peer_addr).await.expect("channel bind");
+        println!("channel 0x{channel:04x} bound to {peer_addr}");
+
+        // client -> relay -> peer
+        client
+            .send_to(peer_addr, b"ping-through-turn")
+            .await
+            .expect("send");
+        let mut pbuf = [0u8; 256];
+        let (pn, pfrom) = timeout(Duration::from_secs(3), peer.recv_from(&mut pbuf))
+            .await
+            .expect("peer recv timed out")
+            .unwrap();
+        assert_eq!(&pbuf[..pn], b"ping-through-turn");
+        assert_eq!(
+            pfrom, relayed,
+            "peer sees the relayed address as the source"
+        );
+
+        // peer -> relay -> client
+        peer.send_to(b"pong-through-turn", relayed)
+            .await
+            .expect("peer send");
+        let mut cbuf = [0u8; 256];
+        let (cn, cfrom) = timeout(Duration::from_secs(3), client.recv_from(&mut cbuf))
+            .await
+            .expect("client recv timed out")
+            .unwrap();
+        assert_eq!(&cbuf[..cn], b"pong-through-turn");
+        assert_eq!(cfrom, peer_addr, "client recovers the true peer address");
+
+        let _ = client.refresh(0).await;
+        println!("relay round-trip through TURN ok");
+    }
 }

@@ -15,5 +15,11 @@ license.workspace = true
 neural = ["dep:tract-onnx"]
 
 [dependencies]
+# Types only, for the intra-doc links from this crate's prose to the
+# `ForgeEvent` variants `forge-engine` publishes on its behalf (this crate
+# never constructs or publishes one — `VadDetector::process` returns a
+# state). Free for every consumer that exists: forge-engine,
+# forge-ai-stream and siphon-ai all depend on forge-core already.
+forge-core = { path = "../forge-core" }
 thiserror = { workspace = true }
 tract-onnx = { version = "0.23", optional = true }

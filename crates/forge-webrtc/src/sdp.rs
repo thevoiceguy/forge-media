@@ -1,13 +1,21 @@
 //! SDP construction and inspection for the endpoint-shaped peer connection.
 //!
-//! The peer connection negotiates one audio section (Opus, optional
-//! telephone-event), BUNDLE + rtcp-mux, DTLS-SRTP and trickle ICE — the
-//! shape every browser produces and the shape the DSIP WebRTC Media Binding
-//! pins. Offers are built from scratch; answers mirror the remote offer
-//! (payload types, `a=mid`, protocol) and reject every non-audio section with
-//! port 0 so the answer stays a valid RFC 3264 answer to a browser offer that
-//! carries video or data sections.
+//! The peer connection negotiates one audio section (Opus and/or G.711,
+//! optional telephone-event), BUNDLE + rtcp-mux, DTLS-SRTP and trickle ICE —
+//! the shape every browser produces and the shape the DSIP WebRTC Media
+//! Binding pins. Offers are built from scratch; answers mirror the remote
+//! offer (payload types, `a=mid`, protocol) and reject every non-audio
+//! section with port 0 so the answer stays a valid RFC 3264 answer to a
+//! browser offer that carries video or data sections.
+//!
+//! Codec selection: the local preference list ([`LocalParams::codecs`])
+//! decides. An answer accepts exactly one codec — the first local preference
+//! the remote offered — so the negotiated codec is pinned deterministically
+//! rather than left to the sender. G.711 (PCMU/PCMA) is
+//! mandatory-to-implement in WebRTC (RFC 7874 §3), so against a browser it
+//! can always be preferred to skip transcoding toward a G.711 SIP leg.
 
+use forge_core::AudioCodec;
 use forge_ice::IceCandidate;
 use forge_sdp::{
     Attribute, Connection, DtlsAttributesExt, DtlsSetup, IceAttributesExt, MediaDescription,
@@ -96,8 +104,11 @@ pub struct LocalParams<'a> {
     pub cname: &'a str,
     /// Desired direction.
     pub direction: Direction,
-    /// Opus payload type we offer.
-    pub opus_pt: u8,
+    /// Codecs we offer (or are willing to answer with), in preference
+    /// order, each with the payload type we use when offering it. Only
+    /// [`AudioCodec::Opus`], [`AudioCodec::PCMU`] and [`AudioCodec::PCMA`]
+    /// are supported here.
+    pub codecs: &'a [(AudioCodec, u8)],
     /// telephone-event payload type we offer, if any.
     pub dtmf_pt: Option<u8>,
     /// `a=mid` for our audio section in an offer.
@@ -115,10 +126,16 @@ pub struct RemoteAudio {
     pub index: usize,
     /// `a=mid`, if present.
     pub mid: Option<String>,
-    /// Payload type the remote uses for Opus.
-    pub opus_pt: Option<u8>,
-    /// Payload type the remote uses for telephone-event.
-    pub dtmf_pt: Option<u8>,
+    /// Codecs the remote listed that we can speak (Opus, PCMU, PCMA), with
+    /// the remote's payload type for each, in the remote's `m=` format
+    /// order. Static payload types 0/8 are recognised without an `a=rtpmap`
+    /// line (RFC 3551 §6).
+    pub codecs: Vec<(AudioCodec, u8)>,
+    /// telephone-event payload types the remote listed, with their clock
+    /// rates, in `m=` format order. RFC 4733 clocks telephone-event at the
+    /// audio codec's rate, so browsers list one per distinct codec clock
+    /// (Chrome: `110 telephone-event/48000`, `126 telephone-event/8000`).
+    pub dtmf_pts: Vec<(u8, u32)>,
     /// Remote direction.
     pub direction: Direction,
     /// First `a=ssrc`, if present.
@@ -154,6 +171,38 @@ pub struct RemoteDescription {
     pub media: Vec<MediaDescription>,
     /// BUNDLE mids, in order.
     pub bundle: Vec<String>,
+}
+
+impl RemoteAudio {
+    /// The remote's payload type for `codec`, if it listed it.
+    pub fn pt_of(&self, codec: AudioCodec) -> Option<u8> {
+        self.codecs
+            .iter()
+            .find(|(c, _)| *c == codec)
+            .map(|&(_, pt)| pt)
+    }
+
+    /// The remote's telephone-event `(payload type, clock)` best matched to
+    /// `codec`: the one clocked at the codec's RTP rate (RFC 4733 §2.1),
+    /// falling back to whichever it listed first (mirrored at the remote's
+    /// own clock — never re-declared at a different one).
+    pub fn dtmf_for(&self, codec: AudioCodec) -> Option<(u8, u32)> {
+        let clock = codec.sample_rate();
+        self.dtmf_pts
+            .iter()
+            .find(|(_, c)| *c == clock)
+            .or_else(|| self.dtmf_pts.first())
+            .copied()
+    }
+}
+
+/// The first local preference the remote listed, with the **remote's**
+/// payload type (an answer must mirror the offer's payload types, RFC 3264
+/// §6.1). `None` means no codec in common.
+pub fn select_codec(prefs: &[(AudioCodec, u8)], remote: &RemoteAudio) -> Option<(AudioCodec, u8)> {
+    prefs
+        .iter()
+        .find_map(|&(c, _)| remote.pt_of(c).map(|pt| (c, pt)))
 }
 
 fn missing(what: &str) -> WebRtcError {
@@ -235,27 +284,43 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
 
     let audio = audio_index.map(|index| {
         let m = &desc.media[index];
-        let opus_pt = m
-            .rtpmaps
-            .values()
-            .find(|r| r.encoding_name.eq_ignore_ascii_case("opus"))
-            .map(|r| r.payload_type);
-        let mut dtmf: Vec<_> = m
-            .rtpmaps
-            .values()
-            .filter(|r| r.encoding_name.eq_ignore_ascii_case("telephone-event"))
-            .collect();
-        // Prefer the one clocked like Opus (RFC 4733 §2.1).
-        dtmf.sort_by_key(|r| if r.clock_rate == 48_000 { 0 } else { 1 });
-        let dtmf_pt = dtmf.first().map(|r| r.payload_type);
+        // Walk the m= format list in order (the remote's preference order,
+        // RFC 3264 §5.1), resolving each payload type through its rtpmap —
+        // or, absent one, through the RFC 3551 static assignments for
+        // G.711.
+        let mut codecs = Vec::new();
+        let mut dtmf_pts = Vec::new();
+        for f in &m.formats {
+            let Ok(pt) = f.parse::<u8>() else { continue };
+            match m.rtpmaps.get(&pt) {
+                Some(r) if r.encoding_name.eq_ignore_ascii_case("opus") => {
+                    codecs.push((AudioCodec::Opus, pt));
+                }
+                Some(r) if r.encoding_name.eq_ignore_ascii_case("pcmu") => {
+                    codecs.push((AudioCodec::PCMU, pt));
+                }
+                Some(r) if r.encoding_name.eq_ignore_ascii_case("pcma") => {
+                    codecs.push((AudioCodec::PCMA, pt));
+                }
+                Some(r) if r.encoding_name.eq_ignore_ascii_case("telephone-event") => {
+                    dtmf_pts.push((pt, r.clock_rate));
+                }
+                Some(_) => {}
+                None => match pt {
+                    0 => codecs.push((AudioCodec::PCMU, pt)),
+                    8 => codecs.push((AudioCodec::PCMA, pt)),
+                    _ => {}
+                },
+            }
+        }
         let ssrc = value_attr(&m.attributes, "ssrc")
             .and_then(|v| v.split(' ').next())
             .and_then(|v| v.parse().ok());
         RemoteAudio {
             index,
             mid: value_attr(&m.attributes, "mid").map(str::to_string),
-            opus_pt,
-            dtmf_pt,
+            codecs,
+            dtmf_pts,
             direction: direction_of(&m.attributes)
                 .or_else(|| direction_of(&desc.attributes))
                 .unwrap_or_default(),
@@ -306,35 +371,51 @@ fn advertised(candidates: &[IceCandidate]) -> (String, u16) {
         .unwrap_or_else(|| ("0.0.0.0".to_string(), 9))
 }
 
+/// The `a=rtpmap` encoding for a supported codec.
+fn rtpmap_of(codec: AudioCodec) -> (&'static str, u32, Option<&'static str>) {
+    match codec {
+        AudioCodec::Opus => ("opus", 48_000, Some("2")),
+        AudioCodec::PCMU => ("PCMU", 8_000, None),
+        AudioCodec::PCMA => ("PCMA", 8_000, None),
+        // LocalParams::codecs documents the supported set; peer.rs
+        // constructs it from the same enum, so this is unreachable
+        // without a code change here.
+        other => unreachable!("unsupported WebRTC codec {other:?}"),
+    }
+}
+
 fn audio_section(
     p: &LocalParams<'_>,
     port: u16,
     protocol: Protocol,
     mid: &str,
     direction: Direction,
-    opus_pt: u8,
-    dtmf_pt: Option<u8>,
+    codecs: &[(AudioCodec, u8)],
+    dtmf: Option<(u8, u32)>,
 ) -> MediaDescription {
     let mut media = MediaDescription::audio(port);
     media.protocol = protocol;
-    media.formats.push(SmolStr::new(opus_pt.to_string()));
-    media.rtpmaps.insert(
-        opus_pt,
-        forge_sdp::RtpMap {
-            payload_type: opus_pt,
-            encoding_name: SmolStr::new("opus"),
-            clock_rate: 48_000,
-            encoding_params: Some(SmolStr::new("2")),
-        },
-    );
-    if let Some(pt) = dtmf_pt {
+    for &(codec, pt) in codecs {
+        let (name, clock, params) = rtpmap_of(codec);
+        media.formats.push(SmolStr::new(pt.to_string()));
+        media.rtpmaps.insert(
+            pt,
+            forge_sdp::RtpMap {
+                payload_type: pt,
+                encoding_name: SmolStr::new(name),
+                clock_rate: clock,
+                encoding_params: params.map(SmolStr::new),
+            },
+        );
+    }
+    if let Some((pt, clock)) = dtmf {
         media.formats.push(SmolStr::new(pt.to_string()));
         media.rtpmaps.insert(
             pt,
             forge_sdp::RtpMap {
                 payload_type: pt,
                 encoding_name: SmolStr::new("telephone-event"),
-                clock_rate: 8_000,
+                clock_rate: clock,
                 encoding_params: None,
             },
         );
@@ -352,10 +433,16 @@ fn audio_section(
     push_value(a, "mid", mid.into());
     push_prop(a, direction.as_str());
     push_prop(a, "rtcp-mux");
-    push_value(a, "rtpmap", format!("{opus_pt} opus/48000/2"));
-    push_value(a, "fmtp", format!("{opus_pt} minptime=10;useinbandfec=1"));
-    if let Some(pt) = dtmf_pt {
-        push_value(a, "rtpmap", format!("{pt} telephone-event/8000"));
+    for &(codec, pt) in codecs {
+        let (name, clock, params) = rtpmap_of(codec);
+        let params = params.map(|p| format!("/{p}")).unwrap_or_default();
+        push_value(a, "rtpmap", format!("{pt} {name}/{clock}{params}"));
+        if codec == AudioCodec::Opus {
+            push_value(a, "fmtp", format!("{pt} minptime=10;useinbandfec=1"));
+        }
+    }
+    if let Some((pt, clock)) = dtmf {
+        push_value(a, "rtpmap", format!("{pt} telephone-event/{clock}"));
         push_value(a, "fmtp", format!("{pt} 0-16"));
     }
     if direction.sends() {
@@ -395,33 +482,47 @@ fn session(p: &LocalParams<'_>, bundle: &[&str], media: Vec<MediaDescription>) -
     forge_sdp::serialize::serialize_sdp(&sdp)
 }
 
-/// Build an SDP offer.
+/// Build an SDP offer carrying every codec in [`LocalParams::codecs`], in
+/// preference order. telephone-event, when offered, is clocked at the first
+/// (preferred) codec's rate (RFC 4733 §2.1).
 pub fn build_offer(p: &LocalParams<'_>) -> String {
     let (_, port) = advertised(p.candidates);
+    let dtmf = p.dtmf_pt.map(|pt| {
+        let clock = p
+            .codecs
+            .first()
+            .map(|&(c, _)| c.sample_rate())
+            .unwrap_or(8_000);
+        (pt, clock)
+    });
     let audio = audio_section(
         p,
         port,
         Protocol::UdpTlsRtpSavpf,
         p.mid,
         p.direction,
-        p.opus_pt,
-        p.dtmf_pt,
+        p.codecs,
+        dtmf,
     );
     session(p, &[p.mid], vec![audio])
 }
 
-/// Build an SDP answer to `remote`: accept the audio section (mirroring the
-/// remote's payload types, `mid` and protocol), reject everything else.
-pub fn build_answer(p: &LocalParams<'_>, remote: &RemoteDescription) -> Result<String> {
+/// Build an SDP answer to `remote`: accept the audio section with exactly
+/// one codec — the first local preference the remote offered, at the
+/// remote's payload type — and reject everything else. Returns the answer
+/// and the selected codec.
+pub fn build_answer(
+    p: &LocalParams<'_>,
+    remote: &RemoteDescription,
+) -> Result<(String, (AudioCodec, u8))> {
     let audio = remote
         .audio
         .as_ref()
         .ok_or_else(|| missing("audio section"))?;
-    let opus_pt = audio
-        .opus_pt
-        .ok_or(WebRtcError::SdpError(SdpError::NoCommonCodec))?;
-    let dtmf_pt = match p.dtmf_pt {
-        Some(_) => audio.dtmf_pt,
+    let selected =
+        select_codec(p.codecs, audio).ok_or(WebRtcError::SdpError(SdpError::NoCommonCodec))?;
+    let dtmf = match p.dtmf_pt {
+        Some(_) => audio.dtmf_for(selected.0),
         None => None,
     };
     let mid = audio.mid.clone().unwrap_or_else(|| "0".to_string());
@@ -433,8 +534,8 @@ pub fn build_answer(p: &LocalParams<'_>, remote: &RemoteDescription) -> Result<S
         audio.protocol.clone(),
         &mid,
         direction,
-        opus_pt,
-        dtmf_pt,
+        &[selected],
+        dtmf,
     );
 
     let mut media = Vec::with_capacity(remote.media.len());
@@ -468,7 +569,7 @@ pub fn build_answer(p: &LocalParams<'_>, remote: &RemoteDescription) -> Result<S
         push_prop(&mut rejected.attributes, "inactive");
         media.push(rejected);
     }
-    Ok(session(p, &[mid.as_str()], media))
+    Ok((session(p, &[mid.as_str()], media), selected))
 }
 
 #[cfg(test)]
@@ -535,7 +636,11 @@ a=fmtp:97 apt=96\r\n";
             ssrc: 42,
             cname: "forge",
             direction: Direction::SendRecv,
-            opus_pt: 111,
+            codecs: &[
+                (AudioCodec::Opus, 111),
+                (AudioCodec::PCMU, 0),
+                (AudioCodec::PCMA, 8),
+            ],
             dtmf_pt: Some(101),
             mid: "0",
             session_id: 1,
@@ -552,8 +657,22 @@ a=fmtp:97 apt=96\r\n";
         assert!(r.trickle);
         assert_eq!(r.candidates.len(), 1);
         let a = r.audio.as_ref().unwrap();
-        assert_eq!(a.opus_pt, Some(111));
-        assert_eq!(a.dtmf_pt, Some(110));
+        // Recognised codecs in the offer's m= order: opus 111, PCMU 0,
+        // PCMA 8 (G722 and CN are skipped; red is an unknown encoding).
+        assert_eq!(
+            a.codecs,
+            vec![
+                (AudioCodec::Opus, 111),
+                (AudioCodec::PCMU, 0),
+                (AudioCodec::PCMA, 8),
+            ]
+        );
+        assert_eq!(a.pt_of(AudioCodec::Opus), Some(111));
+        // Both telephone-event clocks, in m= order; matching picks by the
+        // codec's clock.
+        assert_eq!(a.dtmf_pts, vec![(110, 48_000), (126, 8_000)]);
+        assert_eq!(a.dtmf_for(AudioCodec::Opus), Some((110, 48_000)));
+        assert_eq!(a.dtmf_for(AudioCodec::PCMU), Some((126, 8_000)));
         assert_eq!(a.mid.as_deref(), Some("0"));
         assert_eq!(a.direction, Direction::SendRecv);
         assert_eq!(a.ssrc, Some(3735928559));
@@ -574,12 +693,16 @@ a=fmtp:97 apt=96\r\n";
         )];
         let mut p = local(&cands);
         p.direction = Direction::RecvOnly;
-        let answer = build_answer(&p, &r).unwrap();
+        let (answer, selected) = build_answer(&p, &r).unwrap();
+        // Opus is our first preference and the offer has it; the answer's
+        // telephone-event mirrors the 48 kHz-clocked one (110, not 126).
+        assert_eq!(selected, (AudioCodec::Opus, 111));
         assert!(answer.contains("a=group:BUNDLE 0\r\n"), "{answer}");
         assert!(
             answer.contains("m=audio 40000 UDP/TLS/RTP/SAVPF 111 110\r\n"),
             "{answer}"
         );
+        assert!(answer.contains("a=rtpmap:110 telephone-event/48000\r\n"));
         assert!(
             answer.contains("m=video 0 UDP/TLS/RTP/SAVPF 96 97\r\n"),
             "{answer}"
@@ -591,7 +714,7 @@ a=fmtp:97 apt=96\r\n";
         assert!(answer.contains("a=candidate:1 1 UDP"));
         // The answer parses back as a remote description with one audio section.
         let back = parse_remote(&answer).unwrap();
-        assert_eq!(back.audio.unwrap().opus_pt, Some(111));
+        assert_eq!(back.audio.unwrap().pt_of(AudioCodec::Opus), Some(111));
         assert_eq!(back.media.len(), 2);
     }
 
@@ -600,9 +723,18 @@ a=fmtp:97 apt=96\r\n";
         let p = local(&[]);
         let offer = build_offer(&p);
         assert!(
-            offer.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111 101\r\n"),
+            offer.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111 0 8 101\r\n"),
             "{offer}"
         );
+        assert!(offer.contains("a=rtpmap:111 opus/48000/2\r\n"));
+        assert!(offer.contains("a=rtpmap:0 PCMU/8000\r\n"));
+        assert!(offer.contains("a=rtpmap:8 PCMA/8000\r\n"));
+        // telephone-event clocked at the preferred codec's rate.
+        assert!(offer.contains("a=rtpmap:101 telephone-event/48000\r\n"));
+        // fmtp only for Opus (and the telephone-event event range).
+        assert!(offer.contains("a=fmtp:111 minptime=10;useinbandfec=1\r\n"));
+        assert!(!offer.contains("a=fmtp:0 "));
+        assert!(!offer.contains("a=fmtp:8 "));
         assert!(offer.contains("c=IN IP4 0.0.0.0\r\n"));
         assert!(offer.contains("a=rtcp:9 IN IP4 0.0.0.0\r\n"));
         assert!(offer.contains("a=ice-options:trickle\r\n"));
@@ -633,13 +765,68 @@ a=fmtp:97 apt=96\r\n";
     }
 
     #[test]
-    fn rejects_offer_without_opus() {
+    fn offer_without_opus_falls_back_to_g711() {
+        // G.711 is mandatory-to-implement in WebRTC (RFC 7874 §3), so an
+        // offer without Opus is still answerable — this used to be a
+        // NoCommonCodec rejection.
         let sdp = CHROME_OFFER.replace("a=rtpmap:111 opus/48000/2\r\n", "");
+        let r = parse_remote(&sdp).unwrap();
+        let p = local(&[]);
+        let (answer, selected) = build_answer(&p, &r).unwrap();
+        assert_eq!(selected, (AudioCodec::PCMU, 0));
+        // Single selected codec plus the 8 kHz-clocked telephone-event.
+        assert!(
+            answer.contains("m=audio 9 UDP/TLS/RTP/SAVPF 0 126\r\n"),
+            "{answer}"
+        );
+        assert!(answer.contains("a=rtpmap:0 PCMU/8000\r\n"));
+        assert!(answer.contains("a=rtpmap:126 telephone-event/8000\r\n"));
+    }
+
+    #[test]
+    fn g711_preference_wins_over_offered_opus() {
+        // A bridge matching a G.711 SIP leg prefers PCMA to skip
+        // transcoding; the browser offered Opus but our preference decides.
+        let r = parse_remote(CHROME_OFFER).unwrap();
+        let mut p = local(&[]);
+        p.codecs = &[(AudioCodec::PCMA, 8), (AudioCodec::Opus, 111)];
+        let (answer, selected) = build_answer(&p, &r).unwrap();
+        assert_eq!(selected, (AudioCodec::PCMA, 8));
+        assert!(
+            answer.contains("m=audio 9 UDP/TLS/RTP/SAVPF 8 126\r\n"),
+            "{answer}"
+        );
+    }
+
+    #[test]
+    fn rejects_offer_with_no_common_codec() {
+        // Strip every codec we speak; G722/CN/red remain but none is ours.
+        let sdp = CHROME_OFFER
+            .replace("a=rtpmap:111 opus/48000/2\r\n", "")
+            .replace("a=rtpmap:0 PCMU/8000\r\n", "")
+            .replace("a=rtpmap:8 PCMA/8000\r\n", "")
+            .replace(
+                "m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126\r\n",
+                "m=audio 9 UDP/TLS/RTP/SAVPF 111 63 9 13 110 126\r\n",
+            );
         let r = parse_remote(&sdp).unwrap();
         let p = local(&[]);
         assert!(matches!(
             build_answer(&p, &r),
             Err(WebRtcError::SdpError(SdpError::NoCommonCodec))
         ));
+    }
+
+    #[test]
+    fn static_g711_payload_types_need_no_rtpmap() {
+        // RFC 3551 §6: static assignments may be listed with no a=rtpmap.
+        // This is the shape a SIP-side gateway's offer often has.
+        let sdp = CHROME_OFFER
+            .replace("a=rtpmap:0 PCMU/8000\r\n", "")
+            .replace("a=rtpmap:8 PCMA/8000\r\n", "");
+        let r = parse_remote(&sdp).unwrap();
+        let a = r.audio.as_ref().unwrap();
+        assert_eq!(a.pt_of(AudioCodec::PCMU), Some(0));
+        assert_eq!(a.pt_of(AudioCodec::PCMA), Some(8));
     }
 }

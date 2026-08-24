@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`forge-webrtc` negotiates G.711 (PCMU/PCMA) alongside Opus.** G.711 is mandatory-to-implement in WebRTC (RFC 7874 §3), so every browser accepts it — a bridge terminating a G.711 SIP leg can now prefer it on the browser leg and skip transcoding entirely (filed from siphon-ai's `DEV_PLAN_WebRTC.md` §1, which ships Opus-transcode-first and named this the upstream optimization). `PeerConfig::codecs` replaces `PeerConfig::opus_pt`: a preference-ordered `Vec<(AudioCodec, u8)>` (default `[(Opus, 111), (PCMU, 0), (PCMA, 8)]` — Opus stays first, so existing behaviour against a browser is unchanged). Offers list every configured codec; an answer accepts exactly **one** — the first local preference the remote offered, at the remote's payload type — so the negotiated codec is pinned deterministically, and `PeerConnection::negotiated_codec()` / `AudioSender::codec()` (replacing `negotiated_opus_pt()`) report it from both directions of the handshake. Static payload types 0/8 are recognised with no `a=rtpmap` line (RFC 3551 §6), the shape SIP-gateway offers often have.
+
+  Two telephone-event fixes ride along, both consequences of codecs no longer all being 48 kHz: answers now mirror the remote's telephone-event payload type **clock-matched to the selected codec** (RFC 4733 §2.1 — Chrome's `126 telephone-event/8000` for a G.711 answer, `110/48000` for Opus; previously the 48 kHz one was always picked and re-declared at 8 kHz), and offers clock telephone-event at the preferred codec's rate instead of hardcoding 8 kHz. An offer that omits Opus but carries G.711 — previously a `NoCommonCodec` rejection — now answers G.711.
+
 ### Changed
 
 - **`forge-vad` depends on `forge-core`, and its two `ForgeEvent::Speech*` references are live intra-doc links again.** [#122](https://github.com/thevoiceguy/forge-media/pull/122) made them plain code spans because the dependency was absent; this adds it and restores the links. The dependency is types-only — the crate still never constructs or publishes an event, `VadDetector::process` returns a `(VadState, f32)` and `forge-engine`'s forwarding loop is what maps transitions onto `ForgeEvent::SpeechStarted` / `SpeechStopped`.

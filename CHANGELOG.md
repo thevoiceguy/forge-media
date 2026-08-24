@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-08-24] — workspace release
+
+**The first tagged release** (`v2026.08.24`), cut under the conventions in
+`RELEASING.md` (adopted from siphon-rs): CalVer tags name repository
+snapshots, SemVer lives per-crate. This section accumulates everything since
+the last dated sections below (2025-12) — the SRTP/STUN correctness arc that
+made forge interoperate with real carriers and browsers, the metrics
+overhaul, neural VAD, the endpoint-shaped WebRTC `PeerConnection` with TURN
+and G.711, and the RTP port-pool reservation band.
+
+**Embeds siphon-rs `v2026.08.24`** (`external/siphon-rs` submodule).
+
+**Crate versions:** forge-api 0.4.0 · forge-ai-stream 0.2.0 ·
+bcg729-sys 0.1.0 · forge-codecs 0.2.0 · forge-conference 0.3.1 ·
+forge-core 0.2.0 · forge-dtmf 0.2.1 · forge-engine 0.5.0 · forge-ha 0.2.0 ·
+forge-hep 0.0.1 · **forge-ice 0.3.0** · forge-injection 0.1.1 ·
+forge-kernel 0.2.0 · forge-kernel-ebpf 0.2.0 · forge-mixer 0.2.0 ·
+forge-recorder 0.2.0 · forge-resampler 0.1.1 · **forge-rtp 0.3.0** ·
+forge-sdp 0.2.0 · forge-siprec 0.2.1 · forge-storage 0.2.0 ·
+forge-transcoder 0.2.0 · forge-transcription 0.2.0 · forge-vad 0.2.0 ·
+**forge-webrtc 0.4.0** · forge-media (standalone server) 0.2.0.
+Bold = bumped at this release cut by audit; the rest are as stamped by the
+PRs that landed their work (baseline release — the strict per-crate audit
+discipline applies from the next release).
+
+**Breaking changes:**
+
+- **forge-webrtc 0.4.0** ([#130](https://github.com/thevoiceguy/forge-media/pull/130)):
+  `PeerConfig::opus_pt` → `PeerConfig::codecs` (preference-ordered
+  `Vec<(AudioCodec, u8)>`); `negotiated_opus_pt()` →
+  `negotiated_codec()`. Also from earlier in this release's arc
+  ([#116](https://github.com/thevoiceguy/forge-media/pull/116)): the
+  `PeerConnection` API was rebuilt endpoint-shaped (JSEP-style
+  offer/answer both roles, events, `AudioSender`).
+- **forge-rtp 0.3.0**: `SenderReport::parse` / `ReceiverReport::parse` now
+  take an explicit `report_count: u8` (the compound-RTCP fix below); no
+  callers outside `RtcpPacket::parse` were known.
+- **forge-ice 0.3.0**: additive TURN/STUN API, but `StunMessage` is now
+  constructed only through its constructors (raw bytes are private).
+- **forge-engine 0.5.0 / forge-vad 0.2.0** (stamped when the work landed):
+  engine-level `VadConfig.detector` → `VadConfig.engine`
+  (`forge_vad::VadEngineConfig`), and `MediaSession::vad_detector()` returns
+  `Arc<Mutex<AnyVadDetector>>` (see the neural-VAD entry below).
+
 ### Added
 
 - **`forge-webrtc` negotiates G.711 (PCMU/PCMA) alongside Opus.** G.711 is mandatory-to-implement in WebRTC (RFC 7874 §3), so every browser accepts it — a bridge terminating a G.711 SIP leg can now prefer it on the browser leg and skip transcoding entirely (filed from siphon-ai's `DEV_PLAN_WebRTC.md` §1, which ships Opus-transcode-first and named this the upstream optimization). `PeerConfig::codecs` replaces `PeerConfig::opus_pt`: a preference-ordered `Vec<(AudioCodec, u8)>` (default `[(Opus, 111), (PCMU, 0), (PCMA, 8)]` — Opus stays first, so existing behaviour against a browser is unchanged). Offers list every configured codec; an answer accepts exactly **one** — the first local preference the remote offered, at the remote's payload type — so the negotiated codec is pinned deterministically, and `PeerConnection::negotiated_codec()` / `AudioSender::codec()` (replacing `negotiated_opus_pt()`) report it from both directions of the handshake. Static payload types 0/8 are recognised with no `a=rtpmap` line (RFC 3551 §6), the shape SIP-gateway offers often have.
@@ -23,7 +67,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **CI's "Check for broken links" step never checked anything, and eleven unresolved intra-doc links had accumulated behind it.** The step ran `cargo doc … | grep -i "warning.*broken" && exit 1 || exit 0`, but rustdoc's wording is `unresolved link to \`Foo\`` — "broken" appears only in the lint's *name*, which is not printed on the warning line. The grep therefore never matched, `|| exit 0` swallowed the result, and the job passed unconditionally. It now denies the lint by name (`RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links"`), which is what the step was always trying to express and reports against the offending line instead of re-deriving it from stderr. The step is also scoped to workspace-owned packages the way the fmt/clippy/test jobs already are, since `--workspace` documents the `external/siphon-rs` submodule and its doc warnings are governed separately.
 
-  The eleven links this uncovered are fixed: associated-item and method links that needed a `Self::` / type qualifier (`RecordingSession::MAX_METADATA_BYTES`, `SessionRecordingClient`'s `forward_rtp` / `mute_participant` / `unmute_participant`, `FileSource`'s `open_in_sandbox` ×2, `MediaSession::enable_dtls` ×2), and `crate::ForwardingEngine` from a module-level doc in another file. The two `forge_core::ForgeEvent::Speech*` links in `forge-vad` become plain code spans instead. Adding the dependency would work — `forge-core` has no `forge-*` dependencies, so there is no cycle and no AI provider comes with it — but the crate was carved out of `forge-ai-stream` precisely so provider-neutral consumers could use VAD without inheriting a dependency tree, with "zero non-`thiserror` dependencies" called out as a property of the extraction. It also never publishes events: `VadDetector::process` returns `(VadState, f32)` and `forge-engine`'s forwarding loop is what maps transitions onto `ForgeEvent::SpeechStarted` / `SpeechStopped`, so `forge-core`'s types never appear in its API and the sentence is describing a consumer's behaviour rather than its own. (`forge-dtmf` does depend on `forge-core`, because it constructs the event itself via `to_forge_event` — the split tracks who builds the event.)
+  The eleven links this uncovered are fixed: associated-item and method links that needed a `Self::` / type qualifier (`RecordingSession::MAX_METADATA_BYTES`, `SessionRecordingClient`'s `forward_rtp` / `mute_participant` / `unmute_participant`, `FileSource`'s `open_in_sandbox` ×2, `MediaSession::enable_dtls` ×2), and `crate::ForwardingEngine` from a module-level doc in another file. *(Backfilled entries below this line were added at the release cut.)*
+
+### Added
+
+- **`forge-ice`: TURN client (RFC 8656)** — long-term-credential allocation, permissions, and relay candidates for un-punchable NATs ([#119](https://github.com/thevoiceguy/forge-media/pull/119)); **`forge-webrtc` carries media over TURN relay candidates end to end** ([#121](https://github.com/thevoiceguy/forge-media/pull/121)), with `TurnServer` config on the transport and a live-server integration test (`tests/turn_relay.rs`, gated on `FORGE_TURN_URI/USER/PASS`).
+
+### Dependencies
+
+- siphon-rs submodule: `v2026.08.19` → `v2026.08.24` ([#115](https://github.com/thevoiceguy/forge-media/pull/115), [#129](https://github.com/thevoiceguy/forge-media/pull/129)). Routine bumps: `redis` 0.24 → 1.2 ([#107](https://github.com/thevoiceguy/forge-media/pull/107)), `tokio-tungstenite` 0.21 → 0.29, `validator` 0.20 → 0.21 ([#110](https://github.com/thevoiceguy/forge-media/pull/110)), `h2` 0.4.16 + dropped forge-ai-stream's unused `reqwest` 0.11 for RUSTSEC-2026-0258 ([#114](https://github.com/thevoiceguy/forge-media/pull/114)), and a patch-updates group ([#113](https://github.com/thevoiceguy/forge-media/pull/113)). The two `forge_core::ForgeEvent::Speech*` links in `forge-vad` become plain code spans instead. Adding the dependency would work — `forge-core` has no `forge-*` dependencies, so there is no cycle and no AI provider comes with it — but the crate was carved out of `forge-ai-stream` precisely so provider-neutral consumers could use VAD without inheriting a dependency tree, with "zero non-`thiserror` dependencies" called out as a property of the extraction. It also never publishes events: `VadDetector::process` returns `(VadState, f32)` and `forge-engine`'s forwarding loop is what maps transitions onto `ForgeEvent::SpeechStarted` / `SpeechStopped`, so `forge-core`'s types never appear in its API and the sentence is describing a consumer's behaviour rather than its own. (`forge-dtmf` does depend on `forge-core`, because it constructs the event itself via `to_forge_event` — the split tracks who builds the event.)
 
 ### Added
 

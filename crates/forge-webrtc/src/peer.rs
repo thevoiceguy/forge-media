@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use forge_core::AudioCodec;
 use forge_ice::IceCandidate;
 use forge_rtp::dtls::{DtlsCertificate, DtlsRole};
 use forge_sdp::DtlsSetup;
@@ -71,8 +72,14 @@ pub struct PeerConfig {
     pub stun_servers: Vec<String>,
     /// Direction we want for the audio section.
     pub direction: Direction,
-    /// Opus payload type in our offers (answers mirror the remote's).
-    pub opus_pt: u8,
+    /// Codecs we offer (or are willing to answer with), in preference
+    /// order, with the payload type used when offering each. Answers pick
+    /// the first entry the remote offered and mirror the remote's payload
+    /// type. Supported: [`AudioCodec::Opus`], [`AudioCodec::PCMU`],
+    /// [`AudioCodec::PCMA`] — G.711 is mandatory-to-implement in WebRTC
+    /// (RFC 7874 §3), so preferring it over Opus lets a bridge match a
+    /// G.711 SIP leg and skip transcoding.
+    pub codecs: Vec<(AudioCodec, u8)>,
     /// Offer telephone-event (RFC 4733) as well.
     pub dtmf: bool,
     /// Transport tunables.
@@ -84,7 +91,11 @@ impl Default for PeerConfig {
         Self {
             stun_servers: vec![],
             direction: Direction::SendRecv,
-            opus_pt: 111,
+            codecs: vec![
+                (AudioCodec::Opus, 111),
+                (AudioCodec::PCMU, 0),
+                (AudioCodec::PCMA, 8),
+            ],
             dtmf: true,
             transport: TransportConfig::default(),
         }
@@ -109,6 +120,9 @@ pub struct PeerConnection {
     session_version: u64,
     ssrc: u32,
     cname: String,
+    /// The codec pinned by offer/answer (with the payload type the remote
+    /// expects), once negotiation completed.
+    negotiated: Option<(AudioCodec, u8)>,
     audio_ts: Arc<AtomicU32>,
     audio_started: Arc<AtomicBool>,
 }
@@ -150,6 +164,7 @@ impl PeerConnection {
             session_id,
             session_version: 0,
             ssrc,
+            negotiated: None,
             audio_ts: Arc::new(AtomicU32::new((rnd >> 32) as u32)),
             audio_started: Arc::new(AtomicBool::new(false)),
         })
@@ -185,7 +200,7 @@ impl PeerConnection {
             ssrc: self.ssrc,
             cname: &self.cname,
             direction: self.cfg.direction,
-            opus_pt: self.cfg.opus_pt,
+            codecs: &self.cfg.codecs,
             dtmf_pt: if self.cfg.dtmf { Some(101) } else { None },
             mid: "0",
             session_id: self.session_id,
@@ -292,13 +307,14 @@ impl PeerConnection {
         let creds = t.local_credentials();
         let candidates = t.local_candidates();
         self.session_version += 1;
-        let answer =
+        let (answer, selected) =
             sdp::build_answer(&self.local_params(&t, &creds, &candidates, setup), &remote)?;
+        self.negotiated = Some(selected);
         self.local_sdp = Some(answer.clone());
         self.signaling = SignalingState::Stable;
         debug!(
-            "{}: created answer v{}",
-            self.connection_id, self.session_version
+            "{}: created answer v{} ({:?} pt {})",
+            self.connection_id, self.session_version, selected.0, selected.1
         );
         Ok(answer)
     }
@@ -324,11 +340,15 @@ impl PeerConnection {
                 )))
             }
         };
-        if remote.audio.is_none() {
+        let Some(audio) = remote.audio.as_ref() else {
             return Err(WebRtcError::SdpError(forge_sdp::SdpError::Internal(
                 "answer rejected the audio section".into(),
             )));
-        }
+        };
+        // The answer pins the codec: the first of our preferences it
+        // accepted (a conformant answer only lists codecs we offered).
+        let selected = sdp::select_codec(&self.cfg.codecs, audio)
+            .ok_or(WebRtcError::SdpError(forge_sdp::SdpError::NoCommonCodec))?;
         t.set_remote(
             &remote.ufrag,
             &remote.pwd,
@@ -338,6 +358,7 @@ impl PeerConnection {
         )?;
         self.remote_sdp = Some(sdp.to_string());
         self.remote = Some(remote);
+        self.negotiated = Some(selected);
         self.local_sdp = self.pending_local_sdp.take();
         self.signaling = SignalingState::Stable;
         Ok(())
@@ -414,22 +435,27 @@ impl PeerConnection {
             .transport
             .clone()
             .ok_or_else(|| WebRtcError::InvalidState("no transport yet".into()))?;
+        let (codec, payload_type) = self.negotiated_codec();
         Ok(AudioSender {
             transport: t,
-            payload_type: self.negotiated_opus_pt(),
+            codec,
+            payload_type,
             timestamp: self.audio_ts.clone(),
             started: self.audio_started.clone(),
         })
     }
 
-    /// Payload type the peer expects for Opus: the one in the remote
-    /// description (an answer mirrors our offer, so both agree).
-    pub fn negotiated_opus_pt(&self) -> u8 {
-        self.remote
-            .as_ref()
-            .and_then(|r| r.audio.as_ref())
-            .and_then(|a| a.opus_pt)
-            .unwrap_or(self.cfg.opus_pt)
+    /// The codec pinned by offer/answer, with the payload type the remote
+    /// expects for it. Before negotiation completes this falls back to the
+    /// first configured preference.
+    pub fn negotiated_codec(&self) -> (AudioCodec, u8) {
+        self.negotiated.unwrap_or_else(|| {
+            self.cfg
+                .codecs
+                .first()
+                .copied()
+                .unwrap_or((AudioCodec::Opus, 111))
+        })
     }
 
     // ------------------------------------------------------------ accessors
@@ -509,6 +535,7 @@ impl Drop for PeerConnection {
 #[derive(Clone)]
 pub struct AudioSender {
     transport: Transport,
+    codec: AudioCodec,
     payload_type: u8,
     timestamp: Arc<AtomicU32>,
     started: Arc<AtomicBool>,
@@ -516,14 +543,25 @@ pub struct AudioSender {
 
 impl AudioSender {
     /// Send one encoded frame covering `samples` samples at the codec clock
-    /// (Opus: 48 kHz, so a 20 ms frame is 960). The RTP marker bit is set on
-    /// the first packet of the stream.
+    /// (a 20 ms frame is 960 for Opus at 48 kHz, 160 for PCMU/PCMA at
+    /// 8 kHz — see [`AudioSender::samples_per_20ms`]). The RTP marker bit
+    /// is set on the first packet of the stream.
     pub async fn send_audio(&self, frame: Bytes, samples: u32) -> Result<()> {
         let ts = self.timestamp.fetch_add(samples, Ordering::SeqCst);
         let marker = !self.started.swap(true, Ordering::SeqCst);
         self.transport
             .send_rtp(self.payload_type, marker, ts, frame)
             .await
+    }
+
+    /// The negotiated codec this sender's frames must be encoded with.
+    pub fn codec(&self) -> AudioCodec {
+        self.codec
+    }
+
+    /// The `samples` value for a 20 ms frame of the negotiated codec.
+    pub fn samples_per_20ms(&self) -> u32 {
+        self.codec.sample_rate() / 50
     }
 
     /// Send a raw RTP payload with an explicit payload type and timestamp

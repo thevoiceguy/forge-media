@@ -125,12 +125,20 @@ async fn offer_answer_trickle_dtls_srtp_both_ways() {
     init_tracing();
     let (caller, callee, mut caller_events, mut callee_events) = connect_pair().await;
 
-    // Both sides negotiated Opus on PT 111 (answer mirrors the offer).
-    assert_eq!(caller.negotiated_opus_pt(), 111);
-    assert_eq!(callee.negotiated_opus_pt(), 111);
+    // Both sides negotiated Opus on PT 111 (first preference on both
+    // sides; the answer mirrors the offer).
+    assert_eq!(
+        caller.negotiated_codec(),
+        (forge_webrtc::AudioCodec::Opus, 111)
+    );
+    assert_eq!(
+        callee.negotiated_codec(),
+        (forge_webrtc::AudioCodec::Opus, 111)
+    );
 
     let a = caller.sender().unwrap();
     let b = callee.sender().unwrap();
+    assert_eq!(a.samples_per_20ms(), 960);
     // Pretend Opus frames (the SRTP path does not care about the codec).
     for i in 0..5u8 {
         a.send_audio(Bytes::from(vec![0xf8, i, 1, 2, 3]), 960)
@@ -241,4 +249,67 @@ async fn rejected_reoffer_rolls_back_cleanly() {
     expect_rtp(&mut callee_events, &[7, 7]).await;
     caller.close();
     assert_eq!(caller.get_state(), ConnectionState::Closed);
+}
+
+#[tokio::test]
+async fn g711_preferring_callee_pins_pcmu_end_to_end() {
+    init_tracing();
+    // The bridge-matching-a-G.711-SIP-leg shape: the answering side
+    // prefers PCMU, the offering side has browser-like defaults
+    // (Opus first, G.711 after — G.711 is mandatory-to-implement in
+    // WebRTC, so every real browser offers it too).
+    let mut caller = PeerConnection::new(vec![]).await.unwrap();
+    let mut callee = PeerConnection::with_config(PeerConfig {
+        codecs: vec![(forge_webrtc::AudioCodec::PCMU, 0)],
+        ..PeerConfig::default()
+    })
+    .await
+    .unwrap();
+
+    let offer = caller.create_offer().await.unwrap();
+    let (mut caller_cands, mut caller_events) = pump(caller.take_events().unwrap(), "caller");
+    callee.set_remote_offer(&offer).await.unwrap();
+    let answer = callee.create_answer().await.unwrap();
+    assert!(answer.contains("a=rtpmap:0 PCMU/8000\r\n"), "{answer}");
+    let (mut callee_cands, mut callee_events) = pump(callee.take_events().unwrap(), "callee");
+    caller.set_remote_answer(&answer).await.unwrap();
+
+    // Both ends resolved the same codec from opposite directions: the
+    // callee picked it building the answer, the caller reading it.
+    assert_eq!(
+        callee.negotiated_codec(),
+        (forge_webrtc::AudioCodec::PCMU, 0)
+    );
+    assert_eq!(
+        caller.negotiated_codec(),
+        (forge_webrtc::AudioCodec::PCMU, 0)
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !(caller.get_state() == ConnectionState::Connected
+        && callee.get_state() == ConnectionState::Connected)
+    {
+        tokio::select! {
+            Some(c) = caller_cands.recv() => callee.add_ice_candidate(c).await.unwrap(),
+            Some(c) = callee_cands.recv() => caller.add_ice_candidate(c).await.unwrap(),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+    }
+
+    let a = caller.sender().unwrap();
+    let b = callee.sender().unwrap();
+    // 20 ms of G.711 is 160 samples at the 8 kHz clock.
+    assert_eq!(a.samples_per_20ms(), 160);
+    assert_eq!(b.codec(), forge_webrtc::AudioCodec::PCMU);
+    a.send_audio(Bytes::from_static(&[0x7f, 1, 2]), 160)
+        .await
+        .unwrap();
+    b.send_audio(Bytes::from_static(&[0x7e, 3, 4]), 160)
+        .await
+        .unwrap();
+    let at_callee = expect_rtp(&mut callee_events, &[0x7f, 1, 2]).await;
+    let at_caller = expect_rtp(&mut caller_events, &[0x7e, 3, 4]).await;
+    assert_eq!(at_callee.header.payload_type(), 0);
+    assert_eq!(at_caller.header.payload_type(), 0);
 }

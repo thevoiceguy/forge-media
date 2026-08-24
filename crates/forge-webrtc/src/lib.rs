@@ -7,9 +7,10 @@
 //!   to the signalled SDP; both `a=setup` roles
 //! - SRTP/SRTCP (RFC 3711, RFC 7714) with keys installed straight from the
 //!   DTLS export — no engine session required
-//! - SDP offer **and** answer (RFC 3264, RFC 8829), one audio section (Opus),
-//!   BUNDLE + rtcp-mux; renegotiation on the same transport (re-offer and
-//!   rollback); ICE restart deliberately unsupported
+//! - SDP offer **and** answer (RFC 3264, RFC 8829), one audio section —
+//!   Opus and G.711 (PCMU/PCMA), preference-ordered via
+//!   [`PeerConfig::codecs`] — BUNDLE + rtcp-mux; renegotiation on the same
+//!   transport (re-offer and rollback); ICE restart deliberately unsupported
 //!
 //! # Example
 //! ```no_run
@@ -47,6 +48,7 @@ pub mod peer;
 pub mod sdp;
 pub mod transport;
 
+pub use forge_core::AudioCodec;
 pub use forge_ice::{IceCandidate, TurnServer};
 pub use peer::{
     AudioSender, ConnectionState, PeerConfig, PeerConnection, PeerEvent, SignalingState,

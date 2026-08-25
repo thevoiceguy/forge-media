@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-08-25] — workspace release
+
+**A crash fix.** One reordered RTP packet could abort the process via a stack overflow in
+`JitterBuffer::pop`. **No released consumer was affected** — the buffer is exported but was used
+nowhere in forge-media or siphon-ai — but anything about to consume it (siphon-ai's WebRTC media leg
+is the first) wants this release rather than `v2026.08.24`.
+
+**Embeds siphon-rs `v2026.08.24`** (`external/siphon-rs`), unchanged from the previous release: forge
+consumes only `sip-sdp` from the submodule, and that crate is identical in siphon-rs `v2026.08.25`, so
+there was nothing to gain from moving it. A downstream pinning siphon-rs directly may sit on the newer
+tag without divergence on the media path.
+
+**Crate versions:** **forge-rtp 0.3.1**. (forge-api 0.4.0, forge-ai-stream 0.2.0, bcg729-sys 0.1.0,
+forge-codecs 0.2.0, forge-conference 0.3.1, forge-core 0.2.0, forge-dtmf 0.2.1, forge-engine 0.5.0,
+forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0,
+forge-kernel-ebpf 0.2.0, forge-mixer 0.2.0, forge-recorder 0.2.0, forge-resampler 0.1.1,
+forge-sdp 0.2.0, forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder 0.2.0,
+forge-transcription 0.2.0, forge-vad 0.2.0, forge-webrtc 0.4.0, forge-media 0.2.0 unchanged.)
+
+**Breaking changes:** none.
+
 ### Fixed
 
 - **`forge-rtp`: one reordered RTP packet crashed the process (stack overflow).** `JitterBuffer::pop`'s

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`forge-rtp`: one reordered RTP packet crashed the process (stack overflow).** `JitterBuffer::pop`'s
+  missing-packet branch recursed into itself after advancing the expected sequence number by one. A late
+  arrival — a packet whose sequence is *behind* what the buffer is waiting for — stays in the map where
+  `packets.get(&next_seq)` cannot see it, but it *is* what `packets.iter().next()` returns, and
+  `sequence_distance` is an unsigned `wrapping_sub`, so the distance from `next_seq` back to it reads as a
+  ~65000-packet **forward** gap. That satisfied the `gap > 10` skip rule, which advanced by one and
+  recursed, ~65k frames deep, until the stack was gone and the process took `SIGABRT`. Packet reordering
+  is ordinary on any internet path, so this needed no attacker — just a normal network.
+
+  `pop` is now a bounded loop rather than recursion (so a pathological gap costs iterations, not the
+  stack), and the root cause is fixed separately: packets older than `next_seq` are dropped up front,
+  since their playout moment has passed and they can never be returned. They are counted in
+  `packets_dropped`. Three regression tests cover the single late packet, several late packets with a
+  live stream continuing behind them, and a wide forward gap being skipped promptly.
+
+  **No released consumer was affected**: `JitterBuffer` is exported but nothing in forge-media or
+  siphon-ai used it — the bug was found by siphon-ai's WebRTC leg (`DEV_PLAN_WebRTC.md` Phase 2), which
+  is its first consumer and reuses it rather than writing a fourth reorder queue.
+
 ## [2026-08-24] — workspace release
 
 **The first tagged release** (`v2026.08.24`), cut under the conventions in

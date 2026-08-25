@@ -112,44 +112,70 @@ impl JitterBuffer {
     /// - The next expected packet is available
     /// - The packet has been in the buffer for at least `target_delay`
     pub fn pop(&mut self) -> Option<Vec<u8>> {
-        let next_seq = self.next_seq?;
-        let _base_time = self.base_time?;
+        self.base_time?;
         let now = Instant::now();
 
-        // Check if we have the next expected packet
-        if let Some(packet) = self.packets.get(&next_seq) {
-            // Check if packet has been buffered long enough
-            let buffered_time = now.duration_since(packet.received_at);
+        // Discard arrivals whose playout slot has already passed. A
+        // late packet left in the map is invisible to the `get`
+        // below (it is behind `next_seq`) but *is* what
+        // `packets.iter().next()` returns, and the unsigned distance
+        // from `next_seq` back to it reads as a ~65000-packet forward
+        // gap — which used to drive the skip branch one sequence
+        // number at a time, forever. One reordered packet was enough.
+        self.drop_stale(self.next_seq);
 
-            if buffered_time >= self.target_delay {
-                // Remove and return the packet
-                let packet = self.packets.remove(&next_seq).unwrap();
+        // Bounded: each iteration either returns or advances
+        // `next_seq` past one missing packet, and the buffer holds at
+        // most MAX_BUFFER_SIZE packets to advance towards. Written as
+        // a loop rather than recursion — the recursive form overflowed
+        // the stack rather than merely spinning.
+        loop {
+            let next_seq = self.next_seq?;
 
-                // Update next expected sequence
+            // The packet we are waiting for, held long enough?
+            if let Some(packet) = self.packets.get(&next_seq) {
+                if now.duration_since(packet.received_at) < self.target_delay {
+                    return None;
+                }
+                let packet = self
+                    .packets
+                    .remove(&next_seq)
+                    .expect("presence checked immediately above");
                 self.next_seq = Some(Self::next_sequence(next_seq));
-
                 return Some(packet.data);
             }
-        } else {
-            // Missing packet - check if we should skip it
-            // If the next packet in the buffer is much newer, skip the missing one
-            if let Some((&oldest_seq, oldest_packet)) = self.packets.iter().next() {
-                let gap = Self::sequence_distance(next_seq, oldest_seq);
-                let buffered_time = now.duration_since(oldest_packet.received_at);
 
-                // If gap is large or we've waited too long, skip the missing packet
-                if gap > 10 || buffered_time > self.max_delay {
-                    tracing::debug!("Skipping missing packet seq={}, gap={}", next_seq, gap);
-                    self.next_seq = Some(Self::next_sequence(next_seq));
-                    self.stats.packets_dropped += 1;
-
-                    // Try to pop again with the updated sequence
-                    return self.pop();
-                }
+            // Missing. Skip it only once something newer has waited
+            // long enough, or the gap is wide enough that it is not
+            // coming.
+            let Some((&oldest_seq, oldest_packet)) = self.packets.iter().next() else {
+                return None;
+            };
+            let gap = Self::sequence_distance(next_seq, oldest_seq);
+            let waited = now.duration_since(oldest_packet.received_at);
+            if gap > 10 || waited > self.max_delay {
+                tracing::debug!("Skipping missing packet seq={}, gap={}", next_seq, gap);
+                self.next_seq = Some(Self::next_sequence(next_seq));
+                self.stats.packets_dropped += 1;
+                continue;
             }
+            return None;
         }
+    }
 
-        None
+    /// Drop packets that are older than `next_seq` — their playout
+    /// moment has passed, so they can never be returned, and leaving
+    /// them in the map corrupts the gap arithmetic above.
+    fn drop_stale(&mut self, next_seq: Option<u16>) {
+        let Some(next_seq) = next_seq else { return };
+        let before = self.packets.len();
+        self.packets
+            .retain(|&seq, _| seq == next_seq || Self::is_sequence_newer(seq, next_seq));
+        let dropped = before - self.packets.len();
+        if dropped > 0 {
+            self.stats.packets_dropped += dropped as u64;
+            tracing::debug!(dropped, next_seq, "dropping late packets");
+        }
     }
 
     /// Check if a packet is ready to be played out
@@ -201,6 +227,59 @@ impl JitterBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: a single reordered packet used to abort the
+    /// process. After `pop` advanced past seq 2, the late seq 1 stayed
+    /// in the map; `packets.iter().next()` returned it, the unsigned
+    /// distance 3 -> 1 read as 65534, and the skip branch recursed once
+    /// per sequence number until the stack was gone. Reordering is
+    /// ordinary on any internet path, so this was reachable by normal
+    /// traffic, not just by an attacker.
+    #[test]
+    fn a_late_packet_does_not_blow_the_stack() {
+        let mut jb = JitterBuffer::new(Duration::from_millis(0));
+        jb.push(2, 320, vec![0x02; 160]);
+        jb.push(1, 160, vec![0x01; 160]);
+
+        // seq 2 established the stream, so it plays out first.
+        assert_eq!(jb.pop(), Some(vec![0x02; 160]));
+        // Before the fix this recursed ~65k deep and aborted.
+        assert_eq!(jb.pop(), None, "the late packet is dropped, not replayed");
+        assert!(jb.stats().packets_dropped >= 1);
+    }
+
+    /// The same shape one step further out: several late packets, and
+    /// a live stream continuing after them. The late ones must be
+    /// discarded and the stream must keep flowing.
+    #[test]
+    fn late_packets_are_discarded_and_the_stream_continues() {
+        let mut jb = JitterBuffer::new(Duration::from_millis(0));
+        jb.push(100, 0, vec![100; 8]);
+        assert_eq!(jb.pop(), Some(vec![100; 8]));
+
+        for seq in [95u16, 96, 97] {
+            jb.push(seq, 0, vec![seq as u8; 8]);
+        }
+        jb.push(101, 0, vec![101; 8]);
+        assert_eq!(
+            jb.pop(),
+            Some(vec![101; 8]),
+            "the in-order continuation still plays"
+        );
+        assert_eq!(jb.size(), 0, "stale packets were not left behind");
+    }
+
+    /// A wide forward gap (a real loss burst) is skipped without
+    /// spinning per sequence number.
+    #[test]
+    fn a_wide_forward_gap_is_skipped_promptly() {
+        let mut jb = JitterBuffer::new(Duration::from_millis(0));
+        jb.push(1, 0, vec![1; 8]);
+        assert_eq!(jb.pop(), Some(vec![1; 8]));
+        // 2..=50 are lost; 51 arrives.
+        jb.push(51, 0, vec![51; 8]);
+        assert_eq!(jb.pop(), Some(vec![51; 8]), "skips the hole and plays on");
+    }
 
     #[test]
     fn test_sequence_newer() {

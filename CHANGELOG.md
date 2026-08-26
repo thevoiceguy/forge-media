@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-08-26] — workspace release
+
+**A pinnable WebRTC media port.** A WebRTC connection uses exactly one socket (BUNDLE plus
+`a=rtcp-mux`) and forge always bound it ephemerally — right for a browser, wrong for a server
+whose media port range is a firewall rule, a capacity budget, and a pool with a reserved band
+all at once. This release lets a server place that socket deliberately, and lets media that
+isn't a `MediaSession` draw from the same pool on the same terms.
+
+Cut for siphon-ai's WebRTC media leg (`DEV_PLAN_WebRTC.md` §4.4), which is the first consumer
+of both APIs.
+
+**Embeds siphon-rs `v2026.08.24`** (`external/siphon-rs`), unchanged from the previous two
+releases: nothing on the SIP-adjacent path moved, and forge consumes only `sip-sdp` from the
+submodule.
+
+**Crate versions:** **forge-webrtc 0.5.0**, **forge-engine 0.5.1**. (bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-codecs 0.2.0, forge-conference 0.3.1,
+forge-core 0.2.0, forge-dtmf 0.2.1, forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0,
+forge-injection 0.1.1, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.2.0,
+forge-recorder 0.2.0, forge-resampler 0.1.1, forge-rtp 0.3.1, forge-sdp 0.2.0,
+forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0,
+forge-vad 0.2.0, forge-media 0.2.0 unchanged.)
+
+**Breaking changes:** **forge-webrtc 0.5.0** — `TransportConfig` gains a public `local_port`
+field ([#134](https://github.com/thevoiceguy/forge-media/pull/134)). Source-breaking only for
+callers constructing `TransportConfig` with an exhaustive struct literal; anyone using
+`..TransportConfig::default()` is unaffected, and the field's `0` default preserves the
+previous ephemeral-bind behaviour exactly.
+
 ### Added
 
 - **`forge-webrtc`: `TransportConfig::local_port` — pin the ICE socket's UDP port.** A WebRTC

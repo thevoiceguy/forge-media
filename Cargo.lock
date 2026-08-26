@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "forge-engine"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "forge-webrtc"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "dashmap",

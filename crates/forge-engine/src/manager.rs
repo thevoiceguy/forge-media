@@ -3,7 +3,7 @@
 use crate::session::{MediaSession, MediaSessionConfig};
 use dashmap::DashMap;
 use forge_core::{CallId, EventBus, ForgeError, ParticipantId, Result};
-use forge_rtp::{PortPool, PortPoolConfig};
+use forge_rtp::{PortPair, PortPool, PortPoolConfig};
 use metrics::gauge;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -554,6 +554,39 @@ impl SessionManager {
         self.sessions.len()
     }
 
+    /// Reserve a port pair for media this manager does not run itself.
+    ///
+    /// The pool is a *budget*, not merely a source of socket numbers:
+    /// its size is what an operator sized for concurrent calls, what
+    /// they opened in a firewall, and what
+    /// [`MediaSessionConfig::min_free_port_pairs`] reserves a band of.
+    /// A media leg that terminates somewhere other than a
+    /// [`MediaSession`] — a WebRTC peer connection, say — still occupies
+    /// that budget, and if it draws from outside the pool then the
+    /// capacity gauge, the reserved band, and the firewall range all
+    /// describe a call load that no longer matches reality.
+    ///
+    /// `min_free` is the floor to leave behind, exactly as on
+    /// [`PortPool::allocate_reserving`]; pass the same value an inbound
+    /// session would use so both directions compete on equal terms.
+    ///
+    /// The caller owns the pair until it passes it to
+    /// [`release_port_pair`](Self::release_port_pair) — nothing here
+    /// reclaims it, so a caller that drops one without releasing leaks
+    /// a pair for the life of the process, which is what
+    /// [`port_pool_stats`](Self::port_pool_stats) will show.
+    pub async fn reserve_port_pair(&self, min_free: usize) -> Result<PortPair> {
+        self.port_pool.allocate_reserving(min_free).await
+    }
+
+    /// Return a pair taken by [`reserve_port_pair`](Self::reserve_port_pair).
+    ///
+    /// Idempotent in the pool's own terms: releasing a pair that is not
+    /// allocated is a no-op, so a teardown path that runs twice is safe.
+    pub async fn release_port_pair(&self, pair: PortPair) {
+        self.port_pool.deallocate(pair).await;
+    }
+
     /// Get port pool statistics
     pub async fn port_pool_stats(&self) -> (usize, usize) {
         let allocated = self.port_pool.allocated_count().await;
@@ -957,5 +990,79 @@ mod tests {
             "session should be cleaned up after restart"
         );
         manager.stop_monitoring().await;
+    }
+}
+
+#[cfg(test)]
+mod reserved_pair_tests {
+    use super::*;
+
+    fn manager(min_port: u16, max_port: u16) -> Arc<SessionManager> {
+        SessionManager::new(
+            SessionManagerConfig {
+                port_pool_config: PortPoolConfig::new(min_port, max_port).unwrap(),
+                ..Default::default()
+            },
+            None,
+        )
+    }
+
+    /// The point of the API: a pair reserved for media the manager does
+    /// not run still shows up in the numbers an operator reads.
+    #[tokio::test]
+    async fn reserved_pair_is_visible_in_pool_stats() {
+        let mgr = manager(41000, 41100);
+        let (allocated_before, available_before) = mgr.port_pool_stats().await;
+        assert_eq!(allocated_before, 0);
+
+        let pair = mgr.reserve_port_pair(0).await.unwrap();
+        assert_eq!(pair.rtcp_port, pair.rtp_port + 1);
+        assert_eq!(pair.rtp_port % 2, 0, "RTP port must be even");
+
+        let (allocated, available) = mgr.port_pool_stats().await;
+        assert_eq!(allocated, 1);
+        assert_eq!(available, available_before - 1);
+
+        mgr.release_port_pair(pair).await;
+        assert_eq!(mgr.port_pool_stats().await, (0, available_before));
+    }
+
+    /// A reservation competes with sessions on the same floor, so an
+    /// operator's reserved band means the same thing whichever kind of
+    /// media leg is doing the drawing.
+    #[tokio::test]
+    async fn reservation_honours_the_floor() {
+        // The pool enforces a 100-port minimum, so the floor is set
+        // relative to capacity rather than the pool being made tiny.
+        let mgr = manager(41000, 41100);
+        let (_, capacity) = mgr.port_pool_stats().await;
+        let floor = capacity - 1;
+
+        let first = mgr.reserve_port_pair(floor).await.unwrap();
+        // One pair was available above the floor — and now none is.
+        assert!(
+            mgr.reserve_port_pair(floor).await.is_err(),
+            "must refuse to dip below the reserved floor"
+        );
+        // A privileged caller (floor 0) may still draw.
+        let second = mgr.reserve_port_pair(0).await.unwrap();
+        assert_ne!(first.rtp_port, second.rtp_port);
+
+        mgr.release_port_pair(first).await;
+        mgr.release_port_pair(second).await;
+        assert_eq!(mgr.port_pool_stats().await.0, 0);
+    }
+
+    /// Teardown paths run twice more often than anyone plans for.
+    #[tokio::test]
+    async fn double_release_is_a_no_op() {
+        let mgr = manager(41000, 41100);
+        let pair = mgr.reserve_port_pair(0).await.unwrap();
+        let (_, available) = mgr.port_pool_stats().await;
+
+        mgr.release_port_pair(pair).await;
+        mgr.release_port_pair(pair).await;
+
+        assert_eq!(mgr.port_pool_stats().await, (0, available + 1));
     }
 }

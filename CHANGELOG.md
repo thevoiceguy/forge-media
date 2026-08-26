@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`forge-webrtc`: `TransportConfig::local_port` — pin the ICE socket's UDP port.** A WebRTC
+  connection needs exactly one socket (BUNDLE plus `a=rtcp-mux`), and it was always bound
+  ephemerally. That is right for a browser and wrong for a *server*, which typically has a media
+  port range its operator opened in a firewall and sized as a capacity budget: an ephemeral socket
+  sits outside the firewall rule and outside the accounting. Setting `local_port` places the socket
+  deliberately; `0` remains the default and still means "let the OS choose", so existing callers are
+  unaffected. An occupied port fails the connection rather than falling back to an ephemeral one —
+  silently landing outside the range would defeat the reason for asking. Binds the *host* socket
+  only; a TURN allocation gathers through its own OS-assigned socket.
+
+- **`forge-engine`: `SessionManager::reserve_port_pair` / `release_port_pair`.** The port pool is a
+  budget, not just a source of socket numbers — it is what an operator sized for concurrent calls,
+  opened in a firewall, and reserved a band of via `MediaSessionConfig::min_free_port_pairs`. Media
+  that terminates somewhere other than a `MediaSession` still occupies that budget, and drawing from
+  outside the pool leaves the capacity gauge, the reserved band, and the firewall range all
+  describing a call load that no longer matches reality. These let such a leg draw a pair on the same
+  terms a session does, `min_free` included. Releasing a pair that is not allocated is a no-op, so a
+  teardown path that runs twice is safe.
+
 ## [2026-08-25] — workspace release
 
 **A crash fix.** One reordered RTP packet could abort the process via a stack overflow in

@@ -93,6 +93,27 @@ pub struct TransportConfig {
     pub keepalive: Duration,
     /// Capacity of the event channel.
     pub event_capacity: usize,
+    /// UDP port to bind the ICE socket to; `0` lets the OS choose.
+    ///
+    /// A WebRTC connection needs exactly one socket (BUNDLE plus
+    /// `a=rtcp-mux`), and by default it lands wherever the OS puts it.
+    /// That is fine for a browser, but a *server* usually has a media
+    /// port range its operator has opened in a firewall and sized as a
+    /// capacity budget. Pinning the port lets that server draw the
+    /// WebRTC socket from the same range and the same accounting as
+    /// its RTP sessions instead of quietly using an ephemeral port
+    /// outside both.
+    ///
+    /// The caller owns the choice, including its failure: if the port
+    /// is already in use, [`Transport::new`] fails rather than falling
+    /// back to an ephemeral one, because silently landing outside the
+    /// range would defeat the reason for asking.
+    ///
+    /// This binds the *host* socket only. A TURN allocation gathers
+    /// through its own socket (see [`TransportConfig::turn_servers`]),
+    /// which the OS still assigns; with no TURN servers configured
+    /// there is exactly one socket and this is its port.
+    pub local_port: u16,
 }
 
 impl Default for TransportConfig {
@@ -107,6 +128,7 @@ impl Default for TransportConfig {
             dtls_timeout: Duration::from_secs(15),
             keepalive: Duration::from_millis(2500),
             event_capacity: 512,
+            local_port: 0,
         }
     }
 }
@@ -825,7 +847,7 @@ impl Transport {
         ssrc: u32,
         state: Arc<Mutex<ConnectionState>>,
     ) -> Result<(Transport, mpsc::Receiver<TransportEvent>)> {
-        let mut agent = IceAgent::new(1, 0, vec![]);
+        let mut agent = IceAgent::new(1, cfg.local_port, vec![]);
         if !cfg.turn_servers.is_empty() {
             agent.set_turn_servers(cfg.turn_servers.clone());
         }

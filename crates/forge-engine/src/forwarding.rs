@@ -1253,7 +1253,7 @@ impl ForwardingEngine {
         }
 
         // Convert payload types to codec types
-        let pt_map = session.transcoding_config().payload_type_map;
+        let pt_map = session.payload_type_map();
         let src_codec = match pt_map.to_codec(src_pt) {
             Some(codec) => codec,
             None => {

@@ -7,7 +7,7 @@ use forge_rtp::{PortPair, PortPool, RtpSocketConfig, RtpSocketPair};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
@@ -864,6 +864,11 @@ pub struct MediaSession {
     telephone_event_pt_a: AtomicU8,
     /// Telephone-event payload type negotiated with participant B (default 101)
     telephone_event_pt_b: AtomicU8,
+    /// Packed payload-type map (pcmu | pcma << 8 | opus << 16). Kept as an
+    /// atomic because negotiated payload types can arrive after session
+    /// creation (the B-leg SDP lands later in a B2BUA flow); readers on the
+    /// packet path must not take a lock.
+    dynamic_pt_map: AtomicU32,
     /// Forwarding task handles
     forwarding_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Optional offer/answer SDP associated with the session
@@ -969,6 +974,9 @@ impl MediaSession {
             ports_deallocated: Arc::new(AtomicBool::new(false)),
             created_at: now,
             last_activity: Arc::new(RwLock::new(now)),
+            dynamic_pt_map: AtomicU32::new(Self::pack_pt_map(
+                config.transcoding_config.payload_type_map,
+            )),
             config,
             event_bus: event_bus.clone(),
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
@@ -1131,6 +1139,9 @@ impl MediaSession {
             ports_deallocated: Arc::new(AtomicBool::new(false)),
             created_at: now,
             last_activity: Arc::new(RwLock::new(now)),
+            dynamic_pt_map: AtomicU32::new(Self::pack_pt_map(
+                config.transcoding_config.payload_type_map,
+            )),
             config,
             event_bus: event_bus.clone(),
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
@@ -1337,6 +1348,9 @@ impl MediaSession {
             ports_deallocated: Arc::new(AtomicBool::new(false)),
             created_at: now,
             last_activity: Arc::new(RwLock::new(now)),
+            dynamic_pt_map: AtomicU32::new(Self::pack_pt_map(
+                config.transcoding_config.payload_type_map,
+            )),
             config,
             event_bus: event_bus.clone(),
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
@@ -1606,6 +1620,46 @@ impl MediaSession {
         &self.config.transcoding_config
     }
 
+    fn pack_pt_map(map: forge_transcoder::rtp::PayloadTypeMap) -> u32 {
+        (map.pcmu as u32) | ((map.pcma as u32) << 8) | ((map.opus as u32) << 16)
+    }
+
+    fn unpack_pt_map(bits: u32) -> forge_transcoder::rtp::PayloadTypeMap {
+        forge_transcoder::rtp::PayloadTypeMap {
+            pcmu: bits as u8,
+            pcma: (bits >> 8) as u8,
+            opus: (bits >> 16) as u8,
+        }
+    }
+
+    /// Current payload-type map. Unlike `transcoding_config().payload_type_map`
+    /// (frozen at creation), this reflects payload types negotiated after the
+    /// session was created — see [`set_payload_type_map`](Self::set_payload_type_map).
+    pub fn payload_type_map(&self) -> forge_transcoder::rtp::PayloadTypeMap {
+        Self::unpack_pt_map(self.dynamic_pt_map.load(Ordering::Relaxed))
+    }
+
+    /// Update the payload-type map after late codec negotiation (a B2BUA's
+    /// B-leg SDP arrives after session creation, and a re-INVITE can change
+    /// payload types mid-call). Clears any armed transcoders when the map
+    /// actually changes, so the forwarding path re-arms them against the new
+    /// map on the next packet.
+    pub async fn set_payload_type_map(&self, map: forge_transcoder::rtp::PayloadTypeMap) {
+        let new = Self::pack_pt_map(map);
+        let old = self.dynamic_pt_map.swap(new, Ordering::Relaxed);
+        if old != new {
+            *self.transcoder_a_to_b.lock().await = None;
+            *self.transcoder_b_to_a.lock().await = None;
+            tracing::debug!(
+                "Payload-type map updated for session {}: PCMU={}, PCMA={}, Opus={}",
+                self.call_id.0,
+                map.pcmu,
+                map.pcma,
+                map.opus
+            );
+        }
+    }
+
     /// Cadence for publishing `MediaStatsSnapshot` events (`None` = never).
     pub fn media_stats_interval(&self) -> Option<Duration> {
         self.config.media_stats_interval
@@ -1622,7 +1676,9 @@ impl MediaSession {
     }
 
     /// Convert forge_core::AudioCodec to forge_codecs::AudioCodecType
-    fn to_transcoder_codec(codec: forge_core::AudioCodec) -> Option<forge_codecs::AudioCodecType> {
+    pub fn to_transcoder_codec(
+        codec: forge_core::AudioCodec,
+    ) -> Option<forge_codecs::AudioCodecType> {
         match codec {
             forge_core::AudioCodec::PCMU => Some(forge_codecs::AudioCodecType::PCMU),
             forge_core::AudioCodec::PCMA => Some(forge_codecs::AudioCodecType::PCMA),
@@ -1656,7 +1712,7 @@ impl MediaSession {
                 codec_name(dst_codec)
             );
 
-            let pt_map = self.config.transcoding_config.payload_type_map;
+            let pt_map = self.payload_type_map();
             let new_transcoder = forge_transcoder::RtpTranscoder::new(src_codec, dst_codec, pt_map)
                 .map_err(|e| ForgeError::Internal(format!("Failed to create transcoder: {}", e)))?;
 
@@ -1689,7 +1745,7 @@ impl MediaSession {
                 codec_name(dst_codec)
             );
 
-            let pt_map = self.config.transcoding_config.payload_type_map;
+            let pt_map = self.payload_type_map();
             let new_transcoder = forge_transcoder::RtpTranscoder::new(src_codec, dst_codec, pt_map)
                 .map_err(|e| ForgeError::Internal(format!("Failed to create transcoder: {}", e)))?;
 
@@ -3000,6 +3056,9 @@ impl MediaSession {
             ports_deallocated: Arc::new(AtomicBool::new(false)),
             created_at: now, // Use current time as approximation
             last_activity: Arc::new(RwLock::new(now)),
+            dynamic_pt_map: AtomicU32::new(Self::pack_pt_map(
+                config.transcoding_config.payload_type_map,
+            )),
             config,
             event_bus: event_bus.clone(),
             dtmf_detector: Arc::new(Mutex::new(forge_dtmf::Rfc2833Detector::new(8000))),
@@ -4648,6 +4707,86 @@ mod tests {
         assert_eq!(a.packets_received, 3);
         assert_eq!(a.packets_lost(), 2);
         assert_eq!(a.packets_out_of_order, 0);
+    }
+
+    #[test]
+    fn test_pt_map_pack_unpack_round_trip() {
+        let map = forge_transcoder::rtp::PayloadTypeMap {
+            pcmu: 0,
+            pcma: 8,
+            opus: 96,
+        };
+        assert_eq!(
+            MediaSession::unpack_pt_map(MediaSession::pack_pt_map(map)),
+            map
+        );
+        let default = forge_transcoder::rtp::PayloadTypeMap::default();
+        assert_eq!(
+            MediaSession::unpack_pt_map(MediaSession::pack_pt_map(default)),
+            default
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_payload_type_map_updates_and_clears_transcoders() {
+        let pool_config = PortPoolConfig::new(41000, 41200).unwrap();
+        let port_pool = Arc::new(PortPool::new(pool_config));
+        let session = MediaSession::new(
+            CallId::generate(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            &port_pool,
+            MediaSessionConfig {
+                transcoding_config: TranscodingConfig {
+                    enable_transcoding: true,
+                    ..Default::default()
+                },
+                ..MediaSessionConfig::default()
+            },
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The atomic map starts as the creation-time config map.
+        assert_eq!(
+            session.payload_type_map(),
+            forge_transcoder::rtp::PayloadTypeMap::default()
+        );
+
+        // Arm a transcoder, then change the map: the armed transcoder must be
+        // cleared so forwarding re-arms it against the new payload types.
+        session
+            .ensure_transcoder_a_to_b(
+                forge_codecs::AudioCodecType::PCMU,
+                forge_codecs::AudioCodecType::PCMA,
+            )
+            .await
+            .unwrap();
+        assert!(session.transcoder_a_to_b().lock().await.is_some());
+
+        let new_map = forge_transcoder::rtp::PayloadTypeMap {
+            pcmu: 0,
+            pcma: 8,
+            opus: 96,
+        };
+        session.set_payload_type_map(new_map).await;
+        assert_eq!(session.payload_type_map(), new_map);
+        assert!(session.transcoder_a_to_b().lock().await.is_none());
+
+        // Setting the same map again is a no-op and must not clear anything.
+        session
+            .ensure_transcoder_a_to_b(
+                forge_codecs::AudioCodecType::PCMU,
+                forge_codecs::AudioCodecType::PCMA,
+            )
+            .await
+            .unwrap();
+        session.set_payload_type_map(new_map).await;
+        assert!(session.transcoder_a_to_b().lock().await.is_some());
     }
 
     async fn vad_test_session(

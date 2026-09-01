@@ -145,8 +145,8 @@ pub enum DtmfCommand {
     DialOut(String), // destination extension/number
 
     // Special
-    EnterHostPin,    // Waiting for PIN entry
-    EnterDialOut,    // Waiting for extension digits
+    EnterHostPin, // Waiting for PIN entry
+    EnterDialOut, // Waiting for extension digits
     InvalidCommand,
     Incomplete, // Need more digits
 }
@@ -195,7 +195,9 @@ impl SequenceState {
         // Keep this short — 80ms catches retransmissions (which arrive within
         // one DTMF event, typically 40-160ms) but allows deliberate repeated
         // keypresses like ## (which are 200-500ms apart).
-        if self.last_digit == Some(digit) && self.last_digit_time.elapsed() < Duration::from_millis(80) {
+        if self.last_digit == Some(digit)
+            && self.last_digit_time.elapsed() < Duration::from_millis(80)
+        {
             return false; // duplicate, ignore
         }
         self.last_digit = Some(digit);
@@ -431,8 +433,13 @@ impl DtmfCommandHandler {
             && digits.len() > self.config.host_commands.kick_prefix.len();
         let is_dial_out = digits == self.config.host_commands.dial_out;
 
-        let is_host_command =
-            is_mute_all || is_unmute_all || is_lock || is_unlock || is_end_conference || is_kick || is_dial_out;
+        let is_host_command = is_mute_all
+            || is_unmute_all
+            || is_lock
+            || is_unlock
+            || is_end_conference
+            || is_kick
+            || is_dial_out;
 
         if is_host_command {
             if role == ParticipantRole::Host {
@@ -599,7 +606,9 @@ mod tests {
                                                           // Should prompt for PIN
         assert_eq!(result, None); // Entering PIN mode
 
-        // Enter correct PIN
+        // Enter correct PIN. The first PIN digit repeats the last command
+        // digit ('1'), so wait out the 80ms RFC 2833 dedup window first.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         handler.process_digit("alice", '1');
         handler.process_digit("alice", '2');
         handler.process_digit("alice", '3');
@@ -623,6 +632,9 @@ mod tests {
 
         handler.process_digit("alice", '*');
         handler.process_digit("alice", '5'); // *5 is not a valid command
+                                             // Repeated digit: wait out the 80ms RFC 2833 dedup window so the
+                                             // second '5' counts as a deliberate keypress, not a retransmission.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         let result = handler.process_digit("alice", '5');
         assert_eq!(
             result,

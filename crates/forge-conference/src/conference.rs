@@ -457,7 +457,10 @@ impl ConferenceRoom {
         if wfm && !is_host && self.hosts.is_empty() {
             info!(
                 "Participant {} waiting for moderator in room {} (is_host={}, hosts={})",
-                participant_id, self.id, is_host, self.hosts.len()
+                participant_id,
+                self.id,
+                is_host,
+                self.hosts.len()
             );
             self.waiting_participants.insert(participant_id.clone(), ());
             return Err(ConferenceError::WaitingForModerator);
@@ -507,7 +510,11 @@ impl ConferenceRoom {
     /// Add a participant without playing the join sound.
     /// Use this when you want to play a welcome message first,
     /// then call `play_join_sound()` manually afterwards.
-    pub fn add_participant_quiet<S: Into<String>>(&self, participant_id: S, is_host: bool) -> Result<()> {
+    pub fn add_participant_quiet<S: Into<String>>(
+        &self,
+        participant_id: S,
+        is_host: bool,
+    ) -> Result<()> {
         let participant_id = participant_id.into();
 
         // Same checks as add_participant
@@ -1893,7 +1900,11 @@ mod tests {
 
         // Guest should join directly (host is present)
         let result = room.add_participant("guest1", false);
-        assert!(result.is_ok(), "Guest should join when host is present: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Guest should join when host is present: {:?}",
+            result
+        );
         assert_eq!(room.waiting_count(), 0);
     }
 

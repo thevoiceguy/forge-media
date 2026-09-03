@@ -25,7 +25,9 @@ use tracing::{debug, info, warn};
 pub type RoomId = String;
 
 /// Constant participant ID for audio feedback sounds
-const AUDIO_FEEDBACK_PARTICIPANT_ID: &str = "__audio_feedback__";
+/// Mixer id of the room-wide audio feedback channel (join/exit tones,
+/// `play_sound_to_all`). A virtual participant, not a caller.
+pub const AUDIO_FEEDBACK_PARTICIPANT_ID: &str = "__audio_feedback__";
 
 /// Conference room with audio mixing and optional recording
 pub struct ConferenceRoom {
@@ -66,7 +68,11 @@ pub struct ConferenceRoom {
     /// Audio format
     format: AudioFormat,
     /// Frame size for mixing operations
-    _frame_size: usize,
+    frame_size: usize,
+    /// Frame-clock driver task (see `start_frame_clock`)
+    frame_clock_task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    /// Frame sequence broadcast to consumers waiting on the clock
+    frame_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl ConferenceRoom {
@@ -106,7 +112,9 @@ impl ConferenceRoom {
             dial_out_requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
             end_conference_requested: AtomicBool::new(false),
             format,
-            _frame_size: frame_size,
+            frame_size,
+            frame_clock_task: parking_lot::Mutex::new(None),
+            frame_tx: tokio::sync::watch::channel(0).0,
         })
     }
 
@@ -550,6 +558,25 @@ impl ConferenceRoom {
         self.add_participant_inner(&participant_id, false)
     }
 
+    /// Add a participant that represents something other than a caller —
+    /// an inter-node trunk, a media injector — and so answers to none of
+    /// the caller-facing admission rules: no lock, wait-for-moderator or
+    /// capacity check, no join sound, no host bookkeeping, no
+    /// auto-record trigger. The caller is responsible for having
+    /// authenticated whatever the participant stands for; convention is
+    /// a `__`-prefixed id so it can be told apart from callers.
+    pub fn add_virtual_participant<S: Into<String>>(&self, participant_id: S) -> Result<()> {
+        let participant_id = participant_id.into();
+        info!(
+            "Adding virtual participant {} to room {}",
+            participant_id, self.id
+        );
+        self.mixer.add_participant(participant_id, None)?;
+        gauge!("forge_conference_participants_active", "room_id" => self.id.clone())
+            .set(self.mixer.participant_count() as f64);
+        Ok(())
+    }
+
     /// Internal: add to mixer, optionally play join sound, update metrics
     fn add_participant_inner(&self, participant_id: &str, play_sound: bool) -> Result<()> {
         info!("Adding participant {} to room {}", participant_id, self.id);
@@ -755,6 +782,97 @@ impl ConferenceRoom {
         Ok(self.mixer.mix_excluding(participant_id)?)
     }
 
+    /// Whether the room's mixer runs on a frame clock
+    /// ([`forge_mixer::MixerOptions::frame_clock`]).
+    pub fn frame_clock_enabled(&self) -> bool {
+        self.mixer.frame_clock_enabled()
+    }
+
+    /// Duration of one mixing frame at the room's sample rate.
+    pub fn frame_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.frame_size as f64 / self.format.sample_rate as f64)
+    }
+
+    /// Advance the mixer's frame clock by hand (see
+    /// [`forge_mixer::AudioMixer::advance_frame`]), feed the room
+    /// recorder with the new frame, and wake everyone waiting on
+    /// [`frame_clock`](Self::frame_clock). Prefer
+    /// [`start_frame_clock`](Self::start_frame_clock) in a running room;
+    /// this is for drivers with their own clock, and for tests.
+    pub fn advance_frame(&self) -> u64 {
+        let seq = self.mixer.advance_frame();
+        if self.is_recording() {
+            // In frame-clock mode `mix()` reads the snapshot, so feeding
+            // the recorder here consumes nothing from the participants.
+            if let Err(e) = self.mix() {
+                warn!("Room {} recorder feed failed: {}", self.id, e);
+            }
+        }
+        self.frame_tx.send_replace(seq);
+        seq
+    }
+
+    /// Start the task that drives the frame clock once per frame period.
+    /// Idempotent. Requires a frame-clock mixer. The task holds only a
+    /// weak reference, so it ends when the room is dropped;
+    /// [`stop_frame_clock`](Self::stop_frame_clock) ends it early.
+    pub fn start_frame_clock(self: &Arc<Self>) -> Result<()> {
+        if !self.mixer.frame_clock_enabled() {
+            return Err(ConferenceError::InvalidFormat(
+                "frame clock requires MixerOptions::frame_clock".to_string(),
+            ));
+        }
+        let mut task = self.frame_clock_task.lock();
+        if task.as_ref().map(|t| !t.is_finished()).unwrap_or(false) {
+            return Ok(());
+        }
+        let period = self.frame_duration();
+        let weak = Arc::downgrade(self);
+        let room_id = self.id.clone();
+        info!(
+            "Starting frame clock for room {} ({:?} per frame)",
+            room_id, period
+        );
+        *task = Some(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let Some(room) = weak.upgrade() else {
+                    break;
+                };
+                room.advance_frame();
+            }
+            debug!("Frame clock for room {} stopped", room_id);
+        }));
+        Ok(())
+    }
+
+    /// Stop the frame-clock task, if running.
+    pub fn stop_frame_clock(&self) {
+        if let Some(task) = self.frame_clock_task.lock().take() {
+            task.abort();
+        }
+    }
+
+    /// A receiver that observes every frame-clock tick: `changed().await`,
+    /// then read the mix for the new frame. The value is the frame
+    /// sequence number.
+    pub fn frame_clock(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.frame_tx.subscribe()
+    }
+
+    /// Mix the current frame of every active participant `include`
+    /// accepts (frame-clock mode). This is how a trunk to a peer node
+    /// gets a send-mix of local participants only: exclude every other
+    /// trunk, and nothing a peer sent us is ever sent back out.
+    pub fn mix_frame_filtered<F>(&self, include: F) -> Option<Vec<i16>>
+    where
+        F: Fn(&str) -> bool,
+    {
+        self.mixer.mix_frame_filtered(include)
+    }
+
     /// Get audio from all participants individually (for AI Individual mode)
     ///
     /// Returns a map of participant IDs to their audio samples.
@@ -920,7 +1038,7 @@ impl ConferenceRoom {
         let mut playback = PlaybackSource::open(audio_path)
             .map_err(|e| ConferenceError::RecordingNotFound(format!("Playback failed: {}", e)))?;
 
-        while let Some(chunk) = playback.next_samples(self._frame_size).map_err(|e| {
+        while let Some(chunk) = playback.next_samples(self.frame_size).map_err(|e| {
             ConferenceError::RecordingNotFound(format!("Playback read failed: {}", e))
         })? {
             self.mixer
@@ -1510,6 +1628,14 @@ impl ConferenceRoom {
     }
 }
 
+impl Drop for ConferenceRoom {
+    fn drop(&mut self) {
+        if let Some(task) = self.frame_clock_task.get_mut().take() {
+            task.abort();
+        }
+    }
+}
+
 /// Conference bridge for managing multiple conference rooms
 pub struct ConferenceBridge {
     /// Map of active conference rooms
@@ -1606,6 +1732,7 @@ impl ConferenceBridge {
                 warn!("Error stopping recording for room {}: {}", room_id, e);
             }
         }
+        room.stop_frame_clock();
 
         // Update metrics
         counter!("forge_conference_rooms_deleted_total").increment(1);
@@ -1807,6 +1934,87 @@ mod tests {
         // Mix excluding alice
         let mixed = room.mix_for_participant("alice").unwrap();
         assert!(mixed.is_some());
+    }
+
+    #[tokio::test]
+    async fn frame_clock_ticks_and_wakes_listeners() {
+        let room = Arc::new(
+            ConferenceRoom::new(
+                "clocked",
+                AudioFormat::new(8000, 1, forge_core::AudioCodec::PCM),
+                160,
+                forge_mixer::MixerOptions {
+                    frame_clock: true,
+                    ..forge_mixer::MixerOptions::default()
+                },
+            )
+            .unwrap(),
+        );
+        assert_eq!(room.frame_duration(), std::time::Duration::from_millis(20));
+        room.add_participant("alice", false).unwrap();
+        room.add_participant("bob", false).unwrap();
+        room.add_virtual_participant("__trunk__node-b").unwrap();
+        room.write_audio("alice", &[100; 160]).unwrap();
+        room.write_audio("bob", &[200; 160]).unwrap();
+        room.write_audio("__trunk__node-b", &[400; 160]).unwrap();
+
+        let mut clock = room.frame_clock();
+        room.start_frame_clock().unwrap();
+        room.start_frame_clock().unwrap(); // idempotent
+        tokio::time::timeout(std::time::Duration::from_secs(2), clock.changed())
+            .await
+            .expect("clock ticked")
+            .unwrap();
+        assert!(*clock.borrow() >= 1);
+
+        // Every listener sees the same frame; nothing is consumed by reading.
+        let alice = room.mix_for_participant("alice").unwrap().unwrap();
+        let bob = room.mix_for_participant("bob").unwrap().unwrap();
+        let g = 1.0 / 2f32.sqrt();
+        assert_eq!(alice[0], (600f32 * g) as i16);
+        assert_eq!(bob[0], (500f32 * g) as i16);
+        // The trunk send-mix carries local participants only.
+        let to_peer = room
+            .mix_frame_filtered(|id| !id.starts_with("__trunk__"))
+            .unwrap();
+        assert_eq!(to_peer[0], (300f32 * g) as i16);
+
+        room.stop_frame_clock();
+    }
+
+    #[test]
+    fn frame_clock_requires_the_mixer_option() {
+        let room = Arc::new(
+            ConferenceRoom::new(
+                "unclocked",
+                AudioFormat::pcm_mono(),
+                480,
+                forge_mixer::MixerOptions::default(),
+            )
+            .unwrap(),
+        );
+        assert!(!room.frame_clock_enabled());
+        assert!(room.start_frame_clock().is_err());
+    }
+
+    #[test]
+    fn virtual_participant_bypasses_lock() {
+        let room = ConferenceRoom::new(
+            "locked",
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
+        room.add_participant("alice", true).unwrap();
+        room.lock();
+        assert!(matches!(
+            room.add_participant("bob", false),
+            Err(ConferenceError::ConferenceLocked)
+        ));
+        room.add_virtual_participant("__trunk__node-b").unwrap();
+        assert_eq!(room.participant_count(), 2);
+        assert!(!room.is_host("__trunk__node-b"));
     }
 
     fn create_configured_room(wait_for_moderator: bool) -> ConferenceRoom {

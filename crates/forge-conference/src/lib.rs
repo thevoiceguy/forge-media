@@ -17,7 +17,7 @@ pub use ai_manager::{
     AudioMode, ConferenceAIConfig, ConferenceAIManager, ConferenceAIState, AI_PARTICIPANT_ID,
 };
 pub use audio_feedback::{AudioFeedbackPlayer, ConferenceSounds};
-pub use conference::{ConferenceBridge, ConferenceRoom, RoomId};
+pub use conference::{ConferenceBridge, ConferenceRoom, RoomId, AUDIO_FEEDBACK_PARTICIPANT_ID};
 pub use config::{
     AudioConfig, ConferenceConfig, ConfigError, DtmfConfig, HostCommandsConfig,
     ParticipantCommandsConfig, PinRequirements, RecordingConfig, SecurityConfig,

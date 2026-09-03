@@ -198,6 +198,7 @@ impl ApiServer {
             max_buffer_frames: config.mixer_max_buffer_frames,
             recording_base_dir: Some(config.recording_base_dir.clone()),
             recording_root_jail: Some(config.recording_root_jail.clone()),
+            frame_clock: false,
         };
 
         let conference_bridge = Arc::new(

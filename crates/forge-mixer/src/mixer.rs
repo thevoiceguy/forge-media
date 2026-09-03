@@ -9,6 +9,7 @@ use forge_recorder::AudioRecorder;
 use parking_lot::{Mutex, RwLock};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -28,6 +29,7 @@ use tracing::{debug, info, warn};
 ///     max_buffer_frames: 50,
 ///     recording_base_dir: Some("/var/forge/sessions/current".into()),
 ///     recording_root_jail: Some("/var/forge".into()),
+///     frame_clock: false,
 /// };
 /// ```
 ///
@@ -43,6 +45,16 @@ pub struct MixerOptions {
     pub recording_base_dir: Option<PathBuf>,
     /// Root jail for participant recordings
     pub recording_root_jail: Option<PathBuf>,
+    /// Run the mixer on a frame clock (see [`AudioMixer::advance_frame`]).
+    ///
+    /// Off, every `mix*` call drains one frame from each ready participant
+    /// as it reads — the historic behaviour, right for a single consumer.
+    /// On, nothing is drained except by `advance_frame`, which snapshots
+    /// one frame per participant; every read then sees that same frame,
+    /// so any number of consumers (one N-1 mix per participant, a room
+    /// recorder, an AI tap, a trunk send-mix) can share the audio without
+    /// stealing it from each other.
+    pub frame_clock: bool,
 }
 
 impl Default for MixerOptions {
@@ -51,9 +63,18 @@ impl Default for MixerOptions {
             max_buffer_frames: 50,
             recording_base_dir: None,
             recording_root_jail: None,
+            frame_clock: false,
         }
     }
 }
+
+/// Frame-clock mode: a participant whose buffer has run this many frames
+/// ahead of the clock is trimmed back to [`LATENCY_KEEP_FRAMES`], so a
+/// sender whose clock runs slightly fast cannot walk the whole room up
+/// to a second of delay before the buffer cap drops audio.
+const LATENCY_TRIM_FRAMES: usize = 5;
+/// Frames left in a buffer after a latency trim.
+const LATENCY_KEEP_FRAMES: usize = 2;
 
 /// Unique identifier for a participant in the mixer
 pub type ParticipantId = String;
@@ -114,6 +135,10 @@ struct ParticipantBuffer {
     silence_frames: u32,
     /// Maximum buffered samples before dropping oldest data
     max_buffer_samples: usize,
+    /// Frame-clock mode: the frame `advance_frame` last took from this
+    /// buffer, read by every mix until the next advance. `None` when the
+    /// participant had less than a frame available at that tick.
+    frame: Option<Vec<i16>>,
 }
 
 impl ParticipantBuffer {
@@ -130,6 +155,7 @@ impl ParticipantBuffer {
             speech_frames: 0,
             silence_frames: 0,
             max_buffer_samples,
+            frame: None,
         }
     }
 
@@ -252,6 +278,10 @@ pub struct AudioMixer {
     recording_base_dir: Option<PathBuf>,
     /// Optional root jail that recordings must stay within
     recording_root_jail: Option<PathBuf>,
+    /// Frame-clock mode (see [`MixerOptions::frame_clock`])
+    frame_clock: bool,
+    /// Number of `advance_frame` calls so far
+    frame_seq: AtomicU64,
 }
 
 impl AudioMixer {
@@ -322,6 +352,8 @@ impl AudioMixer {
             max_buffer_samples: frame_size * options.max_buffer_frames,
             recording_base_dir: recording_base_canon,
             recording_root_jail: recording_jail_canon,
+            frame_clock: options.frame_clock,
+            frame_seq: AtomicU64::new(0),
         })
     }
 
@@ -410,6 +442,9 @@ impl AudioMixer {
     /// Returns mixed samples if enough data is available from at least one participant.
     /// The frame size determines how many samples are mixed.
     pub fn mix(&self) -> Result<Option<Vec<i16>>> {
+        if self.frame_clock {
+            return Ok(self.mix_frame());
+        }
         if self.participants.is_empty() {
             return Ok(None);
         }
@@ -474,6 +509,9 @@ impl AudioMixer {
     ///
     /// This is useful for conference calls where you don't want to hear your own voice.
     pub fn mix_excluding(&self, exclude_id: &str) -> Result<Option<Vec<i16>>> {
+        if self.frame_clock {
+            return Ok(self.mix_frame_excluding(exclude_id));
+        }
         if self.participants.len() <= 1 {
             return Ok(None);
         }
@@ -816,6 +854,16 @@ impl AudioMixer {
             return Ok(None);
         }
 
+        // Frame-clock mode: the current frame, without consuming it.
+        // `count` is the clock's frame size by construction.
+        if self.frame_clock {
+            let gain = participant.gain;
+            return Ok(participant
+                .frame
+                .as_ref()
+                .map(|frame| Self::apply_gain(frame, gain)));
+        }
+
         // Check if participant has enough samples
         if participant.available_samples() < count {
             return Ok(None);
@@ -873,6 +921,14 @@ impl AudioMixer {
                 continue;
             }
 
+            // Frame-clock mode: read the snapshot, consume nothing.
+            if self.frame_clock {
+                if let Some(frame) = participant.frame.as_ref() {
+                    result.insert(id, Self::apply_gain(frame, participant.gain));
+                }
+                continue;
+            }
+
             // Check if participant has enough samples
             if participant.available_samples() >= count {
                 let samples = participant.drain_samples(count);
@@ -893,6 +949,133 @@ impl AudioMixer {
         );
 
         result
+    }
+}
+
+/// Frame-clock API. Enabled with [`MixerOptions::frame_clock`].
+///
+/// A conference has more than one consumer of each participant's audio:
+/// every other participant's N-1 mix, a room recorder, an AI tap, and —
+/// in a cascaded conference — the send-mix for each trunk to a peer
+/// node. With the historic drain-on-read model those consumers compete
+/// for the same samples, and with three or more of them each 20 ms of a
+/// participant's speech reaches only whichever reader got there first.
+///
+/// The frame clock separates *taking* audio from *reading* it. A single
+/// driver calls [`advance_frame`](AudioMixer::advance_frame) once per
+/// frame period; that moves one frame from each participant's buffer
+/// into a per-participant snapshot. Every mix until the next advance
+/// reads those snapshots and consumes nothing, so all consumers see the
+/// same frame and none can starve another.
+impl AudioMixer {
+    /// Whether this mixer runs on a frame clock.
+    pub fn frame_clock_enabled(&self) -> bool {
+        self.frame_clock
+    }
+
+    /// Number of frames the clock has advanced. Zero before the first
+    /// [`advance_frame`](AudioMixer::advance_frame).
+    pub fn frame_seq(&self) -> u64 {
+        self.frame_seq.load(Ordering::Acquire)
+    }
+
+    /// Advance the frame clock: take one frame from every active
+    /// participant that has one buffered, making it the frame every mix
+    /// reads until the next advance. A participant with less than a
+    /// frame available contributes silence for this tick (its snapshot
+    /// is `None`), and one that has run more than [`LATENCY_TRIM_FRAMES`]
+    /// ahead is trimmed back to [`LATENCY_KEEP_FRAMES`] so a fast sender
+    /// cannot build up delay. Returns the new frame sequence number.
+    ///
+    /// Works in either mode, but in drain-on-read mode the legacy `mix*`
+    /// calls keep draining for themselves; call this only from the one
+    /// task that drives a frame-clock mixer.
+    pub fn advance_frame(&self) -> u64 {
+        let frame_size = self.frame_size;
+        for mut participant in self.participants.iter_mut() {
+            if participant.state != ParticipantState::Active {
+                participant.frame = None;
+                continue;
+            }
+            let available = participant.available_samples();
+            if available > frame_size * LATENCY_TRIM_FRAMES {
+                let excess = available - frame_size * LATENCY_KEEP_FRAMES;
+                participant.samples.drain(..excess);
+                debug!(
+                    "Trimmed {} buffered samples from participant {} to bound latency",
+                    excess,
+                    participant.key()
+                );
+            }
+            participant.frame = if participant.available_samples() >= frame_size {
+                Some(participant.drain_samples(frame_size))
+            } else {
+                None
+            };
+        }
+        self.frame_seq.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Mix the current frame of every active participant `include`
+    /// accepts. Returns `None` when no accepted participant has a frame.
+    /// Non-destructive: reading the same frame many times is the point.
+    pub fn mix_frame_filtered<F>(&self, include: F) -> Option<Vec<i16>>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let mut mixed = vec![0i32; self.frame_size];
+        let mut contributors = 0usize;
+        for participant in self.participants.iter() {
+            if participant.state != ParticipantState::Active || !include(participant.key()) {
+                continue;
+            }
+            let Some(frame) = participant.frame.as_ref() else {
+                continue;
+            };
+            for (slot, &sample) in mixed.iter_mut().zip(frame.iter()) {
+                *slot += (sample as f32 * participant.gain) as i32;
+            }
+            contributors += 1;
+        }
+        if contributors == 0 {
+            return None;
+        }
+        Some(self.finish_mix(&mixed, contributors))
+    }
+
+    /// Mix the current frame of every active participant.
+    pub fn mix_frame(&self) -> Option<Vec<i16>> {
+        self.mix_frame_filtered(|_| true)
+    }
+
+    /// Mix the current frame of every active participant except
+    /// `exclude_id` — the N-1 mix a participant listens to.
+    pub fn mix_frame_excluding(&self, exclude_id: &str) -> Option<Vec<i16>> {
+        self.mix_frame_filtered(|id| id != exclude_id)
+    }
+
+    /// Auto-gain (when enabled and more than one contributor) and clamp
+    /// an i32 accumulator down to output samples.
+    fn finish_mix(&self, mixed: &[i32], contributors: usize) -> Vec<i16> {
+        if self.auto_gain && contributors > 1 {
+            let gain = 1.0 / (contributors as f32).sqrt();
+            mixed
+                .iter()
+                .map(|&s| ((s as f32 * gain).clamp(-32768.0, 32767.0)) as i16)
+                .collect()
+        } else {
+            mixed
+                .iter()
+                .map(|&s| s.clamp(-32768, 32767) as i16)
+                .collect()
+        }
+    }
+
+    fn apply_gain(samples: &[i16], gain: f32) -> Vec<i16> {
+        samples
+            .iter()
+            .map(|&s| ((s as f32 * gain).clamp(-32768.0, 32767.0)) as i16)
+            .collect()
     }
 }
 
@@ -1035,6 +1218,152 @@ mod tests {
         assert!(matches!(err, MixerError::InvalidFormat(_)));
     }
 
+    fn frame_clock_mixer(frame_size: usize) -> AudioMixer {
+        AudioMixer::with_options(
+            AudioFormat::pcm_mono(),
+            frame_size,
+            MixerOptions {
+                frame_clock: true,
+                ..MixerOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn frame_clock_every_listener_hears_the_same_frame() {
+        // Three participants; in drain-on-read mode only the first
+        // reader of each frame would hear anything.
+        let mixer = frame_clock_mixer(4);
+        for (id, level) in [("a", 100i16), ("b", 200), ("c", 400)] {
+            mixer.add_participant(id, None).unwrap();
+            mixer.write_samples(id, &[level; 4]).unwrap();
+        }
+        assert_eq!(mixer.frame_seq(), 0);
+        assert!(
+            mixer.mix_excluding("a").unwrap().is_none(),
+            "nothing before the first tick"
+        );
+
+        assert_eq!(mixer.advance_frame(), 1);
+        // Auto-gain over two contributors is 1/sqrt(2).
+        let g = 1.0 / 2f32.sqrt();
+        let expect = |sum: i16| ((sum as f32) * g) as i16;
+        assert_eq!(mixer.mix_excluding("a").unwrap().unwrap()[0], expect(600));
+        assert_eq!(mixer.mix_excluding("b").unwrap().unwrap()[0], expect(500));
+        assert_eq!(mixer.mix_excluding("c").unwrap().unwrap()[0], expect(300));
+        // Reading again yields the same frame — nothing was consumed.
+        assert_eq!(mixer.mix_excluding("c").unwrap().unwrap()[0], expect(300));
+        // The all-mix (recorder path) sees everyone.
+        assert_eq!(
+            mixer.mix().unwrap().unwrap()[0],
+            ((700f32) * (1.0 / 3f32.sqrt())) as i16
+        );
+
+        // Next tick: nobody wrote, so nobody contributes.
+        assert_eq!(mixer.advance_frame(), 2);
+        assert!(mixer.mix_excluding("a").unwrap().is_none());
+        assert!(mixer.mix().unwrap().is_none());
+    }
+
+    #[test]
+    fn frame_clock_filtered_mix_excludes_a_set() {
+        // A trunk to a peer node must carry local participants only:
+        // no other trunk, or the mesh echoes audio back to its source.
+        let mixer = frame_clock_mixer(4);
+        for (id, level) in [
+            ("alice", 100i16),
+            ("bob", 200),
+            ("__trunk__node-b", 1000),
+            ("__trunk__node-c", 2000),
+        ] {
+            mixer.add_participant(id, None).unwrap();
+            mixer.write_samples(id, &[level; 4]).unwrap();
+        }
+        mixer.advance_frame();
+
+        let send_to_b = mixer
+            .mix_frame_filtered(|id| !id.starts_with("__trunk__"))
+            .unwrap();
+        assert_eq!(send_to_b[0], ((300f32) * (1.0 / 2f32.sqrt())) as i16);
+
+        // Alice hears everyone but herself, trunks included.
+        let alice_hears = mixer.mix_frame_excluding("alice").unwrap();
+        assert_eq!(alice_hears[0], ((3200f32) * (1.0 / 3f32.sqrt())) as i16);
+
+        // Nothing accepted → no frame, not a silent frame.
+        assert!(mixer.mix_frame_filtered(|_| false).is_none());
+    }
+
+    #[test]
+    fn frame_clock_individual_reads_are_non_destructive() {
+        let mixer = frame_clock_mixer(4);
+        mixer.add_participant("alice", None).unwrap();
+        mixer.add_participant("__ai__", None).unwrap();
+        mixer.write_samples("alice", &[50; 4]).unwrap();
+        mixer.advance_frame();
+
+        let first = mixer.get_participant_audio("alice", 4).unwrap().unwrap();
+        let second = mixer.get_participant_audio("alice", 4).unwrap().unwrap();
+        assert_eq!(first, second);
+        let all = mixer.get_all_participant_audio(4, Some("__ai__"));
+        assert_eq!(all.len(), 1);
+        assert_eq!(all["alice"], first);
+        // A participant with no frame this tick is absent, not silent.
+        assert!(mixer.get_participant_audio("__ai__", 4).unwrap().is_none());
+    }
+
+    #[test]
+    fn frame_clock_partial_frame_waits_and_muted_is_silent() {
+        let mixer = frame_clock_mixer(4);
+        mixer.add_participant("alice", None).unwrap();
+        mixer.add_participant("bob", None).unwrap();
+        mixer.write_samples("alice", &[10, 10]).unwrap();
+        mixer.write_samples("bob", &[20; 4]).unwrap();
+        mixer
+            .set_participant_state("bob", ParticipantState::Muted)
+            .unwrap();
+        mixer.advance_frame();
+        // Alice: half a frame is not a frame. Bob: muted contributes nothing.
+        assert!(mixer.mix_frame().is_none());
+        // The half frame is still there for the next tick.
+        mixer.write_samples("alice", &[10, 10]).unwrap();
+        mixer.advance_frame();
+        assert_eq!(mixer.mix_frame().unwrap(), vec![10; 4]);
+    }
+
+    #[test]
+    fn frame_clock_trims_a_runaway_buffer() {
+        let mixer = frame_clock_mixer(4);
+        mixer.add_participant("alice", None).unwrap();
+        // 10 frames buffered: more than LATENCY_TRIM_FRAMES ahead.
+        let samples: Vec<i16> = (0..40).map(|i| i as i16).collect();
+        mixer.write_samples("alice", &samples).unwrap();
+        mixer.advance_frame();
+        // Trimmed to LATENCY_KEEP_FRAMES (2 frames), then one frame taken:
+        // the frame is the oldest of the kept two, i.e. samples 32..36.
+        assert_eq!(mixer.mix_frame().unwrap(), vec![32, 33, 34, 35]);
+        mixer.advance_frame();
+        assert_eq!(mixer.mix_frame().unwrap(), vec![36, 37, 38, 39]);
+        mixer.advance_frame();
+        assert!(mixer.mix_frame().is_none());
+    }
+
+    #[test]
+    fn drain_on_read_mode_is_unchanged_by_the_clock_api() {
+        // Default options: mix_excluding still drains, and the snapshot
+        // API simply has nothing until someone advances.
+        let mixer = AudioMixer::new(AudioFormat::pcm_mono(), 4).unwrap();
+        mixer.add_participant("a", None).unwrap();
+        mixer.add_participant("b", None).unwrap();
+        mixer.write_samples("a", &[1; 4]).unwrap();
+        mixer.write_samples("b", &[2; 4]).unwrap();
+        assert!(!mixer.frame_clock_enabled());
+        assert!(mixer.mix_frame().is_none());
+        assert!(mixer.mix_excluding("a").unwrap().is_some());
+        assert!(mixer.mix_excluding("a").unwrap().is_none(), "drained");
+    }
+
     #[test]
     fn test_buffer_limit_enforced() {
         let mixer = AudioMixer::new(AudioFormat::pcm_mono(), 2).unwrap();
@@ -1073,6 +1402,7 @@ mod tests {
                 max_buffer_frames: 50,
                 recording_base_dir: Some(base.clone()),
                 recording_root_jail: Some(jail.clone()),
+                frame_clock: false,
             };
 
             let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
@@ -1105,6 +1435,7 @@ mod tests {
                 max_buffer_frames: 50,
                 recording_base_dir: Some(base.clone()),
                 recording_root_jail: Some(jail.clone()),
+                frame_clock: false,
             };
 
             let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
@@ -1134,6 +1465,7 @@ mod tests {
                 max_buffer_frames: 50,
                 recording_base_dir: Some(base.clone()),
                 recording_root_jail: Some(jail.clone()),
+                frame_clock: false,
             };
 
             let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
@@ -1160,6 +1492,7 @@ mod tests {
                 max_buffer_frames: 50,
                 recording_base_dir: Some(base.clone()),
                 recording_root_jail: Some(jail.clone()),
+                frame_clock: false,
             };
 
             let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
@@ -1200,6 +1533,7 @@ mod tests {
                 max_buffer_frames: 50,
                 recording_base_dir: Some(base.clone()),
                 recording_root_jail: Some(jail.clone()),
+                frame_clock: false,
             };
 
             let mixer = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options).unwrap();
@@ -1220,6 +1554,7 @@ mod tests {
                 max_buffer_frames: 50,
                 recording_base_dir: None,
                 recording_root_jail: Some(PathBuf::from("/nonexistent/jail")),
+                frame_clock: false,
             };
 
             let result = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options);
@@ -1236,6 +1571,7 @@ mod tests {
                 max_buffer_frames: 50,
                 recording_base_dir: Some(PathBuf::from("/nonexistent/base")),
                 recording_root_jail: None,
+                frame_clock: false,
             };
 
             let result = AudioMixer::with_options(AudioFormat::pcm_mono(), 480, options);

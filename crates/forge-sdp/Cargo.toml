@@ -9,7 +9,7 @@ license.workspace = true
 [dependencies]
 forge-core = { path = "../forge-core" }
 forge-rtp = { path = "../forge-rtp" }
-sip-sdp = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.08.25" }
+sip-sdp = { git = "https://github.com/thevoiceguy/siphon-rs", tag = "v2026.09.03" }
 smol_str = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }

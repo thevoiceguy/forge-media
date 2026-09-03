@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-03] — workspace release
+
+**A frame clock for the conference mixer.** A conference room has more than one reader of each
+participant's audio — every other participant's N-1 mix, the room recorder, an AI tap — and the
+mixer handed out audio by *draining* it on read. Two readers were fine only by luck of timing;
+with three or more participants each 20 ms frame of a caller's speech reached whichever listener's
+tick came first and nobody else, so three-party conferences on a per-participant mixing loop were
+audibly broken. Cascaded conferencing (FCP distributed conferencing, phase 2) adds a further
+reader per inter-node trunk and needs a mix that excludes a *set* of participants, which the old
+API could not express at all. This release separates taking audio from reading it.
+
+**Embeds siphon-rs `v2026.09.03`** (`external/siphon-rs`; `forge-sdp` pins the same tag) — that
+release adds mutual TLS to the SIP transport. forge consumes only `sip-sdp`, unchanged, so the
+media path does not move; the pin keeps a consumer that patches `sip-sdp` to its own siphon-rs
+checkout on one copy.
+
+**Crate versions:** **forge-mixer 0.3.0**, **forge-conference 0.4.0**. (bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-codecs 0.2.0, forge-core 0.2.0, forge-dtmf 0.2.1,
+forge-engine 0.5.1, forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1,
+forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-recorder 0.2.0, forge-resampler 0.1.1,
+forge-rtp 0.3.1, forge-sdp 0.2.0, forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder 0.2.0,
+forge-transcription 0.2.0, forge-vad 0.2.0, forge-webrtc 0.5.0, forge-media 0.2.0 unchanged.)
+
+**Breaking changes:** **forge-mixer 0.3.0** — `MixerOptions` gains a public `frame_clock: bool`
+field. Source-breaking only for callers constructing `MixerOptions` with an exhaustive struct
+literal; `..MixerOptions::default()` is unaffected, and the `false` default preserves the
+drain-on-read behaviour exactly. Nothing about `mix()`, `mix_excluding()`,
+`get_participant_audio()` or `get_all_participant_audio()` changes unless the clock is on.
+
+### Added
+
+- **`forge-mixer`: frame-clock mode** (`MixerOptions::frame_clock`). With it on, nothing is
+  consumed by reading: `AudioMixer::advance_frame()` moves one frame from every active
+  participant's buffer into a per-participant snapshot, and every mix until the next advance reads
+  those snapshots, so any number of consumers see the same frame and none can starve another. The
+  legacy `mix*` / `get_*_audio` calls read the snapshot in this mode, so existing consumers
+  (recorder, AI manager) work unchanged once something drives the clock. New:
+  `mix_frame_filtered(|id| …)` mixes the participants a predicate accepts — the send-mix for a
+  trunk to a peer node excludes every other trunk, so a full mesh never carries audio back to its
+  source — plus `mix_frame()`, `mix_frame_excluding()`, `frame_seq()`, `frame_clock_enabled()`.
+  A participant that has run more than five frames ahead of the clock is trimmed back to two, so a
+  sender with a slightly fast clock cannot walk the room up to a second of delay before the buffer
+  cap starts dropping audio.
+
+- **`forge-conference`: the room drives the clock.** `ConferenceRoom::start_frame_clock()` spawns
+  a task that advances the mixer once per frame period (`frame_duration()`), feeds the room
+  recorder from the new frame, and publishes the frame sequence on a `tokio::sync::watch` that
+  `frame_clock()` subscribes to — a participant's outbound loop awaits the tick instead of running
+  its own interval. Idempotent; the task holds a weak reference and `delete_room` / drop stop it.
+  `advance_frame()` for drivers with their own clock, `mix_frame_filtered()` passed through.
+  `add_virtual_participant(id)` adds a participant that stands for something other than a caller
+  (an inter-node trunk) and so bypasses lock, wait-for-moderator and capacity, with no join sound
+  and no host bookkeeping — the caller is responsible for having authenticated it.
+  `AUDIO_FEEDBACK_PARTICIPANT_ID` is now public so a send-mix can leave the feedback channel out.
+
 ## [2026-08-26] — workspace release
 
 **A pinnable WebRTC media port.** A WebRTC connection uses exactly one socket (BUNDLE plus

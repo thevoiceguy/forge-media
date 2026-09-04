@@ -52,7 +52,9 @@ impl Frame {
 fn synth_frame(n: usize, w: usize, h: usize) -> Frame {
     // SPIKE_HARD=1: four times the noise, three moving blocks, a
     // scrolling texture — a pessimistic stand-in for a busy camera.
-    let hard = std::env::var("SPIKE_HARD").map(|v| v == "1").unwrap_or(false);
+    let hard = std::env::var("SPIKE_HARD")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let mut f = Frame::new(w, h);
     let bx = (n * 7) % (w - 160);
     let by = (n * 3) % (h - 120);
@@ -97,6 +99,17 @@ fn synth_frame(n: usize, w: usize, h: usize) -> Frame {
         }
     }
     f
+}
+
+/// Process CPU time (user + system) in seconds, from /proc/self/stat.
+fn cpu_seconds() -> f64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    // Fields after the parenthesised command name; utime is field 14, stime 15.
+    let rest = stat.rsplit(')').next().unwrap_or("");
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let ticks: f64 = f.get(11).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0)
+        + f.get(12).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    ticks / 100.0
 }
 
 struct Measure {
@@ -170,7 +183,11 @@ mod h264 {
             .scene_change_detect(false)
             // Skipping is what a conference would run with, but for the
             // hard source it hides the cost: measure every frame there.
-            .skip_frames(std::env::var("SPIKE_HARD").map(|v| v != "1").unwrap_or(true))
+            .skip_frames(
+                std::env::var("SPIKE_HARD")
+                    .map(|v| v != "1")
+                    .unwrap_or(true),
+            )
             .num_threads(1);
         let mut enc = Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|e| anyhow!("openh264 encoder: {e}"))?;
@@ -181,7 +198,9 @@ mod h264 {
         let start = Instant::now();
         for f in frames {
             let src = YUVBuffer::from_vec(f.packed(), f.w, f.h);
-            let bs = enc.encode(&src).map_err(|e| anyhow!("openh264 encode: {e}"))?;
+            let bs = enc
+                .encode(&src)
+                .map_err(|e| anyhow!("openh264 encode: {e}"))?;
             let data = bs.to_vec();
             if data.is_empty() {
                 skipped += 1;
@@ -198,7 +217,10 @@ mod h264 {
         }
         let elapsed = start.elapsed();
         if skipped > 0 {
-            eprintln!("openh264 skipped {skipped} of {} frames for rate control", frames.len());
+            eprintln!(
+                "openh264 skipped {skipped} of {} frames for rate control",
+                frames.len()
+            );
         }
         Ok((
             Measure {
@@ -214,7 +236,8 @@ mod h264 {
 
     pub fn decode(packets: &[Vec<u8>]) -> Result<Measure> {
         use openh264::formats::YUVSource;
-        let mut dec = openh264::decoder::Decoder::new().map_err(|e| anyhow!("openh264 decoder: {e}"))?;
+        let mut dec =
+            openh264::decoder::Decoder::new().map_err(|e| anyhow!("openh264 decoder: {e}"))?;
         let mut decoded = 0;
         let start = Instant::now();
         for p in packets {
@@ -225,7 +248,10 @@ mod h264 {
         }
         let elapsed = start.elapsed();
         if decoded < packets.len() / 2 {
-            return Err(anyhow!("openh264 decoded only {decoded} of {}", packets.len()));
+            return Err(anyhow!(
+                "openh264 decoded only {decoded} of {}",
+                packets.len()
+            ));
         }
         Ok(Measure {
             name: "H.264 decode (openh264)".into(),
@@ -241,10 +267,10 @@ mod h264 {
 
 mod vpx {
     use super::*;
-    use vpx_sys as ffi;
     use std::ffi::CStr;
     use std::os::raw::{c_int, c_long, c_uint, c_ulong};
     use std::ptr;
+    use vpx_sys as ffi;
 
     #[derive(Clone, Copy)]
     pub enum Codec {
@@ -270,7 +296,11 @@ mod vpx {
         }
     }
 
-    pub fn encode(codec: Codec, frames: &[Frame], cpu_used: c_int) -> Result<(Measure, Vec<Vec<u8>>)> {
+    pub fn encode(
+        codec: Codec,
+        frames: &[Frame],
+        cpu_used: c_int,
+    ) -> Result<(Measure, Vec<Vec<u8>>)> {
         unsafe {
             let iface = match codec {
                 Codec::Vp8 => ffi::vpx_codec_vp8_cx(),
@@ -300,7 +330,13 @@ mod vpx {
             cfg.kf_max_dist = KEYFRAME_INTERVAL;
             let mut ctx = std::mem::MaybeUninit::<ffi::vpx_codec_ctx>::zeroed();
             check(
-                ffi::vpx_codec_enc_init_ver(ctx.as_mut_ptr(), iface, &cfg, 0, ffi::VPX_ENCODER_ABI_VERSION as c_int),
+                ffi::vpx_codec_enc_init_ver(
+                    ctx.as_mut_ptr(),
+                    iface,
+                    &cfg,
+                    0,
+                    ffi::VPX_ENCODER_ABI_VERSION as c_int,
+                ),
                 "enc_init",
             )?;
             let mut ctx = ctx.assume_init();
@@ -398,7 +434,13 @@ mod vpx {
                 h: 0,
             };
             check(
-                ffi::vpx_codec_dec_init_ver(ctx.as_mut_ptr(), iface, &cfg, 0, ffi::VPX_DECODER_ABI_VERSION as c_int),
+                ffi::vpx_codec_dec_init_ver(
+                    ctx.as_mut_ptr(),
+                    iface,
+                    &cfg,
+                    0,
+                    ffi::VPX_DECODER_ABI_VERSION as c_int,
+                ),
                 "dec_init",
             )?;
             let mut ctx = ctx.assume_init();
@@ -409,7 +451,13 @@ mod vpx {
                     continue;
                 }
                 check(
-                    ffi::vpx_codec_decode(&mut ctx, p.as_ptr(), p.len() as c_uint, ptr::null_mut(), 0 as c_long),
+                    ffi::vpx_codec_decode(
+                        &mut ctx,
+                        p.as_ptr(),
+                        p.len() as c_uint,
+                        ptr::null_mut(),
+                        0 as c_long,
+                    ),
                     "decode",
                 )?;
                 let mut iter: ffi::vpx_codec_iter_t = ptr::null_mut();
@@ -469,7 +517,8 @@ mod av1 {
             frame.planes[0].copy_from_raw_u8(&f.y, f.w, 1);
             frame.planes[1].copy_from_raw_u8(&f.u, f.w / 2, 1);
             frame.planes[2].copy_from_raw_u8(&f.v, f.w / 2, 1);
-            ctx.send_frame(frame).map_err(|e| anyhow!("rav1e send_frame: {e}"))?;
+            ctx.send_frame(frame)
+                .map_err(|e| anyhow!("rav1e send_frame: {e}"))?;
             loop {
                 match ctx.receive_packet() {
                     Ok(p) => {
@@ -506,7 +555,8 @@ mod av1 {
         let mut settings = dav1d::Settings::new();
         settings.set_n_threads(1);
         settings.set_max_frame_delay(1);
-        let mut dec = dav1d::Decoder::with_settings(&settings).map_err(|e| anyhow!("dav1d: {e}"))?;
+        let mut dec =
+            dav1d::Decoder::with_settings(&settings).map_err(|e| anyhow!("dav1d: {e}"))?;
         let mut decoded = 0;
         let start = Instant::now();
         for p in packets {
@@ -540,6 +590,157 @@ mod av1 {
             bytes: 0,
             keyframes: 0,
         })
+    }
+}
+
+// ─── AV1 (SVT-AV1, system libsvtav1enc via bindgen in build.rs) ──────────
+
+mod svt {
+    #![allow(
+        non_upper_case_globals,
+        non_camel_case_types,
+        non_snake_case,
+        dead_code
+    )]
+    include!(concat!(env!("OUT_DIR"), "/svt.rs"));
+}
+
+mod svt_av1 {
+    use super::svt::*;
+    use super::{Frame, Measure, BITRATE_KBPS, FPS, H, KEYFRAME_INTERVAL, W};
+    use anyhow::{anyhow, Result};
+    use std::ptr;
+    use std::time::Instant;
+
+    fn check(err: EbErrorType, what: &str) -> Result<()> {
+        if err == EB_ErrorNone {
+            Ok(())
+        } else {
+            Err(anyhow!("svt-av1 {what}: error {err:#x}"))
+        }
+    }
+
+    /// Collected output.
+    struct Collected {
+        packets: Vec<Vec<u8>>,
+        bytes: usize,
+        keyframes: usize,
+    }
+
+    /// `svt_av1_enc_get_packet` blocks in low-delay mode, so packets are
+    /// read on their own thread until the EOS packet arrives.
+    fn reader(handle: usize) -> std::thread::JoinHandle<Result<Collected>> {
+        std::thread::spawn(move || unsafe {
+            let handle = handle as *mut EbComponentType;
+            let mut c = Collected {
+                packets: Vec::new(),
+                bytes: 0,
+                keyframes: 0,
+            };
+            loop {
+                let mut pkt: *mut EbBufferHeaderType = ptr::null_mut();
+                let err = svt_av1_enc_get_packet(handle, &mut pkt, 0);
+                if err == EB_NoErrorEmptyQueue {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+                check(err, "get_packet")?;
+                if pkt.is_null() {
+                    continue;
+                }
+                let data = std::slice::from_raw_parts((*pkt).p_buffer, (*pkt).n_filled_len as usize)
+                    .to_vec();
+                if (*pkt).pic_type == EB_AV1_KEY_PICTURE {
+                    c.keyframes += 1;
+                }
+                let eos = (*pkt).flags & EB_BUFFERFLAG_EOS != 0;
+                c.bytes += data.len();
+                if !data.is_empty() {
+                    c.packets.push(data);
+                }
+                svt_av1_enc_release_out_buffer(&mut pkt);
+                if eos {
+                    return Ok(c);
+                }
+            }
+        })
+    }
+
+    pub fn encode(frames: &[Frame], preset: i8, threads: u32) -> Result<(Measure, Vec<Vec<u8>>)> {
+        unsafe {
+            let mut handle: *mut EbComponentType = ptr::null_mut();
+            let mut cfg = std::mem::MaybeUninit::<EbSvtAv1EncConfiguration>::zeroed();
+            check(
+                svt_av1_enc_init_handle(&mut handle, ptr::null_mut(), cfg.as_mut_ptr()),
+                "init_handle",
+            )?;
+            let mut cfg = cfg.assume_init();
+            cfg.source_width = W as u32;
+            cfg.source_height = H as u32;
+            cfg.frame_rate_numerator = FPS;
+            cfg.frame_rate_denominator = 1;
+            cfg.encoder_bit_depth = 8;
+            cfg.encoder_color_format = EB_YUV420;
+            cfg.enc_mode = preset;
+            cfg.pred_structure = 1; // SVT_AV1_PRED_LOW_DELAY_B
+            cfg.rate_control_mode = 2; // SVT_AV1_RC_MODE_CBR
+            cfg.target_bit_rate = BITRATE_KBPS * 1000;
+            cfg.intra_period_length = KEYFRAME_INTERVAL as i32 - 1;
+            cfg.look_ahead_distance = 0;
+            cfg.enable_tpl_la = 0;
+            cfg.level_of_parallelism = threads;
+            check(svt_av1_enc_set_parameter(handle, &mut cfg), "set_parameter")?;
+            check(svt_av1_enc_init(handle), "init")?;
+
+            let start = Instant::now();
+            let reader = reader(handle as usize);
+            for (i, f) in frames.iter().enumerate() {
+                let mut y = f.y.clone();
+                let mut u = f.u.clone();
+                let mut v = f.v.clone();
+                let mut io = EbSvtIOFormat {
+                    luma: y.as_mut_ptr(),
+                    cb: u.as_mut_ptr(),
+                    cr: v.as_mut_ptr(),
+                    y_stride: f.w as u32,
+                    cb_stride: (f.w / 2) as u32,
+                    cr_stride: (f.w / 2) as u32,
+                    width: f.w as u32,
+                    height: f.h as u32,
+                    org_x: 0,
+                    org_y: 0,
+                    color_fmt: EB_YUV420,
+                    bit_depth: EB_EIGHT_BIT,
+                };
+                let mut hdr: EbBufferHeaderType = std::mem::zeroed();
+                hdr.size = std::mem::size_of::<EbBufferHeaderType>() as u32;
+                hdr.p_buffer = &mut io as *mut EbSvtIOFormat as *mut u8;
+                hdr.n_filled_len = (f.w * f.h * 3 / 2) as u32;
+                hdr.n_alloc_len = hdr.n_filled_len;
+                hdr.pts = i as i64;
+                check(svt_av1_enc_send_picture(handle, &mut hdr), "send_picture")?;
+            }
+            let mut eos: EbBufferHeaderType = std::mem::zeroed();
+            eos.size = std::mem::size_of::<EbBufferHeaderType>() as u32;
+            eos.flags = EB_BUFFERFLAG_EOS;
+            check(svt_av1_enc_send_picture(handle, &mut eos), "send eos")?;
+            let collected = reader
+                .join()
+                .map_err(|_| anyhow!("svt-av1 reader thread panicked"))??;
+            let elapsed = start.elapsed();
+            svt_av1_enc_deinit(handle);
+            svt_av1_enc_deinit_handle(handle);
+            Ok((
+                Measure {
+                    name: format!("AV1 encode (SVT-AV1 preset {preset}, lp {threads})"),
+                    frames: frames.len(),
+                    elapsed,
+                    bytes: collected.bytes,
+                    keyframes: collected.keyframes,
+                },
+                collected.packets,
+            ))
+        }
     }
 }
 
@@ -646,6 +847,30 @@ fn main() -> Result<()> {
 
     let mut results: Vec<Measure> = Vec::new();
 
+    if std::env::var("SPIKE_ONLY_SVT").is_ok() {
+        for (preset, lp) in [(12i8, 1u32), (10, 1), (8, 1)] {
+            let cpu0 = cpu_seconds();
+            match svt_av1::encode(&frames, preset, lp) {
+                Ok((m, pk)) => {
+                    report(&m);
+                    let cpu = cpu_seconds() - cpu0;
+                    let cpu_ns_px = cpu * 1e9 / (frames.len() as f64 * (W * H) as f64);
+                    println!(
+                        "  cpu {:.2} s for {:.2} s wall → {:.2} cpu-ns/px, {:.2} x 720p30 per core",
+                        cpu,
+                        m.elapsed.as_secs_f64(),
+                        cpu_ns_px,
+                        1.0 / (cpu_ns_px * 1e-9 * (W * H) as f64 * FPS as f64)
+                    );
+                    let m = av1::decode(&pk).context("dav1d decode of SVT-AV1")?;
+                    report(&m);
+                }
+                Err(e) => println!("SVT-AV1 preset {preset}: {e:#}"),
+            }
+        }
+        return Ok(());
+    }
+
     let (m, h264) = h264::encode(&frames).context("H.264 encode")?;
     report(&m);
     results.push(m);
@@ -653,7 +878,11 @@ fn main() -> Result<()> {
     report(&m);
     results.push(m);
 
-    for (codec, cpu_used) in [(vpx::Codec::Vp8, 8), (vpx::Codec::Vp8, 4), (vpx::Codec::Vp9, 8)] {
+    for (codec, cpu_used) in [
+        (vpx::Codec::Vp8, 8),
+        (vpx::Codec::Vp8, 4),
+        (vpx::Codec::Vp9, 8),
+    ] {
         let (m, pk) = vpx::encode(codec, &frames, cpu_used).context("libvpx encode")?;
         report(&m);
         results.push(m);
@@ -666,12 +895,27 @@ fn main() -> Result<()> {
 
     if std::env::var("SPIKE_SKIP_AV1").is_err() {
         for speed in [10u8] {
-            let (m, pk) = av1::encode(&frames[..frames.len().min(45)], speed).context("rav1e encode")?;
+            let (m, pk) =
+                av1::encode(&frames[..frames.len().min(45)], speed).context("rav1e encode")?;
             report(&m);
             results.push(m);
             let m = av1::decode(&pk).context("dav1d decode")?;
             report(&m);
             results.push(m);
+        }
+    }
+
+    for (preset, lp) in [(10i8, 1u32), (12, 1), (12, 4)] {
+        match svt_av1::encode(&frames, preset, lp) {
+            Ok((m, pk)) => {
+                report(&m);
+                results.push(m);
+                if lp == 1 && preset == 12 {
+                    let m = av1::decode(&pk).context("dav1d decode of SVT-AV1")?;
+                    report(&m);
+                }
+            }
+            Err(e) => println!("SVT-AV1 preset {preset}: {e:#}"),
         }
     }
 

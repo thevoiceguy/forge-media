@@ -11,3 +11,7 @@ dav1d = "0.11.1"
 env-libvpx-sys = { version = "5.1.3", features = ["generate"] }
 openh264 = { version = "0.9.8", features = ["source"] }
 rav1e = { version = "0.8.1", default-features = false }
+
+[build-dependencies]
+bindgen = "0.68"
+pkg-config = "0.3"

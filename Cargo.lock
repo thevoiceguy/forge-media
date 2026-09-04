@@ -2105,9 +2105,11 @@ name = "forge-video-spike"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bindgen",
  "dav1d",
  "env-libvpx-sys",
  "openh264",
+ "pkg-config",
  "rav1e",
 ]
 

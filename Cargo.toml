@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/forge-video-spike",
     "crates/forge-core",
     "crates/forge-hep",
     "crates/forge-rtp",

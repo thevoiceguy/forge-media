@@ -1,0 +1,13 @@
+[package]
+name = "forge-video-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Throwaway phase 0 spike: do the video codec crates build here, and how fast are they"
+
+[dependencies]
+anyhow = "1"
+dav1d = "0.11.1"
+env-libvpx-sys = { version = "5.1.3", features = ["generate"] }
+openh264 = { version = "0.9.8", features = ["source"] }
+rav1e = { version = "0.8.1", default-features = false }

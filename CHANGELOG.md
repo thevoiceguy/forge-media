@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-05] — workspace release
+
 **Video substrate (FCP video conferencing, phase 1).** Everything a video mixer needs below the
 codecs, so forge can carry, inspect and re-emit video RTP without decoding it: RTCP feedback,
 the RTP payload formats, frame assembly with loss detection, a retransmission cache, a stream

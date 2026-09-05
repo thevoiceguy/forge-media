@@ -110,7 +110,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # eBPF/XDP (Linux only)
 aya = { version = "0.12", features = ["async_tokio"] }
 aya-ebpf = "0.1"
-aya-log = "0.2"
+aya-log = "0.3"
 aya-build = "0.2"
 
 # Audio processing

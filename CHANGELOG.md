@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-05.1] — workspace release
+
 **Video mixer core (FCP video conferencing, phase 2).** Two new crates above the phase 1
 substrate: `forge-video` is what a video mixer is made of — frames with device residency, host
 I420 scaling and composition, the four layouts, the room clock, flavors, the codec traits and a

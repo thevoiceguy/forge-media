@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Video substrate (FCP video conferencing, phase 1).** Everything a video mixer needs below the
+codecs, so forge can carry, inspect and re-emit video RTP without decoding it: RTCP feedback,
+the RTP payload formats, frame assembly with loss detection, a retransmission cache, a stream
+rewriter for switching sources on a keyframe, and SDP video negotiation. Design and rationale in
+FCP's `docs/VIDEO_CONFERENCING.md`.
+
+**Crate versions:** **forge-rtp 0.4.0**, forge-core 0.2.1, forge-sdp 0.2.1.
+
+**Breaking changes:** **forge-rtp 0.4.0** — `RtcpPacketType` gains `RTPFB` (205) and `PSFB`
+(206) and `RtcpPacket` gains `TransportFeedback` / `PayloadFeedback` variants; exhaustive matches
+need an arm. `RtcpPacket::ReceiverReport(..).to_bytes()` now writes the correct length field
+(it was one 32-bit word short, which any receiver walking a compound packet tripped over).
+
+### Added
+
+- **forge-core**: `VideoCodec` (H.264, H.265, VP8, VP9, AV1) with SDP names, the 90 kHz clock and
+  non-colliding default payload types.
+- **forge-rtp / rtcp**: Generic NACK (RFC 4585), PLI, FIR (RFC 5104) and REMB parse and build,
+  `RtcpPacket::parse_compound` (skips sub-packets forge does not model instead of failing),
+  `is_keyframe_request`, `feedback_media_ssrc`.
+- **forge-rtp / video**: `inspect` — frame start and keyframe detection per codec (RFC 6184
+  single NAL / STAP-A / FU-A, RFC 7798, RFC 7741, RFC 9628, AV1 aggregation header);
+  `payload::{packetize, depacketize}` for all five codecs (H.264/H.265 as Annex B, VP8/VP9 raw
+  frames, AV1 temporal units with size fields restored); `FrameAssembler` (reorder window,
+  gap → `Lost`, skip to the next frame start, `needs_keyframe`, `missing` for NACKs, frame size
+  limit); `RtxCache` for answering NACKs; `KeyframeRequestGate`; `StreamRewriter` (one outgoing
+  SSRC / sequence / timestamp line across source switches, switching only at a keyframe).
+- **forge-sdp / video**: `CodecInfo::to_video_codec`, `a=rtcp-fb` parsing and emission
+  (`VideoAttributesExt`), `H264Fmtp` (`profile-level-id`, `packetization-mode`, forwardability),
+  `choose_video_codec`, `answer_video` (RFC 3264 answer for one codec: offered PT, fmtp echoed,
+  supported feedback kept, `mid` / `rtcp-mux` mirrored, direction per §6.1), `reject_section`
+  (port 0, formats and `mid` mirrored, `a=inactive`), `SdpProfile::audio_video` with
+  `with_local_addr_video`.
+
+### Known gaps
+
+- `sip-sdp` has no `RTP/AVPF` protocol variant; an offer using it does not parse. Needed before
+  FCP phase 3 (some SIP video endpoints offer it).
+- `StreamRewriter` assumes a 30 fps minimum step when a switch happens with no recent packet.
+
 ## [2026-09-03] — workspace release
 
 **A frame clock for the conference mixer.** A conference room has more than one reader of each

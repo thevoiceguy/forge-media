@@ -230,6 +230,89 @@ impl AudioCodec {
     }
 }
 
+/// Video codec enumeration.
+///
+/// Identifiers and RTP conventions only: forge carries video as opaque
+/// RTP payloads (forwarding, keyframe detection, stream switching) and
+/// does not encode or decode it. Every listed codec uses a 90 kHz RTP
+/// clock and a dynamic payload type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VideoCodec {
+    /// H.264 / AVC (RFC 6184)
+    H264,
+    /// H.265 / HEVC (RFC 7798)
+    H265,
+    /// VP8 (RFC 7741)
+    VP8,
+    /// VP9 (RFC 9628)
+    VP9,
+    /// AV1 (AV1 RTP payload specification)
+    AV1,
+}
+
+impl VideoCodec {
+    /// Every codec, in the order forge prefers them when nothing else
+    /// decides: H.264 first for SIP interoperability, then the royalty-free
+    /// codecs browsers ship.
+    pub const ALL: [VideoCodec; 5] = [
+        VideoCodec::H264,
+        VideoCodec::VP8,
+        VideoCodec::VP9,
+        VideoCodec::AV1,
+        VideoCodec::H265,
+    ];
+
+    /// The RTP clock rate every video codec uses.
+    pub const CLOCK_RATE: u32 = 90_000;
+
+    /// Encoding name as it appears in `a=rtpmap`.
+    pub fn sdp_name(&self) -> &'static str {
+        match self {
+            Self::H264 => "H264",
+            Self::H265 => "H265",
+            Self::VP8 => "VP8",
+            Self::VP9 => "VP9",
+            Self::AV1 => "AV1",
+        }
+    }
+
+    /// Parse an `a=rtpmap` encoding name (case-insensitive).
+    pub fn from_sdp_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "H264" => Some(Self::H264),
+            "H265" | "HEVC" => Some(Self::H265),
+            "VP8" => Some(Self::VP8),
+            "VP9" => Some(Self::VP9),
+            "AV1" | "AV1X" => Some(Self::AV1),
+            _ => None,
+        }
+    }
+
+    /// The dynamic payload type forge offers this codec with when it makes
+    /// an offer. Answers always take the offerer's number. Chosen not to
+    /// collide with the audio conventions (Opus 111, telephone-event 101).
+    pub fn default_payload_type(&self) -> u8 {
+        match self {
+            Self::H264 => 96,
+            Self::VP8 => 97,
+            Self::VP9 => 98,
+            Self::AV1 => 99,
+            Self::H265 => 100,
+        }
+    }
+
+    /// RTP clock rate (always 90 kHz).
+    pub fn clock_rate(&self) -> u32 {
+        Self::CLOCK_RATE
+    }
+}
+
+impl std::fmt::Display for VideoCodec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.sdp_name())
+    }
+}
+
 /// Audio sample format
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct AudioFormat {
@@ -431,6 +514,22 @@ impl<'de> serde::Deserialize<'de> for SecureString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn video_codecs_round_trip_sdp_names_and_use_the_90khz_clock() {
+        for codec in VideoCodec::ALL {
+            assert_eq!(VideoCodec::from_sdp_name(codec.sdp_name()), Some(codec));
+            assert_eq!(codec.clock_rate(), 90_000);
+            assert!(codec.default_payload_type() >= 96);
+            assert_ne!(codec.default_payload_type(), 101, "telephone-event clash");
+            assert_ne!(codec.default_payload_type(), 111, "opus clash");
+        }
+        assert_eq!(VideoCodec::from_sdp_name("h264"), Some(VideoCodec::H264));
+        assert_eq!(VideoCodec::from_sdp_name("HEVC"), Some(VideoCodec::H265));
+        assert_eq!(VideoCodec::from_sdp_name("AV1X"), Some(VideoCodec::AV1));
+        assert_eq!(VideoCodec::from_sdp_name("opus"), None);
+        assert_eq!(VideoCodec::VP8.to_string(), "VP8");
+    }
 
     #[test]
     fn test_secure_string_debug_redaction() {

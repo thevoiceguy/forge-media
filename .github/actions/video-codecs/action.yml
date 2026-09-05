@@ -1,0 +1,49 @@
+name: Native video codec libraries
+description: >
+  What forge-video-codecs links against with every feature on: libvpx,
+  dav1d, nasm (OpenH264 from source) and libclang (bindgen) from apt, and
+  SVT-AV1 built from source at a pinned tag because Ubuntu's package is
+  older than the 2.x API the binding uses. The SVT-AV1 install is cached
+  by tag.
+inputs:
+  svt-av1-tag:
+    description: SVT-AV1 git tag to build
+    required: false
+    default: v2.3.0
+runs:
+  using: composite
+  steps:
+    - name: Install packaged codec libraries
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libvpx-dev libdav1d-dev nasm libclang-dev cmake pkg-config
+
+    - name: Cache SVT-AV1
+      id: svt
+      uses: actions/cache@v6
+      with:
+        path: /opt/svt-av1
+        key: svt-av1-${{ inputs.svt-av1-tag }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Build SVT-AV1 from source
+      if: steps.svt.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -eo pipefail
+        git clone --depth 1 --branch "${{ inputs.svt-av1-tag }}" \
+          https://gitlab.com/AOMediaCodec/SVT-AV1.git "$RUNNER_TEMP/svt-av1"
+        cmake -S "$RUNNER_TEMP/svt-av1" -B "$RUNNER_TEMP/svt-av1/build" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/opt/svt-av1 \
+          -DCMAKE_INSTALL_LIBDIR=lib \
+          -DBUILD_APPS=OFF \
+          -DBUILD_TESTING=OFF
+        cmake --build "$RUNNER_TEMP/svt-av1/build" -j"$(nproc)"
+        sudo cmake --install "$RUNNER_TEMP/svt-av1/build"
+
+    - name: Export SVT-AV1 paths
+      shell: bash
+      run: |
+        echo "PKG_CONFIG_PATH=/opt/svt-av1/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=/opt/svt-av1/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"

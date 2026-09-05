@@ -1,0 +1,21 @@
+[package]
+name = "forge-video"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Video frames, scaling, composition and layouts, the video clock, flavors, and codec traits for the Forge media engine"
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+forge-rtp = { path = "../forge-rtp" }
+
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time", "sync", "rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }

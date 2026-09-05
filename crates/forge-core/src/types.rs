@@ -236,7 +236,7 @@ impl AudioCodec {
 /// RTP payloads (forwarding, keyframe detection, stream switching) and
 /// does not encode or decode it. Every listed codec uses a 90 kHz RTP
 /// clock and a dynamic payload type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum VideoCodec {
     /// H.264 / AVC (RFC 6184)
     H264,

@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Video mixer core (FCP video conferencing, phase 2).** Two new crates above the phase 1
+substrate: `forge-video` is what a video mixer is made of — frames with device residency, host
+I420 scaling and composition, the four layouts, the room clock, flavors, the codec traits and a
+raw codec that lets the whole pipeline run in CI without a native library — and
+`forge-video-codecs` binds libvpx, OpenH264, dav1d and SVT-AV1 to those traits behind cargo
+features. The GPU backend (phase 7) is designed in: every stage is bound to a `MediaDevice`, a
+`VideoFrame` is host memory or a device handle, and the `Scaler` / `Compositor` / `VideoDecoder`
+/ `VideoEncoder` traits carry device affinity with the host as the reference implementation.
+Design and rationale in FCP's `docs/VIDEO_CONFERENCING.md`.
+
+**Crate versions:** **forge-video 0.1.0** (new), **forge-video-codecs 0.1.0** (new),
+forge-core 0.2.2.
+
+### Added
+
+- **forge-video** (new crate):
+  - `frame`: `MediaDevice` (`host`, or `backend:address` such as `vaapi:/dev/dri/renderD128`),
+    `Resolution` (always even, rung names `180p`…`1080p`), `HostFrame` (I420 with strides,
+    limited range), `DeviceFrame` (an opaque handle on one device), `VideoFrame`.
+  - `scale`: bilinear I420 plane scaling in fixed point, `fit` / `letterbox` / `fill` / `resize`,
+    and the `Scaler` trait with `HostScaler`.
+  - `layout`: `grid` (tightest grid up to 4×4), `active_speaker` (speaker plus a strip of up to
+    five), `spotlight`, `pip`; every tile even-aligned, disjoint and inside the canvas.
+  - `compose`: the `Compositor` trait and `HostCompositor` — letterboxed tiles, name label band
+    with a mute mark, speaking border, initials avatar for audio-only participants, canvas kept
+    between ticks and cleared only when the geometry changes; a frame on another device is
+    refused before anything is drawn.
+  - `font`: a 5×7 bitmap font for labels and avatars; no freetype.
+  - `clock`: `VideoClock` at the room's frame rate, halving after three consecutive overruns
+    (never below a quarter of the target) and climbing back one step after ten calm seconds.
+  - `flavor`: `Flavor` (codec, normalised profile, resolution, fps, bitrate cap), the bitrate
+    ladder (`step_down`: 1080p 2.5 Mb/s → 720p 1.2 → 360p 500 kb/s → 180p 200), and
+    `FlavorTable`, which shares one encoder between subscribers with the same flavor.
+  - `codec`: `VideoDecoder` / `VideoEncoder` / `DecoderFactory` / `EncoderFactory`,
+    `EncoderSettings` with validation, `CodecRegistry` keyed by (codec, device).
+  - `raw`: an uncompressed codec (every frame a keyframe) registered for every `VideoCodec`, so
+    the pipeline, layouts and the conference server are tested end to end without native
+    libraries; `metrics::psnr_luma` for picture comparison.
+  - An integration test runs two participants through raw encode → RTP packetize → frame
+    assembler (with a lost packet) → decode → grid composite → shared-flavor encode → RTP →
+    subscriber decode, checking pixels and PSNR.
+- **forge-video-codecs** (new crate), each binding behind its own feature and registering
+  through `register_all` / `default_registry`:
+  - `vpx`: VP8 and VP9 encode (real-time, CBR, no lag, cpu-used 8, runtime bitrate retarget)
+    and decode via the system libvpx, bindings generated at build time.
+  - `openh264`: H.264 encode (baseline/main/high from `profile-level-id`, real-time, frame
+    skipping expected) and decode via OpenH264 built from source.
+  - `dav1d`: AV1 decode via the system libdav1d.
+  - `svt-av1`: AV1 encode via the system libsvtav1enc (own bindgen; preset 12, low-delay CBR)
+    with a reader thread for the blocking packet API.
+  - Tests per binding: encode → decode round trips with PSNR thresholds, forced keyframes,
+    bitrate change; and one test over every native codec that checks the delivered bitrate
+    against the target and prints encode / decode speed (the phase 0 benchmark as a test).
+- **forge-core**: `VideoCodec` derives `PartialOrd` / `Ord` so it can key ordered tables.
+
+### CI
+
+- A composite action (`.github/actions/video-codecs`) installs libvpx, dav1d, nasm and
+  libclang and builds SVT-AV1 from source at a pinned tag (cached), so the jobs that run with
+  `--all-features` compile and test the native bindings.
+
 ## [2026-09-05] — workspace release
 
 **Video substrate (FCP video conferencing, phase 1).** Everything a video mixer needs below the

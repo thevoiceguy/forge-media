@@ -45,6 +45,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libbcg729-dev jq
 
+      - name: Install native video codec libraries
+        # `--all-features` turns on every forge-video-codecs binding
+        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
+        uses: ./.github/actions/video-codecs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -119,6 +124,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libbcg729-dev jq
 
+      - name: Install native video codec libraries
+        # `--all-features` turns on every forge-video-codecs binding
+        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
+        uses: ./.github/actions/video-codecs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -163,6 +173,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libbcg729-dev jq
+
+      - name: Install native video codec libraries
+        # `--all-features` turns on every forge-video-codecs binding
+        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
+        uses: ./.github/actions/video-codecs
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -326,6 +341,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libbcg729-dev jq
+
+      - name: Install native video codec libraries
+        # `--all-features` turns on every forge-video-codecs binding
+        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
+        uses: ./.github/actions/video-codecs
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -502,6 +522,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libbcg729-dev jq
+
+      - name: Install native video codec libraries
+        # `--all-features` turns on every forge-video-codecs binding
+        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
+        uses: ./.github/actions/video-codecs
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

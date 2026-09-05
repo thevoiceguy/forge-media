@@ -169,6 +169,78 @@ impl SdpProfile {
         )
     }
 
+    /// Audio + video profile: G.711 audio with DTMF, H.264 and VP8 video
+    /// with the feedback a forwarder needs (`nack`, `nack pli`, `ccm fir`).
+    ///
+    /// # Codecs
+    /// - PCMU (PT 0) / PCMA (PT 8) @ 8kHz, telephone-event (PT 101)
+    /// - H264 (PT 96) @ 90kHz, `packetization-mode=1`, constrained baseline 3.1
+    /// - VP8 (PT 97) @ 90kHz
+    ///
+    /// Build with [`with_local_addr_video`](Self::with_local_addr_video);
+    /// [`with_local_addr`](Self::with_local_addr) puts video on
+    /// `audio_port + 2`.
+    pub fn audio_video() -> Self {
+        let builder = MediaProfileBuilder::audio_video()
+            .telephone_event(true)
+            .rtcp_mux(true);
+        Self::new(
+            "audio-video",
+            "G.711 audio with DTMF plus H.264/VP8 video",
+            builder,
+        )
+    }
+
+    /// Whether this profile offers a video section.
+    pub fn has_video(&self) -> bool {
+        self.name == "audio-video"
+    }
+
+    /// Generate a SessionDescription with separate audio and video ports.
+    pub fn with_local_addr_video(
+        &self,
+        local_addr: &str,
+        audio_port: u16,
+        video_port: u16,
+    ) -> SessionDescription {
+        let mut sdp = self
+            .builder
+            .build("forge", local_addr, audio_port, Some(video_port));
+        self.decorate_video(&mut sdp);
+        sdp
+    }
+
+    /// Feedback and fmtp lines on the video section, which the underlying
+    /// builder does not write.
+    fn decorate_video(&self, sdp: &mut SessionDescription) {
+        use crate::video::VideoAttributesExt;
+        use crate::MediaType;
+        if !self.has_video() {
+            return;
+        }
+        for media in sdp
+            .media
+            .iter_mut()
+            .filter(|m| m.media_type == MediaType::Video)
+        {
+            let pts: Vec<u8> = media
+                .formats
+                .iter()
+                .filter_map(|f| f.parse().ok())
+                .collect();
+            for pt in pts {
+                media.add_forwarding_feedback(pt);
+                if media
+                    .rtpmaps
+                    .get(&pt)
+                    .is_some_and(|r| r.encoding_name.eq_ignore_ascii_case("H264"))
+                {
+                    media.set_fmtp(pt, "profile-level-id=42e01f;packetization-mode=1");
+                }
+            }
+        }
+    }
+
     /// Generate a SessionDescription with the specified local address and port
     ///
     /// This generates a complete SDP offer/answer with the actual local address
@@ -191,7 +263,9 @@ impl SdpProfile {
             return self.build_audio_opus_sdp(local_addr, audio_port);
         }
 
-        self.builder.build("forge", local_addr, audio_port, None)
+        let mut sdp = self.builder.build("forge", local_addr, audio_port, None);
+        self.decorate_video(&mut sdp);
+        sdp
     }
 
     /// Build audio-only Opus SDP without G.711 fallbacks.
@@ -340,6 +414,39 @@ impl SdpProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_video_profile_offers_video_with_feedback_and_h264_fmtp() {
+        use crate::video::VideoAttributesExt;
+        use crate::MediaType;
+        let profile = SdpProfile::audio_video();
+        assert!(profile.has_video());
+        let sdp = profile.with_local_addr_video("10.0.0.1", 5000, 5010);
+        assert_eq!(sdp.media.len(), 2);
+        let video = &sdp.media[1];
+        assert_eq!(video.media_type, MediaType::Video);
+        assert_eq!(video.port, 5010);
+        let codecs = video.video_codecs();
+        assert_eq!(codecs.len(), 2);
+        assert_eq!(codecs[0].1, forge_core::VideoCodec::H264);
+        assert!(video.supports_pli(96) && video.supports_fir(96));
+        assert!(video.supports_pli(97) && video.supports_fir(97));
+        assert_eq!(video.h264_fmtp(96).packetization_mode, 1);
+        assert_eq!(video.h264_fmtp(96).profile_level_id, Some(0x42e01f));
+        // Default port placement, and audio-only profiles stay audio-only.
+        assert_eq!(
+            profile.with_local_addr("10.0.0.1", 5000).media[1].port,
+            5002
+        );
+        assert_eq!(
+            SdpProfile::audio_only()
+                .with_local_addr("10.0.0.1", 5000)
+                .media
+                .len(),
+            1
+        );
+        assert!(!SdpProfile::audio_only().has_video());
+    }
     use crate::MediaType;
 
     #[test]

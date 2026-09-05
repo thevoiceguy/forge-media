@@ -68,6 +68,11 @@ pub enum RtcpPacketType {
     BYE = 203,
     /// Application Defined (APP) - 204
     APP = 204,
+    /// Transport layer feedback (RTPFB, RFC 4585) - 205: NACK, transport-cc
+    RTPFB = 205,
+    /// Payload-specific feedback (PSFB, RFC 4585 / RFC 5104) - 206: PLI,
+    /// FIR, REMB
+    PSFB = 206,
 }
 
 impl TryFrom<u8> for RtcpPacketType {
@@ -80,6 +85,8 @@ impl TryFrom<u8> for RtcpPacketType {
             202 => Ok(RtcpPacketType::SDES),
             203 => Ok(RtcpPacketType::BYE),
             204 => Ok(RtcpPacketType::APP),
+            205 => Ok(RtcpPacketType::RTPFB),
+            206 => Ok(RtcpPacketType::PSFB),
             _ => Err(ForgeError::Rtcp(format!(
                 "Unknown RTCP packet type: {}",
                 value
@@ -754,6 +761,313 @@ impl Bye {
     }
 }
 
+// ─── Feedback messages (RFC 4585, RFC 5104, REMB draft) ───────────────────
+//
+// Both feedback packet types share one layout: the common header (where
+// the 5-bit count field carries the feedback message type, FMT), the
+// packet sender's SSRC, the media source's SSRC, then FMT-specific
+// feedback control information (FCI).
+
+/// One entry of a Generic NACK (RFC 4585 §6.2.1): a lost packet id and a
+/// bitmask of the 16 following sequence numbers that are lost too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NackEntry {
+    pub packet_id: u16,
+    pub bitmask: u16,
+}
+
+impl NackEntry {
+    /// Every sequence number this entry reports lost.
+    pub fn lost(&self) -> Vec<u16> {
+        let mut lost = vec![self.packet_id];
+        for bit in 0..16 {
+            if self.bitmask & (1 << bit) != 0 {
+                lost.push(self.packet_id.wrapping_add(bit + 1));
+            }
+        }
+        lost
+    }
+}
+
+/// Transport layer feedback (PT 205).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportFeedback {
+    /// Generic NACK (FMT 1).
+    Nack(Vec<NackEntry>),
+    /// Any other FMT (e.g. 15 = transport-cc), FCI kept verbatim.
+    Other { fmt: u8, fci: Vec<u8> },
+}
+
+/// Full Intra Request entry (RFC 5104 §4.3.1): one per source asked for a
+/// keyframe, with a sequence number the requester bumps per new request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirEntry {
+    pub ssrc: u32,
+    pub seq: u8,
+}
+
+/// Payload-specific feedback (PT 206).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PayloadFeedback {
+    /// Picture Loss Indication (FMT 1): "send me a keyframe".
+    Pli,
+    /// Full Intra Request (FMT 4): a keyframe demand the sender must obey.
+    Fir(Vec<FirEntry>),
+    /// Receiver Estimated Maximum Bitrate (FMT 15, `REMB` application
+    /// feedback), in bits per second, for the listed media sources.
+    Remb { bitrate_bps: u64, ssrcs: Vec<u32> },
+    /// Any other FMT (e.g. 3 = SLI, 5 = TSTR), FCI kept verbatim.
+    Other { fmt: u8, fci: Vec<u8> },
+}
+
+/// A feedback message: who sends it, which media source it is about, and
+/// what it says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedbackMessage<K> {
+    /// SSRC of the packet sender (the receiver of the media).
+    pub sender_ssrc: u32,
+    /// SSRC of the media source the feedback is about (0 for REMB, which
+    /// lists its sources in the FCI).
+    pub media_ssrc: u32,
+    pub kind: K,
+}
+
+/// Transport layer feedback packet.
+pub type RtpFeedback = FeedbackMessage<TransportFeedback>;
+/// Payload-specific feedback packet.
+pub type PsFeedback = FeedbackMessage<PayloadFeedback>;
+
+impl RtpFeedback {
+    /// A Generic NACK for `lost` sequence numbers, packed into as few
+    /// entries as the 17-packet windows allow. `lost` must be sorted.
+    pub fn nack(sender_ssrc: u32, media_ssrc: u32, lost: &[u16]) -> Self {
+        let mut entries: Vec<NackEntry> = Vec::new();
+        for &seq in lost {
+            if let Some(last) = entries.last_mut() {
+                let delta = seq.wrapping_sub(last.packet_id);
+                if (1..=16).contains(&delta) {
+                    last.bitmask |= 1 << (delta - 1);
+                    continue;
+                }
+            }
+            entries.push(NackEntry {
+                packet_id: seq,
+                bitmask: 0,
+            });
+        }
+        Self {
+            sender_ssrc,
+            media_ssrc,
+            kind: TransportFeedback::Nack(entries),
+        }
+    }
+
+    fn parse(data: &[u8], fmt: u8) -> Result<Self> {
+        let (sender_ssrc, media_ssrc, fci) = split_feedback(data)?;
+        let kind = match fmt {
+            1 => {
+                if fci.len() % 4 != 0 {
+                    return Err(ForgeError::Rtcp("NACK FCI not a multiple of 4".into()));
+                }
+                TransportFeedback::Nack(
+                    fci.chunks_exact(4)
+                        .map(|c| NackEntry {
+                            packet_id: u16::from_be_bytes([c[0], c[1]]),
+                            bitmask: u16::from_be_bytes([c[2], c[3]]),
+                        })
+                        .collect(),
+                )
+            }
+            fmt => TransportFeedback::Other {
+                fmt,
+                fci: fci.to_vec(),
+            },
+        };
+        Ok(Self {
+            sender_ssrc,
+            media_ssrc,
+            kind,
+        })
+    }
+
+    fn fmt(&self) -> u8 {
+        match &self.kind {
+            TransportFeedback::Nack(_) => 1,
+            TransportFeedback::Other { fmt, .. } => *fmt,
+        }
+    }
+
+    fn fci(&self) -> Vec<u8> {
+        match &self.kind {
+            TransportFeedback::Nack(entries) => {
+                let mut buf = BytesMut::with_capacity(entries.len() * 4);
+                for e in entries {
+                    buf.put_u16(e.packet_id);
+                    buf.put_u16(e.bitmask);
+                }
+                buf.to_vec()
+            }
+            TransportFeedback::Other { fci, .. } => fci.clone(),
+        }
+    }
+}
+
+impl PsFeedback {
+    /// A PLI for `media_ssrc`.
+    pub fn pli(sender_ssrc: u32, media_ssrc: u32) -> Self {
+        Self {
+            sender_ssrc,
+            media_ssrc,
+            kind: PayloadFeedback::Pli,
+        }
+    }
+
+    /// A FIR for one source. `seq` must change for every new request and
+    /// stay the same for retransmissions of one request (RFC 5104 §4.3.1.2).
+    pub fn fir(sender_ssrc: u32, media_ssrc: u32, seq: u8) -> Self {
+        Self {
+            sender_ssrc,
+            media_ssrc: 0,
+            kind: PayloadFeedback::Fir(vec![FirEntry {
+                ssrc: media_ssrc,
+                seq,
+            }]),
+        }
+    }
+
+    /// A REMB telling the listed sources to stay under `bitrate_bps` in
+    /// total.
+    pub fn remb(sender_ssrc: u32, bitrate_bps: u64, ssrcs: Vec<u32>) -> Self {
+        Self {
+            sender_ssrc,
+            media_ssrc: 0,
+            kind: PayloadFeedback::Remb { bitrate_bps, ssrcs },
+        }
+    }
+
+    fn parse(data: &[u8], fmt: u8) -> Result<Self> {
+        let (sender_ssrc, media_ssrc, fci) = split_feedback(data)?;
+        let kind = match fmt {
+            1 => PayloadFeedback::Pli,
+            4 => {
+                if fci.len() % 8 != 0 {
+                    return Err(ForgeError::Rtcp("FIR FCI not a multiple of 8".into()));
+                }
+                PayloadFeedback::Fir(
+                    fci.chunks_exact(8)
+                        .map(|c| FirEntry {
+                            ssrc: u32::from_be_bytes([c[0], c[1], c[2], c[3]]),
+                            seq: c[4],
+                        })
+                        .collect(),
+                )
+            }
+            15 if fci.len() >= 8 && &fci[..4] == b"REMB" => {
+                let num_ssrcs = fci[4] as usize;
+                let exp = (fci[5] >> 2) as u32;
+                let mantissa =
+                    (((fci[5] & 0x03) as u64) << 16) | ((fci[6] as u64) << 8) | fci[7] as u64;
+                if fci.len() < 8 + num_ssrcs * 4 {
+                    return Err(ForgeError::Rtcp("REMB FCI truncated".into()));
+                }
+                let ssrcs = fci[8..8 + num_ssrcs * 4]
+                    .chunks_exact(4)
+                    .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                PayloadFeedback::Remb {
+                    bitrate_bps: mantissa << exp,
+                    ssrcs,
+                }
+            }
+            fmt => PayloadFeedback::Other {
+                fmt,
+                fci: fci.to_vec(),
+            },
+        };
+        Ok(Self {
+            sender_ssrc,
+            media_ssrc,
+            kind,
+        })
+    }
+
+    fn fmt(&self) -> u8 {
+        match &self.kind {
+            PayloadFeedback::Pli => 1,
+            PayloadFeedback::Fir(_) => 4,
+            PayloadFeedback::Remb { .. } => 15,
+            PayloadFeedback::Other { fmt, .. } => *fmt,
+        }
+    }
+
+    fn fci(&self) -> Vec<u8> {
+        match &self.kind {
+            PayloadFeedback::Pli => Vec::new(),
+            PayloadFeedback::Fir(entries) => {
+                let mut buf = BytesMut::with_capacity(entries.len() * 8);
+                for e in entries {
+                    buf.put_u32(e.ssrc);
+                    buf.put_u8(e.seq);
+                    buf.put_slice(&[0, 0, 0]);
+                }
+                buf.to_vec()
+            }
+            PayloadFeedback::Remb { bitrate_bps, ssrcs } => {
+                // 18-bit mantissa, 6-bit exponent: shift until it fits.
+                let mut exp = 0u32;
+                let mut mantissa = *bitrate_bps;
+                while mantissa > 0x3FFFF {
+                    mantissa >>= 1;
+                    exp += 1;
+                }
+                let mut buf = BytesMut::with_capacity(8 + ssrcs.len() * 4);
+                buf.put_slice(b"REMB");
+                buf.put_u8(ssrcs.len() as u8);
+                buf.put_u8(((exp as u8) << 2) | ((mantissa >> 16) as u8 & 0x03));
+                buf.put_u16((mantissa & 0xFFFF) as u16);
+                for ssrc in ssrcs {
+                    buf.put_u32(*ssrc);
+                }
+                buf.to_vec()
+            }
+            PayloadFeedback::Other { fci, .. } => fci.clone(),
+        }
+    }
+}
+
+/// Split a feedback body (after the common header) into sender SSRC,
+/// media SSRC and FCI.
+fn split_feedback(data: &[u8]) -> Result<(u32, u32, &[u8])> {
+    if data.len() < 8 {
+        return Err(ForgeError::Rtcp("Feedback packet too short".into()));
+    }
+    let sender = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    let media = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    Ok((sender, media, &data[8..]))
+}
+
+/// Header + body for a feedback packet.
+fn feedback_bytes(
+    packet_type: RtcpPacketType,
+    fmt: u8,
+    sender: u32,
+    media: u32,
+    fci: &[u8],
+) -> Vec<u8> {
+    let header = RtcpHeader {
+        version: 2,
+        padding: false,
+        count: fmt & 0x1F,
+        packet_type,
+        length: ((8 + fci.len()) / 4) as u16, // (12 + fci) / 4 - 1
+    };
+    let mut buf = header.to_bytes();
+    buf.extend_from_slice(&sender.to_be_bytes());
+    buf.extend_from_slice(&media.to_be_bytes());
+    buf.extend_from_slice(fci);
+    buf
+}
+
 /// Compound RTCP packet
 #[derive(Debug, Clone)]
 pub enum RtcpPacket {
@@ -765,6 +1079,10 @@ pub enum RtcpPacket {
     SourceDescription(SourceDescription),
     /// Goodbye
     Bye(Bye),
+    /// Transport layer feedback (NACK, …)
+    TransportFeedback(RtpFeedback),
+    /// Payload-specific feedback (PLI, FIR, REMB, …)
+    PayloadFeedback(PsFeedback),
 }
 
 impl RtcpPacket {
@@ -790,7 +1108,77 @@ impl RtcpPacket {
                 Ok(RtcpPacket::Bye(bye))
             }
             RtcpPacketType::APP => Err(ForgeError::Rtcp("APP packets not supported".to_string())),
+            RtcpPacketType::RTPFB => {
+                let body = Self::body(data, &header)?;
+                Ok(RtcpPacket::TransportFeedback(RtpFeedback::parse(
+                    body,
+                    header.count,
+                )?))
+            }
+            RtcpPacketType::PSFB => {
+                let body = Self::body(data, &header)?;
+                Ok(RtcpPacket::PayloadFeedback(PsFeedback::parse(
+                    body,
+                    header.count,
+                )?))
+            }
         }
+    }
+
+    /// The bytes of one sub-packet after its header, bounded by the
+    /// header's length field so trailing compound data is not consumed.
+    fn body<'a>(data: &'a [u8], header: &RtcpHeader) -> Result<&'a [u8]> {
+        let total = (header.length as usize + 1) * 4;
+        if data.len() < total {
+            return Err(ForgeError::Rtcp(
+                "RTCP packet shorter than its length".into(),
+            ));
+        }
+        Ok(&data[4..total])
+    }
+
+    /// Parse every sub-packet of a compound RTCP packet (RFC 3550 §6.1).
+    /// Sub-packets of kinds forge does not model (APP, XR, …) are skipped,
+    /// so one unknown block never hides the reports and feedback around
+    /// it; a malformed header ends the parse with what was read so far.
+    pub fn parse_compound(mut data: &[u8]) -> Vec<RtcpPacket> {
+        let mut packets = Vec::new();
+        while data.len() >= 4 {
+            let length = u16::from_be_bytes([data[2], data[3]]) as usize;
+            let total = (length + 1) * 4;
+            if total > data.len() || (data[0] >> 6) != 2 {
+                break;
+            }
+            if let Ok(packet) = Self::parse(&data[..total]) {
+                packets.push(packet);
+            }
+            data = &data[total..];
+        }
+        packets
+    }
+
+    /// The media source a feedback packet is about, if this is one.
+    pub fn feedback_media_ssrc(&self) -> Option<u32> {
+        match self {
+            RtcpPacket::TransportFeedback(fb) => Some(fb.media_ssrc),
+            RtcpPacket::PayloadFeedback(fb) => match &fb.kind {
+                PayloadFeedback::Fir(entries) => entries.first().map(|e| e.ssrc),
+                _ => Some(fb.media_ssrc),
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether this packet asks the media source for a keyframe (PLI or
+    /// FIR).
+    pub fn is_keyframe_request(&self) -> bool {
+        matches!(
+            self,
+            RtcpPacket::PayloadFeedback(PsFeedback {
+                kind: PayloadFeedback::Pli | PayloadFeedback::Fir(_),
+                ..
+            })
+        )
     }
 
     /// Serialize RTCP packet to bytes
@@ -815,7 +1203,8 @@ impl RtcpPacket {
                     padding: false,
                     count: rr.report_blocks.len() as u8,
                     packet_type: RtcpPacketType::RR,
-                    length: ((4 + rr.report_blocks.len() * 24) / 4 - 1) as u16,
+                    // Header (4) + SSRC (4) + blocks, in words, minus one.
+                    length: ((8 + rr.report_blocks.len() * 24) / 4 - 1) as u16,
                 };
 
                 let mut buf = header.to_bytes();
@@ -850,6 +1239,20 @@ impl RtcpPacket {
                 buf.extend_from_slice(&payload);
                 buf
             }
+            RtcpPacket::TransportFeedback(fb) => feedback_bytes(
+                RtcpPacketType::RTPFB,
+                fb.fmt(),
+                fb.sender_ssrc,
+                fb.media_ssrc,
+                &fb.fci(),
+            ),
+            RtcpPacket::PayloadFeedback(fb) => feedback_bytes(
+                RtcpPacketType::PSFB,
+                fb.fmt(),
+                fb.sender_ssrc,
+                fb.media_ssrc,
+                &fb.fci(),
+            ),
         }
     }
 }
@@ -1078,5 +1481,175 @@ mod tests {
             msg.contains("RC=5") && msg.contains("bytes remain"),
             "error should describe the RC vs available-bytes mismatch; got: {msg}",
         );
+    }
+
+    // ─── Feedback (RFC 4585 / 5104 / REMB) ─────────────────────────────
+
+    #[test]
+    fn pli_round_trips_and_is_a_keyframe_request() {
+        let pli = RtcpPacket::PayloadFeedback(PsFeedback::pli(0x1111, 0x2222));
+        let bytes = pli.to_bytes();
+        // V=2, FMT=1, PT=206, length=2 (12 bytes), sender, media.
+        assert_eq!(
+            bytes,
+            vec![0x81, 206, 0, 2, 0, 0, 0x11, 0x11, 0, 0, 0x22, 0x22]
+        );
+        let back = RtcpPacket::parse(&bytes).unwrap();
+        assert!(back.is_keyframe_request());
+        assert_eq!(back.feedback_media_ssrc(), Some(0x2222));
+        match back {
+            RtcpPacket::PayloadFeedback(fb) => {
+                assert_eq!(fb.sender_ssrc, 0x1111);
+                assert_eq!(fb.kind, PayloadFeedback::Pli);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn fir_carries_the_target_ssrc_in_its_fci() {
+        let fir = RtcpPacket::PayloadFeedback(PsFeedback::fir(1, 0xABCD, 7));
+        let bytes = fir.to_bytes();
+        assert_eq!(bytes[0] & 0x1F, 4);
+        assert_eq!(bytes.len(), 20);
+        let back = RtcpPacket::parse(&bytes).unwrap();
+        assert!(back.is_keyframe_request());
+        assert_eq!(back.feedback_media_ssrc(), Some(0xABCD));
+        match back {
+            RtcpPacket::PayloadFeedback(PsFeedback {
+                kind: PayloadFeedback::Fir(entries),
+                media_ssrc,
+                ..
+            }) => {
+                assert_eq!(media_ssrc, 0);
+                assert_eq!(
+                    entries,
+                    vec![FirEntry {
+                        ssrc: 0xABCD,
+                        seq: 7
+                    }]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn nack_packs_runs_into_bitmasks_and_lists_them_back() {
+        let lost = [100u16, 101, 103, 116, 117, 200];
+        let nack = RtpFeedback::nack(9, 8, &lost);
+        let entries = match &nack.kind {
+            TransportFeedback::Nack(e) => e.clone(),
+            other => panic!("{other:?}"),
+        };
+        // 100 + {101, 103, 116} fit one window (offsets 1, 3, 16); 117 and
+        // 200 do not.
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].packet_id, 100);
+        assert_eq!(entries[0].bitmask, (1 << 0) | (1 << 2) | (1 << 15));
+        assert_eq!(entries[1].packet_id, 117);
+        assert_eq!(entries[2].packet_id, 200);
+        let all: Vec<u16> = entries.iter().flat_map(|e| e.lost()).collect();
+        assert_eq!(all, lost);
+
+        let bytes = RtcpPacket::TransportFeedback(nack.clone()).to_bytes();
+        assert_eq!(bytes[1], 205);
+        assert_eq!(bytes[0] & 0x1F, 1);
+        match RtcpPacket::parse(&bytes).unwrap() {
+            RtcpPacket::TransportFeedback(back) => assert_eq!(back, nack),
+            other => panic!("{other:?}"),
+        }
+        // Wrap-around window.
+        let wrapped = RtpFeedback::nack(1, 2, &[65535, 0, 1]);
+        match wrapped.kind {
+            TransportFeedback::Nack(e) => {
+                assert_eq!(e.len(), 1);
+                assert_eq!(e[0].lost(), vec![65535, 0, 1]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn remb_encodes_bitrate_as_mantissa_and_exponent() {
+        for bitrate in [0u64, 1_000, 250_000, 2_500_000, 1u64 << 40] {
+            let remb = PsFeedback::remb(5, bitrate, vec![0xA, 0xB]);
+            let bytes = RtcpPacket::PayloadFeedback(remb).to_bytes();
+            assert_eq!(bytes[0] & 0x1F, 15);
+            assert_eq!(&bytes[12..16], b"REMB");
+            match RtcpPacket::parse(&bytes).unwrap() {
+                RtcpPacket::PayloadFeedback(PsFeedback {
+                    kind: PayloadFeedback::Remb { bitrate_bps, ssrcs },
+                    ..
+                }) => {
+                    // 18 significant bits survive.
+                    assert!(bitrate_bps <= bitrate, "{bitrate_bps} > {bitrate}");
+                    assert!(
+                        bitrate - bitrate_bps <= bitrate >> 17,
+                        "{bitrate_bps} vs {bitrate}"
+                    );
+                    assert_eq!(ssrcs, vec![0xA, 0xB]);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_feedback_formats_keep_their_fci() {
+        // transport-cc (RTPFB FMT 15) with an opaque body.
+        let bytes = feedback_bytes(RtcpPacketType::RTPFB, 15, 1, 2, &[1, 2, 3, 4]);
+        match RtcpPacket::parse(&bytes).unwrap() {
+            RtcpPacket::TransportFeedback(FeedbackMessage {
+                kind: TransportFeedback::Other { fmt, fci },
+                ..
+            }) => {
+                assert_eq!(fmt, 15);
+                assert_eq!(fci, vec![1, 2, 3, 4]);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Something claiming FMT 15 PSFB that is not REMB.
+        let bytes = feedback_bytes(RtcpPacketType::PSFB, 15, 1, 2, b"XXXX\0\0\0\0");
+        match RtcpPacket::parse(&bytes).unwrap() {
+            RtcpPacket::PayloadFeedback(FeedbackMessage {
+                kind: PayloadFeedback::Other { fmt: 15, .. },
+                ..
+            }) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn receiver_report_length_field_covers_its_ssrc() {
+        // An RR with no blocks is 8 bytes: length 1. With one block, 32
+        // bytes: length 7. (The field was one word short before.)
+        let rr = RtcpPacket::ReceiverReport(ReceiverReport::new(7)).to_bytes();
+        assert_eq!(rr.len(), 8);
+        assert_eq!(u16::from_be_bytes([rr[2], rr[3]]), 1);
+        let mut with_block = ReceiverReport::new(7);
+        with_block.add_report_block(ReceptionReportBlock::new(9));
+        let bytes = RtcpPacket::ReceiverReport(with_block).to_bytes();
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 7);
+    }
+
+    #[test]
+    fn compound_parse_yields_every_known_sub_packet_and_skips_the_rest() {
+        let mut bytes = RtcpPacket::ReceiverReport(ReceiverReport::new(7)).to_bytes();
+        // An XR block (PT 207) forge does not model, 8 bytes.
+        bytes.extend_from_slice(&[0x80, 207, 0, 1, 0, 0, 0, 7]);
+        bytes.extend_from_slice(&RtcpPacket::PayloadFeedback(PsFeedback::pli(7, 9)).to_bytes());
+        bytes.extend_from_slice(
+            &RtcpPacket::TransportFeedback(RtpFeedback::nack(7, 9, &[3])).to_bytes(),
+        );
+        let packets = RtcpPacket::parse_compound(&bytes);
+        assert_eq!(packets.len(), 3, "{packets:?}");
+        assert!(matches!(packets[0], RtcpPacket::ReceiverReport(_)));
+        assert!(packets[1].is_keyframe_request());
+        assert!(matches!(packets[2], RtcpPacket::TransportFeedback(_)));
+        // Truncated tail: what parsed so far is returned.
+        let cut = &bytes[..bytes.len() - 3];
+        assert_eq!(RtcpPacket::parse_compound(cut).len(), 2);
     }
 }

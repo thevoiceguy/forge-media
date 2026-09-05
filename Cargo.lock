@@ -1552,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "forge-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1757,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1783,7 +1783,7 @@ dependencies = [
 
 [[package]]
 name = "forge-sdp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",

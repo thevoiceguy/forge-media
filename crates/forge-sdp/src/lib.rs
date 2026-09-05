@@ -37,6 +37,7 @@ pub mod dtls;
 pub mod ice;
 pub mod profiles;
 pub mod sdes;
+pub mod video;
 
 use thiserror::Error;
 
@@ -51,6 +52,10 @@ pub use ice::{IceAttributesExt, IceCandidateParams, MediaIceAttributesExt};
 
 // Re-export DTLS attribute helpers
 pub use dtls::{DtlsAttributesExt, DtlsSetup, MediaDtlsAttributesExt};
+pub use video::{
+    active_video, answer_direction, answer_video, choose_video_codec, direction_of, reject_section,
+    H264Fmtp, RtcpFeedbackAttr, VideoAttributesExt,
+};
 
 /// Forge-specific SDP error types
 #[derive(Error, Debug)]

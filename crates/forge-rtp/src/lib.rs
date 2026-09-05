@@ -11,6 +11,7 @@ pub mod rtp;
 pub mod rtt;
 pub mod socket;
 pub mod srtp;
+pub mod video;
 
 #[cfg(feature = "dtls")]
 pub mod dtls;
@@ -22,3 +23,7 @@ pub use rtp::*;
 pub use rtt::{ntp_middle32, RttTracker};
 pub use socket::*;
 pub use srtp::*;
+pub use video::{
+    AssemblerEvent, CodedFrame, FrameAssembler, KeyframeRequestGate, PayloadError, PayloadInfo,
+    RtxCache, StreamRewriter,
+};

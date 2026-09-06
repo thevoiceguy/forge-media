@@ -25,7 +25,7 @@ the name consts in each emitting crate:
 |---|---|---|
 | forge-rtp | `forge_rtp::metrics` | 8 |
 | forge-engine | `forge_engine::metrics` | 48 |
-| forge-conference | `forge_conference::metrics` | 13 |
+| forge-conference | `forge_conference::metrics` | 30 |
 | forge-api | `forge_api::metrics` | 10 |
 
 `describe_metrics()` in each module is idempotent and **must run after a
@@ -160,6 +160,23 @@ per-call values) or the label cardinality is unbounded.
 | `forge_conference_recordings_active` | gauge | `room_id` | Whether a room-level recording is running (0 or 1). |
 | `forge_conference_participant_recordings_started_total` | counter | `room_id`, `participant_id` | Per-participant recordings started. |
 | `forge_conference_participant_recordings_stopped_total` | counter | `room_id`, `participant_id` | Per-participant recordings stopped. |
+| `forge_conference_video_rooms` | gauge | | Rooms with video running. |
+| `forge_conference_video_sources` | gauge | | Participants sending video, node-wide. |
+| `forge_conference_video_encoders` | gauge | | Video encoders running, node-wide (one per flavor per layout output). |
+| `forge_conference_video_fps` | gauge | `room_id` | A room's current video frame rate (halved under overload, restored when calm). |
+| `forge_conference_video_ticks_total` | counter | `room_id` | Video clock ticks (compose passes). |
+| `forge_conference_video_frames_decoded_total` | counter | `room_id` | Video frames decoded from participants. |
+| `forge_conference_video_frames_lost_total` | counter | `room_id` | Video frames the assembler gave up on (loss or invalid payload). |
+| `forge_conference_video_frames_dropped_total` | counter | `room_id` | Video frames not decoded: waiting for a keyframe, decode queue full, over the frame-rate or resolution limit. |
+| `forge_conference_video_decode_errors_total` | counter | `room_id` | Video decoder errors; ten in a row fail the source. |
+| `forge_conference_video_encode_errors_total` | counter | `room_id` | Video encoder errors. |
+| `forge_conference_video_keyframes_sent_total` | counter | `room_id` | Keyframes produced by composite encoders. |
+| `forge_conference_video_packets_sent_total` | counter | `room_id` | Composite frames handed to subscribers (one per subscriber per frame). |
+| `forge_conference_video_plis_sent_total` | counter | `room_id` | PLIs sent to video sources. |
+| `forge_conference_video_plis_received_total` | counter | `room_id` | PLIs and FIRs received from video subscribers. |
+| `forge_conference_video_nacks_sent_total` | counter | `room_id` | NACKs sent to video sources. |
+| `forge_conference_video_nacks_received_total` | counter | `room_id` | NACKs received from video subscribers. |
+| `forge_conference_video_compose_duration_seconds` | histogram | `room_id` | Wall time of one video compose pass (render every layout output, encode every flavor). Suggested buckets: `VIDEO_COMPOSE_DURATION_SECONDS_BUCKETS` (1 ms – 200 ms; the budget is one tick, 66 ms at 15 fps, and three overruns in a row halve the rate). |
 
 ### forge-api
 

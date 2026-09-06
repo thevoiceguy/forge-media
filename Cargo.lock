@@ -1629,7 +1629,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1637,9 +1637,12 @@ dependencies = [
  "forge-engine",
  "forge-mixer",
  "forge-recorder",
+ "forge-rtp",
+ "forge-video",
  "hound",
  "metrics",
  "parking_lot",
+ "rand 0.10.2",
  "serde",
  "tempfile",
  "thiserror 2.0.20",
@@ -1815,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mixer"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1889,7 +1892,7 @@ dependencies = [
  "forge-ice",
  "forge-rtp",
  "rand 0.10.2",
- "sip-sdp 0.3.1 (git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.03)",
+ "sip-sdp 0.3.2 (git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.05)",
  "smol_str",
  "thiserror 2.0.20",
 ]
@@ -1907,7 +1910,7 @@ dependencies = [
  "serde_json",
  "sip-core",
  "sip-parse",
- "sip-sdp 0.3.1",
+ "sip-sdp 0.3.2",
  "sip-transport",
  "sip-uas",
  "thiserror 2.0.20",
@@ -4461,7 +4464,7 @@ dependencies = [
 
 [[package]]
 name = "sip-sdp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "nom 7.1.3",
  "smol_str",
@@ -4469,8 +4472,8 @@ dependencies = [
 
 [[package]]
 name = "sip-sdp"
-version = "0.3.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.03#0bed4fd3d9a3c99da4860effd61402a30f0c4842"
+version = "0.3.2"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.05#96f9bd4be2d4d0d8c48f94f896b33b961e4d58fe"
 dependencies = [
  "nom 7.1.3",
  "smol_str",
@@ -4535,7 +4538,7 @@ dependencies = [
  "sip-core",
  "sip-dialog",
  "sip-parse",
- "sip-sdp 0.3.1",
+ "sip-sdp 0.3.2",
  "sip-transaction",
  "sip-transport",
  "smol_str",

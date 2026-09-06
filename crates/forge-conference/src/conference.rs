@@ -7,6 +7,7 @@ use crate::dtmf_commands::{
 };
 use crate::pin_auth::PinAuthenticator;
 use crate::room_config::EffectiveRoomConfig;
+use crate::video::{VideoBackend, VideoRoom, VideoRoomSettings};
 use crate::{AudioFormat, ConferenceError, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -73,6 +74,8 @@ pub struct ConferenceRoom {
     frame_clock_task: parking_lot::Mutex<Option<JoinHandle<()>>>,
     /// Frame sequence broadcast to consumers waiting on the clock
     frame_tx: tokio::sync::watch::Sender<u64>,
+    /// The video room, when the meeting has video enabled
+    video: RwLock<Option<Arc<VideoRoom>>>,
 }
 
 impl ConferenceRoom {
@@ -115,7 +118,43 @@ impl ConferenceRoom {
             frame_size,
             frame_clock_task: parking_lot::Mutex::new(None),
             frame_tx: tokio::sync::watch::channel(0).0,
+            video: RwLock::new(None),
         })
+    }
+
+    // ---- video ------------------------------------------------------------
+
+    /// Start the room's video (or return the running one). Participants
+    /// already in the room are adopted; later joins and leaves follow
+    /// automatically. Settings of a running room are left alone: use the
+    /// [`VideoRoom`] setters to change them.
+    pub fn enable_video(
+        self: &Arc<Self>,
+        settings: VideoRoomSettings,
+        backend: &VideoBackend,
+    ) -> Arc<VideoRoom> {
+        if let Some(v) = self.video.read().as_ref() {
+            return Arc::clone(v);
+        }
+        let mut slot = self.video.write();
+        if let Some(v) = slot.as_ref() {
+            return Arc::clone(v);
+        }
+        let room = VideoRoom::start(&self.id, settings, backend.clone(), self);
+        *slot = Some(Arc::clone(&room));
+        room
+    }
+
+    /// Stop the room's video; every participant's video leg is dropped.
+    pub fn disable_video(&self) {
+        if let Some(v) = self.video.write().take() {
+            v.stop();
+        }
+    }
+
+    /// The video room, when enabled.
+    pub fn video(&self) -> Option<Arc<VideoRoom>> {
+        self.video.read().clone()
     }
 
     /// Configure room with PIN authentication and room-specific settings
@@ -581,6 +620,9 @@ impl ConferenceRoom {
     fn add_participant_inner(&self, participant_id: &str, play_sound: bool) -> Result<()> {
         info!("Adding participant {} to room {}", participant_id, self.id);
         self.mixer.add_participant(participant_id, None)?;
+        if let Some(v) = self.video.read().as_ref() {
+            v.participant_joined(participant_id);
+        }
 
         // Play join sound only if requested
         if play_sound {
@@ -669,6 +711,9 @@ impl ConferenceRoom {
 
         // Remove from mixer
         self.mixer.remove_participant(participant_id)?;
+        if let Some(v) = self.video.read().as_ref() {
+            v.participant_left(participant_id);
+        }
 
         // Play exit sound
         self.play_exit_sound();
@@ -1630,6 +1675,9 @@ impl ConferenceRoom {
 
 impl Drop for ConferenceRoom {
     fn drop(&mut self) {
+        if let Some(v) = self.video.get_mut().take() {
+            v.stop();
+        }
         if let Some(task) = self.frame_clock_task.get_mut().take() {
             task.abort();
         }
@@ -1733,6 +1781,7 @@ impl ConferenceBridge {
             }
         }
         room.stop_frame_clock();
+        room.disable_video();
 
         // Update metrics
         counter!("forge_conference_rooms_deleted_total").increment(1);

@@ -48,7 +48,7 @@ forge-media/
 │   ├── forge-engine/       # Core engine, sessions, sockets
 │   ├── forge-transcoding/  # Codec implementations
 │   ├── forge-kernel/       # Kernel offload (netfilter/eBPF)
-│   ├── forge-conference/   # Audio conferencing
+│   ├── forge-conference/   # Audio conferencing, and the video room beside it
 │   ├── forge-video/        # Video mixer core: frames, scaling, layouts, compositor, clock, flavors
 │   ├── forge-video-codecs/ # Native video codecs (libvpx, OpenH264, dav1d, SVT-AV1) behind features
 │   ├── forge-recording/    # Recording system

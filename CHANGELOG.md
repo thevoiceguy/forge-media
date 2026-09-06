@@ -63,6 +63,15 @@ the workspace or FCP does).
 - **forge-mixer**: `ParticipantMetadata::energy`, a smoothed RMS of the participant's
   recent audio, for active-speaker selection.
 
+### Changed
+
+- **Release profile**: `lto = "fat"` (was `"thin"`). With rustc 1.98, thin LTO together
+  with `codegen-units = 1` dropped the cross-crate definitions that only
+  forge-conference's video module references (`rust-lld: undefined symbol:
+  forge_rtp::video::payload::packetize`, `<HostCompositor as Compositor>::render`, …
+  while linking the `forge-media` binary); thin LTO with 16 units and fat LTO with one
+  both link. Release builds take longer; the binaries are, if anything, faster.
+
 ## [2026-09-05.1] — workspace release
 
 **Video mixer core (FCP video conferencing, phase 2).** Two new crates above the phase 1

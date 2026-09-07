@@ -17,7 +17,7 @@
 //!   binding implements, and the registry that picks one per device.
 //! - [`raw`]: an uncompressed "codec" so the whole pipeline is testable
 //!   without native libraries.
-//! - [`bench`]: the synthetic sources and the self-benchmark a node runs
+//! - [`bench`](mod@bench): the synthetic sources and the self-benchmark a node runs
 //!   at start to price codecs and composition per pixel.
 //!
 //! Design: FCP `docs/VIDEO_CONFERENCING.md`.

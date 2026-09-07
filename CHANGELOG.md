@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Self-benchmark (FCP video conferencing, phase 3c).** `forge-video` gains a public
+`bench` module: the synthetic sources the codec bindings' tests already used (`synth`,
+`noisy`) and the measurements a node runs at start to price its devices for FCP's
+capacity model (design §9.3): `measure_codec` times one codec's encode and decode of the
+hard source and reports nanoseconds per pixel, the delivered bitrate and whether the run
+fit its wall-clock budget; `measure_all` does that for every codec a registry serves on a
+device; `measure_compose` times the host compositor drawing a grid. `CodecCost` turns the
+constants back into "streams per execution unit" for logs. forge-video-codecs' test
+sources now come from there and its bench test also runs the self-benchmark on each
+native codec.
+
+**Crate versions:** **forge-video 0.2.0**. forge-video-codecs is unchanged in its API.
+
+**Breaking changes:** none.
+
+### Added
+
+- **forge-video** `bench`: `synth`, `noisy`, `BenchSettings` (640×360 @ 30, 800 kb/s,
+  90 frames, 3 s budget by default), `CodecCost` with `encode_streams_per_unit` /
+  `decode_streams_per_unit`, `measure_codec`, `measure_all`, `measure_compose`.
+  Re-exported at the crate root: `BenchSettings`, `CodecCost`.
+
+### Changed
+
+- **forge-video-codecs**: `testsrc::{synth, noisy}` re-export `forge_video::bench`; the
+  bitrate/speed test prints each native codec's self-benchmark constants beside its own
+  numbers.
+
 ## [2026-09-06] — workspace release
 
 **Conference video (FCP video conferencing, phase 3b).** The video room beside the

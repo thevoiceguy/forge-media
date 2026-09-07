@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-07.1] — workspace release
+
 **Video over WebRTC (FCP video conferencing, phase 4a).** `forge-webrtc` negotiates
 a video section beside the audio one: `PeerConfig::video` (codecs in preference order
 with offered payload types, direction, H.264 `profile-level-id`, a `b=AS` cap) puts

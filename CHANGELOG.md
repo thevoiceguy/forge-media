@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-06] — workspace release
+
 **Conference video (FCP video conferencing, phase 3b).** The video room beside the
 audio room. `forge-conference` gains `VideoRoom`: participants' RTP goes in, is
 reassembled and decoded on a dedicated codec thread pool into per-participant frame

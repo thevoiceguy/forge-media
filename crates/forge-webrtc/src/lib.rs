@@ -8,9 +8,13 @@
 //! - SRTP/SRTCP (RFC 3711, RFC 7714) with keys installed straight from the
 //!   DTLS export — no engine session required
 //! - SDP offer **and** answer (RFC 3264, RFC 8829), one audio section —
-//!   Opus and G.711 (PCMU/PCMA), preference-ordered via
-//!   [`PeerConfig::codecs`] — BUNDLE + rtcp-mux; renegotiation on the same
+//!   Opus, G.722 and G.711 (PCMU/PCMA), preference-ordered via
+//!   [`PeerConfig::codecs`] — and an optional video section (H.264, VP8,
+//!   VP9, AV1 via [`PeerConfig::video`]) with `nack`, `nack pli`, `ccm fir`
+//!   and `goog-remb` feedback, BUNDLE + rtcp-mux; renegotiation on the same
 //!   transport (re-offer and rollback); ICE restart deliberately unsupported
+//! - RTCP: parsed inbound reports and feedback, per-source reception
+//!   statistics, periodic SR/RR + SDES, and a send path for feedback
 //!
 //! # Example
 //! ```no_run
@@ -48,13 +52,15 @@ pub mod peer;
 pub mod sdp;
 pub mod transport;
 
-pub use forge_core::AudioCodec;
+pub use forge_core::{AudioCodec, VideoCodec};
 pub use forge_ice::{IceCandidate, TurnServer};
+pub use forge_rtp::{RtcpPacket, SourceStats};
 pub use peer::{
     AudioSender, ConnectionState, PeerConfig, PeerConnection, PeerEvent, SignalingState,
+    VideoConfig, VideoSender,
 };
-pub use sdp::Direction;
-pub use transport::{IceRole, TransportConfig, TransportEvent};
+pub use sdp::{Direction, NegotiatedVideo};
+pub use transport::{IceRole, MediaKind, PayloadMapping, TransportConfig, TransportEvent};
 
 use thiserror::Error;
 

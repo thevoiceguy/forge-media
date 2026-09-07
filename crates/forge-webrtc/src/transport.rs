@@ -14,18 +14,30 @@
 //!
 //! All local candidates share the one socket, so the checklist is keyed by
 //! remote transport address rather than by (local, remote) pair.
+//!
+//! Media: one SRTP context serves every stream on the socket (BUNDLE), so
+//! audio and video share keys but keep their own SSRC, sequence space and
+//! rollover counter. Inbound RTP is sorted into audio or video by payload
+//! type from the negotiated map; inbound RTCP is parsed. The transport
+//! keeps RFC 3550 reception statistics per remote SSRC and sends a
+//! compound SR/RR + SDES on [`TransportConfig::rtcp_interval`], and
+//! prefixes the same report to any feedback the owner sends, so every
+//! RTCP packet on the wire is a proper compound (RFC 3550 §6.1).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use forge_ice::candidate::{CandidatePair, CandidateType, PairState};
 use forge_ice::stun::{MessageType, StunMessage, StunServer, StunServerResponse};
 use forge_ice::{IceAgent, IceCandidate, Protocol, TurnClient, TurnInbound, TurnServer};
 use forge_rtp::dtls::{DtlsCertificate, DtlsConnection, DtlsContext, DtlsRole, DtlsState};
-use forge_rtp::{RtpPacket, SrtpContext};
+use forge_rtp::{
+    ReceiverReport, RtcpPacket, RtpPacket, SdesItem, SenderStats, SourceDescription, SourceStats,
+    SrtpContext,
+};
 use parking_lot::Mutex;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -50,16 +62,47 @@ pub enum TransportEvent {
     },
     /// DTLS completed and SRTP keys are installed: media can flow.
     Connected,
-    /// An authenticated, decrypted inbound RTP packet.
+    /// An authenticated, decrypted inbound audio RTP packet (or one whose
+    /// payload type the negotiated map does not know).
     Rtp(RtpPacket),
-    /// An authenticated, decrypted inbound RTCP compound packet.
-    Rtcp(Bytes),
+    /// An authenticated, decrypted inbound video RTP packet.
+    VideoRtp(RtpPacket),
+    /// The sub-packets of an authenticated, decrypted inbound RTCP
+    /// compound packet, in order. Sender reports have already updated the
+    /// reception statistics; feedback is the owner's to act on.
+    Rtcp(Vec<RtcpPacket>),
     /// The transport failed; no recovery is attempted (ICE restart is
     /// deliberately unsupported in this version).
     Failed(String),
     /// The transport was closed locally.
     Closed,
 }
+
+/// Which stream a payload type belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    /// The audio section.
+    Audio,
+    /// The video section.
+    Video,
+}
+
+/// One negotiated payload type: which stream it belongs to and its RTP
+/// clock rate, for sorting inbound packets and measuring jitter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayloadMapping {
+    /// The payload type.
+    pub payload_type: u8,
+    /// The stream it belongs to.
+    pub kind: MediaKind,
+    /// Its RTP clock rate in Hz.
+    pub clock_rate: u32,
+}
+
+/// The most remote SSRCs one transport keeps statistics for. A peer has
+/// two (audio and video); the bound stops a misbehaving one from growing
+/// the map.
+const MAX_SOURCES: usize = 32;
 
 /// ICE role (RFC 8445 §6.1.1): the offerer controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +136,11 @@ pub struct TransportConfig {
     pub keepalive: Duration,
     /// Capacity of the event channel.
     pub event_capacity: usize,
+    /// How often a compound SR/RR + SDES goes out once media can flow.
+    /// One second suits a two-party session with a couple of streams
+    /// (RFC 3550 §6.2 would allow more); browsers use our RR for loss-based
+    /// rate control and our SR for lip sync, so it must not be rare.
+    pub rtcp_interval: Duration,
     /// UDP port to bind the ICE socket to; `0` lets the OS choose.
     ///
     /// A WebRTC connection needs exactly one socket (BUNDLE plus
@@ -128,6 +176,7 @@ impl Default for TransportConfig {
             dtls_timeout: Duration::from_secs(15),
             keepalive: Duration::from_millis(2500),
             event_capacity: 512,
+            rtcp_interval: Duration::from_secs(1),
             local_port: 0,
         }
     }
@@ -196,8 +245,20 @@ struct Inner {
     last_dtls_timer: Instant,
 
     srtp: Option<SrtpContext>,
+    /// Our audio SSRC (the one an RR is sent from).
     ssrc: u32,
+    /// Our video SSRC.
+    video_ssrc: u32,
+    /// Audio sequence number (video packets arrive with their own).
     seq: u16,
+    cname: String,
+    /// Negotiated payload types → stream and clock.
+    payload_map: HashMap<u8, (MediaKind, u32)>,
+    /// Reception statistics per remote SSRC.
+    sources: HashMap<u32, SourceStats>,
+    /// Transmission statistics: `[audio, video]`.
+    senders: [SenderStats; 2],
+    last_rtcp: Option<Instant>,
 
     state: Arc<Mutex<ConnectionState>>,
     events: mpsc::Sender<TransportEvent>,
@@ -207,7 +268,10 @@ struct Inner {
 
 impl Inner {
     fn emit(&mut self, ev: TransportEvent) {
-        let is_media = matches!(ev, TransportEvent::Rtp(_) | TransportEvent::Rtcp(_));
+        let is_media = matches!(
+            ev,
+            TransportEvent::Rtp(_) | TransportEvent::VideoRtp(_) | TransportEvent::Rtcp(_)
+        );
         if self.events.try_send(ev).is_err() && is_media {
             self.rtp_dropped += 1;
             if self.rtp_dropped == 1 || self.rtp_dropped % 1000 == 0 {
@@ -502,6 +566,21 @@ impl Inner {
                 }
             }
         }
+
+        // --- RTCP reports
+        if self.srtp.is_some() && self.state() == ConnectionState::Connected {
+            let due = self
+                .last_rtcp
+                .map(|t| now.duration_since(t) >= self.cfg.rtcp_interval)
+                .unwrap_or(true);
+            if due {
+                self.last_rtcp = Some(now);
+                match self.protect_rtcp(&[], now) {
+                    Ok(pkt) => out.push(pkt),
+                    Err(e) => debug!("RTCP report: {e}"),
+                }
+            }
+        }
         out
     }
 
@@ -768,28 +847,177 @@ impl Inner {
     // ------------------------------------------------------------ SRTP
 
     fn handle_srtp(&mut self, data: &[u8], from: SocketAddr) {
-        let Some(srtp) = self.srtp.as_mut() else {
+        if self.srtp.is_none() {
             trace!("SRTP from {from} before keys; dropped");
             return;
-        };
+        }
         if data.len() < 12 {
             return;
         }
+        let now = Instant::now();
         let is_rtcp = (200..=207).contains(&data[1]);
         if is_rtcp {
-            match srtp.unprotect_rtcp(data) {
-                Ok(plain) => self.emit(TransportEvent::Rtcp(Bytes::from(plain))),
-                Err(e) => trace!("SRTCP unprotect failed: {e}"),
+            let plain = match self.srtp.as_mut().map(|s| s.unprotect_rtcp(data)) {
+                Some(Ok(plain)) => plain,
+                Some(Err(e)) => {
+                    trace!("SRTCP unprotect failed: {e}");
+                    return;
+                }
+                None => return,
+            };
+            let packets = RtcpPacket::parse_compound(&plain);
+            if packets.is_empty() {
+                trace!("RTCP from {from} had no parseable sub-packet; dropped");
+                return;
             }
+            for p in &packets {
+                if let RtcpPacket::SenderReport(sr) = p {
+                    if let Some(src) = self.sources.get_mut(&sr.ssrc) {
+                        src.on_sender_report(sr.ntp_timestamp_msw, sr.ntp_timestamp_lsw, now);
+                    }
+                }
+            }
+            self.emit(TransportEvent::Rtcp(packets));
             return;
         }
-        match srtp.unprotect_rtp(data) {
-            Ok(plain) => match RtpPacket::parse(Bytes::from(plain)) {
-                Ok(pkt) => self.emit(TransportEvent::Rtp(pkt)),
-                Err(e) => trace!("RTP parse failed: {e}"),
-            },
-            Err(e) => trace!("SRTP unprotect failed: {e}"),
+        let plain = match self.srtp.as_mut().map(|s| s.unprotect_rtp(data)) {
+            Some(Ok(plain)) => plain,
+            Some(Err(e)) => {
+                trace!("SRTP unprotect failed: {e}");
+                return;
+            }
+            None => return,
+        };
+        let pkt = match RtpPacket::parse(Bytes::from(plain)) {
+            Ok(pkt) => pkt,
+            Err(e) => {
+                trace!("RTP parse failed: {e}");
+                return;
+            }
+        };
+        let (kind, clock) = self
+            .payload_map
+            .get(&pkt.header.payload_type())
+            .copied()
+            .unwrap_or((MediaKind::Audio, 0));
+        if clock > 0 {
+            self.track_source(&pkt, clock, now);
         }
+        self.emit(match kind {
+            MediaKind::Audio => TransportEvent::Rtp(pkt),
+            MediaKind::Video => TransportEvent::VideoRtp(pkt),
+        });
+    }
+
+    /// Account an inbound packet in its source's reception statistics.
+    fn track_source(&mut self, pkt: &RtpPacket, clock: u32, now: Instant) {
+        let ssrc = pkt.header.ssrc;
+        if !self.sources.contains_key(&ssrc) {
+            if self.sources.len() >= MAX_SOURCES {
+                return;
+            }
+            self.sources.insert(ssrc, SourceStats::new(ssrc, clock));
+        }
+        if let Some(s) = self.sources.get_mut(&ssrc) {
+            s.on_packet(pkt.header.sequence_number, pkt.header.timestamp, now);
+        }
+    }
+
+    fn peer_addr(&self) -> Result<SocketAddr> {
+        self.selected
+            .or(self.dtls_peer)
+            .ok_or_else(|| WebRtcError::InvalidState("no nominated pair".into()))
+    }
+
+    /// The report every compound RTCP packet starts with (RFC 3550 §6.1):
+    /// an SR for each of our streams that has sent, the first carrying
+    /// the reception report blocks, or an RR when none has; then an SDES
+    /// with our CNAME for each reporting SSRC.
+    fn build_report(&mut self, now: Instant) -> Vec<RtcpPacket> {
+        let mut blocks: Vec<_> = self
+            .sources
+            .values_mut()
+            .filter(|s| s.is_started())
+            .take(31)
+            .map(|s| s.report_block(now))
+            .collect();
+        let mut packets = Vec::with_capacity(3);
+        let mut sdes = SourceDescription::new();
+        let mut any_sender = false;
+        for st in &self.senders {
+            if !st.has_sent() {
+                continue;
+            }
+            let mut sr = st.sender_report(now);
+            if !any_sender {
+                sr.report_blocks = std::mem::take(&mut blocks);
+            }
+            any_sender = true;
+            packets.push(RtcpPacket::SenderReport(sr));
+            sdes.add_chunk(st.ssrc(), vec![SdesItem::new(1, self.cname.clone())]);
+        }
+        if !any_sender {
+            let mut rr = ReceiverReport::new(self.ssrc);
+            rr.report_blocks = blocks;
+            packets.push(RtcpPacket::ReceiverReport(rr));
+            sdes.add_chunk(self.ssrc, vec![SdesItem::new(1, self.cname.clone())]);
+        }
+        packets.push(RtcpPacket::SourceDescription(sdes));
+        packets
+    }
+
+    /// Build and protect one compound RTCP packet: the report, then
+    /// `extra` (feedback the owner is sending).
+    fn protect_rtcp(
+        &mut self,
+        extra: &[RtcpPacket],
+        now: Instant,
+    ) -> Result<(Vec<u8>, SocketAddr)> {
+        let to = self.peer_addr()?;
+        let mut plain = Vec::with_capacity(128);
+        for p in self.build_report(now).iter().chain(extra) {
+            plain.extend_from_slice(&p.to_bytes());
+        }
+        let srtp = self
+            .srtp
+            .as_mut()
+            .ok_or_else(|| WebRtcError::InvalidState("SRTP keys not installed".into()))?;
+        let bytes = srtp
+            .protect_rtcp(&plain)
+            .map_err(|e| WebRtcError::Internal(format!("SRTCP protect: {e}")))?;
+        Ok((bytes, to))
+    }
+
+    /// Protect a pre-built video RTP packet, re-stamped with our video
+    /// SSRC. The sequence number and timestamp are the producer's: a
+    /// conference room's subscription numbers its own packets and answers
+    /// NACKs from its own cache, so they must reach the wire unchanged.
+    fn protect_video(&mut self, packet: Bytes) -> Result<(Vec<u8>, SocketAddr)> {
+        if packet.len() < 12 || packet[0] >> 6 != 2 {
+            return Err(WebRtcError::Internal("not an RTP packet".into()));
+        }
+        let to = self.peer_addr()?;
+        let mut buf = BytesMut::from(packet.as_ref());
+        buf[8..12].copy_from_slice(&self.video_ssrc.to_be_bytes());
+        let timestamp = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        let mut header_len = 12 + (buf[0] & 0x0f) as usize * 4;
+        if buf[0] & 0x10 != 0 && buf.len() >= header_len + 4 {
+            let words = u16::from_be_bytes([buf[header_len + 2], buf[header_len + 3]]) as usize;
+            header_len += 4 + words * 4;
+        }
+        self.senders[1].on_send(
+            timestamp,
+            buf.len().saturating_sub(header_len),
+            Instant::now(),
+        );
+        let srtp = self
+            .srtp
+            .as_mut()
+            .ok_or_else(|| WebRtcError::InvalidState("SRTP keys not installed".into()))?;
+        let bytes = srtp
+            .protect_rtp(&buf)
+            .map_err(|e| WebRtcError::Internal(format!("SRTP protect: {e}")))?;
+        Ok((bytes, to))
     }
 
     fn protect_rtp(
@@ -799,10 +1027,8 @@ impl Inner {
         timestamp: u32,
         payload: Bytes,
     ) -> Result<(Vec<u8>, SocketAddr)> {
-        let to = self
-            .selected
-            .or(self.dtls_peer)
-            .ok_or_else(|| WebRtcError::InvalidState("no nominated pair".into()))?;
+        let to = self.peer_addr()?;
+        self.senders[0].on_send(timestamp, payload.len(), Instant::now());
         let srtp = self
             .srtp
             .as_mut()
@@ -845,6 +1071,8 @@ impl Transport {
         cfg: TransportConfig,
         cert: Arc<DtlsCertificate>,
         ssrc: u32,
+        video_ssrc: u32,
+        cname: String,
         state: Arc<Mutex<ConnectionState>>,
     ) -> Result<(Transport, mpsc::Receiver<TransportEvent>)> {
         let mut agent = IceAgent::new(1, cfg.local_port, vec![]);
@@ -914,7 +1142,16 @@ impl Transport {
             last_dtls_timer: Instant::now(),
             srtp: None,
             ssrc,
+            video_ssrc,
             seq: (ssrc >> 16) as u16,
+            cname,
+            payload_map: HashMap::new(),
+            sources: HashMap::new(),
+            senders: [
+                SenderStats::new(ssrc, 8_000),
+                SenderStats::new(video_ssrc, 90_000),
+            ],
+            last_rtcp: None,
             state,
             events,
             closed: false,
@@ -1157,18 +1394,7 @@ impl Transport {
         self.inner.lock().selected
     }
 
-    /// Build, protect and send one RTP packet.
-    pub async fn send_rtp(
-        &self,
-        payload_type: u8,
-        marker: bool,
-        timestamp: u32,
-        payload: Bytes,
-    ) -> Result<()> {
-        let (bytes, to) =
-            self.inner
-                .lock()
-                .protect_rtp(payload_type, marker, timestamp, payload)?;
+    async fn send_to_peer(&self, bytes: Vec<u8>, to: SocketAddr) -> Result<()> {
         let route = self.routes.lock().get(&to).copied();
         match route {
             Some(i) => self.turn[i]
@@ -1184,6 +1410,63 @@ impl Transport {
             }
         }
         Ok(())
+    }
+
+    /// Build, protect and send one audio RTP packet.
+    pub async fn send_rtp(
+        &self,
+        payload_type: u8,
+        marker: bool,
+        timestamp: u32,
+        payload: Bytes,
+    ) -> Result<()> {
+        let (bytes, to) =
+            self.inner
+                .lock()
+                .protect_rtp(payload_type, marker, timestamp, payload)?;
+        self.send_to_peer(bytes, to).await
+    }
+
+    /// Protect and send one pre-built video RTP packet, re-stamped with
+    /// our video SSRC; its sequence number, timestamp, payload type and
+    /// marker are kept.
+    pub async fn send_video(&self, packet: Bytes) -> Result<()> {
+        let (bytes, to) = self.inner.lock().protect_video(packet)?;
+        self.send_to_peer(bytes, to).await
+    }
+
+    /// Send RTCP: `packets` (feedback, BYE, …) behind the current report
+    /// and SDES so the compound is well-formed, protected as SRTCP.
+    pub async fn send_rtcp(&self, packets: &[RtcpPacket]) -> Result<()> {
+        let (bytes, to) = self.inner.lock().protect_rtcp(packets, Instant::now())?;
+        self.send_to_peer(bytes, to).await
+    }
+
+    /// Install the negotiated payload types: which stream each belongs to
+    /// and its clock rate. Replaces the previous map; the audio and video
+    /// senders' clocks follow the first mapping of their kind.
+    pub fn set_payload_map(&self, map: &[PayloadMapping]) {
+        let mut g = self.inner.lock();
+        g.payload_map = map
+            .iter()
+            .map(|m| (m.payload_type, (m.kind, m.clock_rate)))
+            .collect();
+        if let Some(m) = map.iter().find(|m| m.kind == MediaKind::Audio) {
+            g.senders[0].set_clock_rate(m.clock_rate);
+        }
+        if let Some(m) = map.iter().find(|m| m.kind == MediaKind::Video) {
+            g.senders[1].set_clock_rate(m.clock_rate);
+        }
+    }
+
+    /// Reception statistics for every remote SSRC heard so far.
+    pub fn sources(&self) -> Vec<SourceStats> {
+        self.inner.lock().sources.values().cloned().collect()
+    }
+
+    /// Our video SSRC.
+    pub fn video_ssrc(&self) -> u32 {
+        self.inner.lock().video_ssrc
     }
 
     /// Our sending SSRC.

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-07] — workspace release
+
 **Self-benchmark (FCP video conferencing, phase 3c).** `forge-video` gains a public
 `bench` module: the synthetic sources the codec bindings' tests already used (`synth`,
 `noisy`) and the measurements a node runs at start to price its devices for FCP's

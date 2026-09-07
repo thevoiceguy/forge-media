@@ -10,7 +10,7 @@ repository.workspace = true
 [dependencies]
 # Aya - Pure Rust eBPF library
 aya = { version = "0.13", features = ["async_tokio"] }
-aya-log = "0.2"
+aya-log = "0.3"
 
 # Async runtime
 tokio = { workspace = true, features = ["sync", "time"] }

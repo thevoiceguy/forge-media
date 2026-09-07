@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Video over WebRTC (FCP video conferencing, phase 4a).** `forge-webrtc` negotiates
+a video section beside the audio one: `PeerConfig::video` (codecs in preference order
+with offered payload types, direction, H.264 `profile-level-id`, a `b=AS` cap) puts
+`m=video` with `a=mid:1` in offers, BUNDLE'd with the audio, offering `nack`,
+`nack pli`, `ccm fir` and `goog-remb` per payload type and H.264 as
+`packetization-mode=1`; answers accept a remote video section with the first local
+preference the remote offered (H.264 entries count only in packetization mode 1; RTX,
+RED and FEC formats are skipped), echo its `fmtp`, keep the feedback both sides
+support, and reject the section with port 0 when there is no configuration or no
+codec in common. Both sections carry `a=msid` and `a=ssrc … msid`. Re-offers add or
+drop the section on the same transport. The transport sorts inbound RTP by payload
+type into `TransportEvent::Rtp` (audio) and the new `TransportEvent::VideoRtp`, parses
+inbound RTCP into `TransportEvent::Rtcp(Vec<RtcpPacket>)`, keeps RFC 3550 reception
+statistics per remote SSRC, sends a compound SR/RR + SDES every
+`TransportConfig::rtcp_interval` (one second) and prefixes the same report to the
+feedback the owner sends through `PeerConnection::send_rtcp`, so every RTCP packet on
+the wire is a proper compound. `VideoSender::send_packet` sends a producer's pre-built
+RTP packet — a conference room subscription's, retransmissions included — with the
+SSRC replaced by the connection's video SSRC and the sequence number, timestamp,
+payload type and marker kept. G.722 joins the audio codec set (static type 9, clocked
+at 8 kHz on the wire) so a browser can meet a G.722 mixer without transcoding.
+
+`forge-rtp` underneath: `SrtpContext` now keeps its rollover counter, replay window and
+SRTCP index **per SSRC** in each direction, which one transport carrying audio and
+video (BUNDLE) needs — a shared counter saw every switch between the two streams as a
+sequence wrap; `local_packet_index` is now the highest over all outbound SSRCs, with
+`local_packet_index_for` and `local_packets_sent` per stream. A new `stats` module
+(`SourceStats`, `SenderStats`) computes reception report blocks (extended highest
+sequence, cumulative and interval loss, interarrival jitter, LSR/DLSR) and sender
+reports. **Fixed:** `RtcpPacket::to_bytes` declared SDES and BYE packets one 32-bit
+word short of their size, so any compound carrying one was cut off after it by a
+length-honouring parser (including `parse_compound`).
+
+**Crate versions:** **forge-rtp 0.5.0**, **forge-webrtc 0.6.0**.
+
+**Breaking changes:** `forge_webrtc::TransportEvent::Rtcp` carries `Vec<RtcpPacket>`
+instead of `Bytes`; `forge_webrtc::sdp::build_answer` returns `Negotiated` instead of
+the audio codec pair, and `LocalParams` gains `msid` and `video`;
+`forge_webrtc::transport::Transport::new` takes the video SSRC and CNAME. forge-api,
+the only consumer, is unaffected.
+
+### Added
+
+- **forge-webrtc** `VideoConfig`, `PeerConfig::video`, `PeerConnection::{set_video,
+  video_config, video_sender, send_rtcp, negotiated_video, video_ssrc, sources}`,
+  `VideoSender`, `NegotiatedVideo`, `TransportEvent::VideoRtp`, `MediaKind`,
+  `PayloadMapping`, `TransportConfig::rtcp_interval`, `AudioSender::{clock_rate,
+  send_rtcp}`, `sdp::{rtp_clock, LocalVideo, RemoteVideo, Negotiated,
+  select_video_codec, video_from_answer}`; G.722 in `PeerConfig::codecs`. Re-exported
+  at the crate root: `VideoCodec`, `RtcpPacket`, `SourceStats`.
+- **forge-rtp** `stats::{SourceStats, SenderStats}`, `SrtpContext::{local_packet_index_for,
+  local_packets_sent}`.
+- Tests: forge-webrtc answers the Chrome fixture with video accepted, rejected and
+  filtered (transport-cc and RTX left out, packetization-mode 0 H.264 skipped), a
+  two-peer loopback moving video and audio both ways with PLI and NACK crossing the
+  shared RTCP path and SR/RR reports arriving on cadence, video added and dropped by
+  re-offer, and a peer without video rejecting it; forge-rtp two SSRCs on one SRTP
+  context, per-SSRC replay and SRTCP indices, the statistics, and declared RTCP
+  lengths against serialised sizes. The two-peer harness moved to `tests/common`.
+
+### Changed
+
+- **forge-webrtc** `AudioSender::samples_per_20ms` uses the RTP clock (160 for G.722).
+- **forge-rtp** SRTP state per SSRC (above); SDES and BYE header lengths corrected.
+
 ## [2026-09-07] — workspace release
 
 **Self-benchmark (FCP video conferencing, phase 3c).** `forge-video` gains a public

@@ -1218,7 +1218,9 @@ impl RtcpPacket {
                     padding: false,
                     count: sdes.chunks.len() as u8,
                     packet_type: RtcpPacketType::SDES,
-                    length: ((payload.len() / 4) as u16).saturating_sub(1),
+                    // Length is in 32-bit words minus one, counting the
+                    // header word: (4 + payload) / 4 - 1 = payload / 4.
+                    length: (payload.len() / 4) as u16,
                 };
 
                 let mut buf = header.to_bytes();
@@ -1232,7 +1234,7 @@ impl RtcpPacket {
                     padding: false,
                     count: bye.ssrcs.len() as u8,
                     packet_type: RtcpPacketType::BYE,
-                    length: ((payload.len() / 4) as u16).saturating_sub(1),
+                    length: (payload.len() / 4) as u16,
                 };
 
                 let mut buf = header.to_bytes();
@@ -1260,6 +1262,41 @@ impl RtcpPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every sub-packet's header length must cover exactly what it
+    /// serialises, or a compound is cut short at the first SDES or BYE
+    /// (RFC 3550 §6.4.1: length in 32-bit words minus one, header
+    /// included).
+    #[test]
+    fn declared_lengths_match_serialized_sizes_in_a_compound() {
+        let mut rr = ReceiverReport::new(42);
+        rr.add_report_block(ReceptionReportBlock::new(7));
+        let mut sdes = SourceDescription::new();
+        sdes.add_chunk(
+            42,
+            vec![SdesItem::new(sdes_type::CNAME, "forge-abc".into())],
+        );
+        let packets = [
+            RtcpPacket::ReceiverReport(rr),
+            RtcpPacket::SourceDescription(sdes),
+            RtcpPacket::PayloadFeedback(PsFeedback::pli(42, 99)),
+            RtcpPacket::Bye(Bye::with_reason(vec![42], "done".into())),
+            RtcpPacket::SenderReport(SenderReport::with_current_time(43, 1, 2, 3)),
+        ];
+        let mut compound = Vec::new();
+        for p in &packets {
+            let bytes = p.to_bytes();
+            let declared = (u16::from_be_bytes([bytes[2], bytes[3]]) as usize + 1) * 4;
+            assert_eq!(declared, bytes.len(), "{p:?}");
+            compound.extend_from_slice(&bytes);
+        }
+        let parsed = RtcpPacket::parse_compound(&compound);
+        assert_eq!(parsed.len(), packets.len());
+        assert!(
+            matches!(parsed[1], RtcpPacket::SourceDescription(ref s) if s.chunks[0].ssrc == 42)
+        );
+        assert!(matches!(parsed[3], RtcpPacket::Bye(ref b) if b.ssrcs == vec![42]));
+    }
 
     #[test]
     fn test_rtcp_header_parse() {

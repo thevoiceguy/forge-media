@@ -11,6 +11,7 @@
 //! bracket, not a capacity figure.
 
 use crate::testsrc;
+use forge_video::bench::{measure_codec, BenchSettings};
 use forge_video::codec::CodecRegistry;
 use forge_video::frame::{MediaDevice, VideoFrame};
 use forge_video::metrics::psnr_luma;
@@ -105,5 +106,33 @@ fn native_codecs_hold_their_bitrate_and_report_their_speed() {
         );
         assert!(keyframes >= 2, "{codec} keyframes {keyframes}");
         assert!(psnr > 22.0, "{codec} mean psnr {psnr}");
+
+        // The self-benchmark a node runs at start (FCP §9.3) sees the same
+        // codec and reports the constants the capacity model uses.
+        let cost = measure_codec(
+            &registry,
+            &MediaDevice::Host,
+            codec,
+            &BenchSettings {
+                frames: 30,
+                ..BenchSettings::default()
+            },
+        )
+        .unwrap();
+        println!(
+            "{codec}: self-benchmark encode {:.2} ns/px ({:.1} streams/core), decode {:.2} ns/px ({:.1} streams/core), {:.0} kb/s, {} frames{}",
+            cost.encode_ns_per_px,
+            cost.encode_streams_per_unit(),
+            cost.decode_ns_per_px,
+            cost.decode_streams_per_unit(),
+            cost.kbps,
+            cost.frames,
+            if cost.complete { "" } else { " (budget cut it short)" },
+        );
+        assert!(cost.encode_ns_per_px > 0.0 && cost.decode_ns_per_px > 0.0);
+        assert!(
+            cost.decoded > 0,
+            "{codec} decoded nothing in the self-benchmark"
+        );
     }
 }

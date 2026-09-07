@@ -561,7 +561,13 @@ async fn the_loudest_speaker_takes_the_spotlight_from_the_audio_mixer() {
         audio.write_audio("loud", &loud).unwrap();
         audio.write_audio("quiet", &[0; 160]).unwrap();
     }
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The room's clock samples the mixer's energy once a tick and the
+    // take hysteresis needs a few; under coverage instrumentation ticks
+    // run late, so wait for the outcome rather than a fixed time.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while video.active_speaker().is_none() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(video.active_speaker().as_deref(), Some("loud"));
     assert!(video.participant("loud").unwrap().speaking);
     let mut got = None;

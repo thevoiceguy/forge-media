@@ -1,61 +1,11 @@
-//! Shared test source and round-trip check for the native bindings.
+//! Shared test settings and round-trip check for the native bindings; the
+//! synthetic sources themselves live in `forge_video::bench`.
 
 use forge_video::codec::{EncoderSettings, VideoDecoder, VideoEncoder};
 use forge_video::frame::{HostFrame, Resolution, VideoFrame};
 use forge_video::metrics::psnr_luma;
 
-/// A moving gradient with a bright block: enough structure that a
-/// decoded frame is recognisably the source.
-pub fn synth(n: usize, w: u32, h: u32) -> HostFrame {
-    let mut f = HostFrame::black(w, h).with_pts((n as u32) * 3000);
-    let (wu, hu) = (w as usize, h as usize);
-    let bx = (n * 5) % (wu.saturating_sub(40).max(1));
-    for y in 0..hu {
-        for x in 0..wu {
-            let grad = ((x * 120 / wu) + (y * 60 / hu) + n * 2) % 180 + 30;
-            let block = if (bx..bx + 40).contains(&x) && (10..40).contains(&y) {
-                50
-            } else {
-                0
-            };
-            f.y[y * f.y_stride + x] = (grad + block).min(235) as u8;
-        }
-    }
-    for y in 0..hu / 2 {
-        for x in 0..wu / 2 {
-            f.u[y * f.uv_stride + x] = (100 + x * 50 / (wu / 2)) as u8;
-            f.v[y * f.uv_stride + x] = (100 + y * 50 / (hu / 2)) as u8;
-        }
-    }
-    f
-}
-
-/// [`synth`] plus deterministic per-pixel noise (±24 in luma, ±8 in
-/// chroma, xorshift seeded by the frame number): incompressible enough
-/// that an encoder must spend its whole budget, which is what a bitrate
-/// check needs. The plain gradient compresses to a fraction of any
-/// sensible target.
-pub fn noisy(n: usize, w: u32, h: u32) -> HostFrame {
-    let mut f = synth(n, w, h);
-    let mut state = 0x9E37_79B9_7F4A_7C15u64 ^ (n as u64 + 1).wrapping_mul(0x2545_F491_4F6C_DD1D);
-    let mut next = || {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        state
-    };
-    for p in f.y.iter_mut() {
-        let noise = (next() % 49) as i32 - 24;
-        *p = (*p as i32 + noise).clamp(16, 235) as u8;
-    }
-    for plane in [&mut f.u, &mut f.v] {
-        for p in plane.iter_mut() {
-            let noise = (next() % 17) as i32 - 8;
-            *p = (*p as i32 + noise).clamp(16, 240) as u8;
-        }
-    }
-    f
-}
+pub use forge_video::bench::{noisy, synth};
 
 pub fn settings(codec: forge_core::VideoCodec, w: u32, h: u32) -> EncoderSettings {
     EncoderSettings {

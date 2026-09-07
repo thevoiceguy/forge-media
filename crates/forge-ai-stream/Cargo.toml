@@ -17,7 +17,7 @@ serde_json = "1.0"
 bytes = { workspace = true }
 
 # WebSocket support
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 futures-util = "0.3"
 
 # Audio format conversion

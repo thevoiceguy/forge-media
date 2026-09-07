@@ -1,6 +1,6 @@
 [package]
 name = "forge-conference"
-version = "0.4.0"
+version = "0.5.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,12 +12,15 @@ forge-core = { path = "../forge-core" }
 forge-engine = { path = "../forge-engine" }
 forge-mixer = { path = "../forge-mixer" }
 forge-recorder = { path = "../forge-recorder" }
+forge-rtp = { path = "../forge-rtp" }
+forge-video = { path = "../forge-video" }
 
 bytes = { workspace = true }
 dashmap = { workspace = true }
 hound = "3.5"
 metrics = { workspace = true }
 parking_lot = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

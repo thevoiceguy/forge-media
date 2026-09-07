@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Conference video (FCP video conferencing, phase 3b).** The video room beside the
+audio room. `forge-conference` gains `VideoRoom`: participants' RTP goes in, is
+reassembled and decoded on a dedicated codec thread pool into per-participant frame
+slots; a per-room clock composes the layout once per layout output and encodes it once
+per *flavor*, so participants with the same needs share one encoder; each subscriber
+gets its own SSRC, sequence space and retransmission cache and drains its packets from a
+channel the conference server protects and sends. Keyframe requests are coalesced per
+encoder, loss raises NACK then PLI per source through rate gates, REMB pins an encoder
+to its slowest receiver, and decoders run behind size, resolution, rate and error
+limits that fail one source rather than the room. The active speaker comes from the
+audio mixer's per-participant energy with take/hold hysteresis. The room is
+transport-free like the audio room and runs on the raw codec in CI. Design and rationale
+in FCP's `docs/VIDEO_CONFERENCING.md`.
+
+**Crate versions:** **forge-conference 0.5.0**, **forge-mixer 0.4.0**; forge-sdp's
+`sip-sdp` git pin and the embedded siphon-rs submodule move to `v2026.09.05`
+(sip-sdp 0.3.2, `RTP/AVPF`), no API change.
+
+**Breaking changes:** none. `forge_mixer::ParticipantMetadata` gains a public `energy`
+field (source-breaking only for code constructing it by struct literal, which nothing in
+the workspace or FCP does).
+
+### Added
+
+- **forge-conference** (`video` module):
+  - `CodecPool`: the dedicated codec thread pool (design §9.2), `cores − 2` threads by
+    default; decode, compose and encode never run on tokio workers. A panicking codec
+    ends its job, not the worker.
+  - `VideoRoom` with `ConferenceRoom::enable_video` / `disable_video` / `video`:
+    participants are adopted from the audio room and follow its joins and leaves;
+    `add_source` / `push_rtp` (returns the RTCP feedback to send back) / `remove_source`
+    for ingress; `subscribe` (a `SubscribeRequest`, clamped to the room's resolution
+    and frame rate) / `unsubscribe` / `handle_feedback` (PLI, FIR, NACK, REMB) for egress;
+    `set_layout`, `pin`, `spotlight`, `set_fps`, `set_participant_video_enabled`,
+    `set_display_name`; `participant` / `participants` / `status` for the API;
+    `events()` — `FpsChanged`, `ParticipantState` (`off` / `on` / `lost` / `disabled` /
+    `failed`), `ActiveSpeaker`, `LayoutChanged`.
+  - `VideoRoomSettings` (layout, tiles, resolution, fps, `exclude_self`, codecs,
+    keyframe interval and coalescing, freeze timeout, cache and queue depths) and
+    `SourceLimits` (coded frame bytes, resolution, frame rate, decode queue,
+    consecutive decoder errors, PLI and NACK spacing).
+  - `VideoBackend`: the codec registry, pool and device a node's rooms share;
+    `VideoBackend::raw()` for tests.
+  - Tile ordering per layout (design §8): grid in join order with the speaker swapped in
+    when it would fall off the end, active-speaker strip by recency of speech, spotlight
+    and picture-in-picture around the spotlit / pinned / speaking participant.
+  - `ActiveSpeaker`: a challenger must be loudest for 800 ms and the incumbent keeps
+    the spot for 2 s; silence keeps the last speaker.
+  - Seventeen metric families (`forge_conference_video_*`, in `docs/METRICS.md`).
+  - Integration test `tests/video_room.rs`: two raw-codec cameras composited into a grid
+    and decoded back from a subscriber's packets, encoder sharing and `exclude_self`,
+    loss → NACK → PLI and subscriber NACK / PLI / REMB, resolution limits and layout
+    controls, the active speaker from the mixer.
+- **forge-mixer**: `ParticipantMetadata::energy`, a smoothed RMS of the participant's
+  recent audio, for active-speaker selection.
+
+### Changed
+
+- **Release profile**: `lto = "fat"` (was `"thin"`). With rustc 1.98, thin LTO together
+  with `codegen-units = 1` dropped the cross-crate definitions that only
+  forge-conference's video module references (`rust-lld: undefined symbol:
+  forge_rtp::video::payload::packetize`, `<HostCompositor as Compositor>::render`, …
+  while linking the `forge-media` binary); thin LTO with 16 units and fat LTO with one
+  both link. Release builds take longer; the binaries are, if anything, faster.
+
 ## [2026-09-05.1] — workspace release
 
 **Video mixer core (FCP video conferencing, phase 2).** Two new crates above the phase 1

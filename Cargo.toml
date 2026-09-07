@@ -205,7 +205,13 @@ debug = true
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+# Fat, not thin: with rustc 1.98, `lto = "thin"` together with
+# `codegen-units = 1` drops cross-crate definitions that only
+# forge-conference's video module references (undefined `forge_video` /
+# `forge_rtp::video` symbols at link time); thin LTO with 16 units and
+# fat LTO with one both link. One unit plus fat LTO is the intended
+# maximum-optimisation build anyway.
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true

@@ -114,7 +114,7 @@ aya-log = "0.2"
 aya-build = "0.2"
 
 # Audio processing
-symphonia = { version = "0.5", features = ["all"] }
+symphonia = { version = "0.6", features = ["all"] }
 rubato = "0.15"
 
 # Codecs

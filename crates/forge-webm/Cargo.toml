@@ -1,0 +1,16 @@
+[package]
+name = "forge-webm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Matroska (WebM) writer for conference recordings: VP8/VP9 video and Opus audio"
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.27"

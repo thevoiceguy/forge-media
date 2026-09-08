@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-07.2] — workspace release
+
 **Recording a conference (FCP video conferencing, phase 5a).** The two halves a
 recording needs, and the container to put them in.
 

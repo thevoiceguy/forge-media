@@ -10,7 +10,13 @@
 
 use std::time::{Duration, Instant};
 
-/// One participant's audio level for a tick.
+/// One candidate's audio level for a tick.
+///
+/// A candidate is a local participant, or — in a room spread over
+/// several nodes — a peer's remote tile standing for whoever that node
+/// says is speaking behind it. `node` names where the level came from
+/// and settles ties, so every node picks the same speaker from the same
+/// inputs (design §15.4, 5c).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Level<'a> {
     pub id: &'a str,
@@ -18,6 +24,10 @@ pub struct Level<'a> {
     pub energy: f32,
     /// The mixer's voice-activity verdict.
     pub speaking: bool,
+    /// The node this level came from. Two nodes comparing the same
+    /// candidates must break a tie the same way, and an id is local to
+    /// its own node's naming while a node name is not.
+    pub node: &'a str,
 }
 
 #[derive(Debug)]
@@ -83,10 +93,18 @@ impl ActiveSpeaker {
             }
         }
 
+        // Loudest wins; an exact tie goes to the lower node, then the
+        // lower id, so every node reaches the same answer rather than
+        // whichever order its own map happened to iterate in.
         let loudest = levels
             .iter()
             .filter(|l| l.speaking && l.energy > 0.0)
-            .max_by(|a, b| a.energy.total_cmp(&b.energy))
+            .max_by(|a, b| {
+                a.energy
+                    .total_cmp(&b.energy)
+                    .then_with(|| b.node.cmp(a.node))
+                    .then_with(|| b.id.cmp(a.id))
+            })
             .map(|l| l.id);
 
         let Some(loudest) = loudest else {
@@ -142,11 +160,48 @@ impl ActiveSpeaker {
 mod tests {
     use super::*;
 
+    fn at<'a>(id: &'a str, energy: f32, node: &'a str) -> Level<'a> {
+        Level {
+            id,
+            energy,
+            speaking: energy > 0.0,
+            node,
+        }
+    }
+
+    /// Two nodes comparing the same candidates must agree, whatever
+    /// order their own maps hand them over in (design §15.4, 5c).
+    #[test]
+    fn an_exact_tie_is_settled_the_same_way_on_every_node() {
+        let now = Instant::now();
+        // Node A sees its own caller first; node B sees the same two in
+        // the other order. The lower node name takes it either way.
+        let mut a = ActiveSpeaker::default();
+        let mut b = ActiveSpeaker::default();
+        assert_eq!(
+            a.update(&[at("alice", 0.5, "node-a"), at("__b", 0.5, "node-b")], now),
+            Some("alice".to_string())
+        );
+        assert_eq!(
+            b.update(&[at("carol", 0.5, "node-b"), at("__a", 0.5, "node-a")], now),
+            Some("__a".to_string()),
+            "the same node wins, named by its own tile"
+        );
+
+        // Louder still beats the tie-break.
+        let mut c = ActiveSpeaker::default();
+        assert_eq!(
+            c.update(&[at("alice", 0.5, "node-a"), at("__b", 0.9, "node-b")], now),
+            Some("__b".to_string())
+        );
+    }
+
     fn lv<'a>(id: &'a str, energy: f32) -> Level<'a> {
         Level {
             id,
             energy,
             speaking: energy > 0.0,
+            node: "node-a",
         }
     }
 

@@ -161,7 +161,13 @@ pub enum VideoRoomEvent {
         state: VideoState,
     },
     /// The active speaker changed (`None` when the speaker left).
-    ActiveSpeaker { participant_id: Option<String> },
+    ActiveSpeaker {
+        /// The person speaking, whichever node they are on.
+        participant_id: Option<String>,
+        /// The remote tile they are behind, when they are on a peer node
+        /// ([`RemoteSpeaker`]); `None` for a caller on this one.
+        via: Option<String>,
+    },
     /// Layout, pin or spotlight changed.
     LayoutChanged {
         layout: Layout,
@@ -254,6 +260,25 @@ pub struct RecordedFrame {
     /// When the canvas behind it was composed, for lining the video up
     /// with the audio the room was mixing at that moment.
     pub at: Instant,
+}
+
+/// What a peer node says is speaking behind its remote tile (§15.4, 5c).
+///
+/// A remote tile's own energy is a whole node's mix, which says nothing
+/// about who is talking; the node that has the caller says instead. Every
+/// node runs the same rule over its local levels and its peers' claims,
+/// so they converge on one speaker within a take interval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteSpeaker {
+    /// The node making the claim; it settles ties.
+    pub node: String,
+    /// The participant on that node.
+    pub participant_id: String,
+    /// What to write on the tile while they hold it.
+    pub display_name: String,
+    /// Their level, on the same scale every mixer produces.
+    pub energy: f32,
+    pub speaking: bool,
 }
 
 /// A recording's stream of coded composite frames. Dropping it stops the
@@ -382,6 +407,9 @@ pub struct VideoRoomStatus {
     pub pinned: Option<String>,
     pub spotlight: Option<String>,
     pub active_speaker: Option<String>,
+    /// The remote tile the speaker is behind, when they are on a peer
+    /// node rather than here.
+    pub active_speaker_via: Option<String>,
     pub sources: usize,
     pub encoders: usize,
     pub ticks: u64,
@@ -404,6 +432,10 @@ pub struct VideoRoom {
     recorders: DashMap<String, Arc<RecorderTap>>,
     outputs: Mutex<HashMap<OutputKey, Output>>,
     speaker: Mutex<ActiveSpeaker>,
+    /// What each peer says is speaking behind its remote tile, by tile id.
+    remote_speakers: DashMap<String, RemoteSpeaker>,
+    /// This node's name, which settles a tie against a peer's claim.
+    local_node: Mutex<String>,
     control: Mutex<Control>,
     /// Current and wanted clock rate; the clock task applies changes.
     fps: AtomicU32,
@@ -442,6 +474,8 @@ impl VideoRoom {
             recorders: DashMap::new(),
             outputs: Mutex::new(HashMap::new()),
             speaker: Mutex::new(ActiveSpeaker::default()),
+            remote_speakers: DashMap::new(),
+            local_node: Mutex::new(String::new()),
             control: Mutex::new(Control::default()),
             fps: AtomicU32::new(fps),
             target_fps: AtomicU32::new(fps),
@@ -594,9 +628,11 @@ impl VideoRoom {
         out
     }
 
-    /// The trunk went: the tile and its decoder go with it.
+    /// The trunk went: the tile, its decoder and the peer's claim about
+    /// who is speaking behind it go with it.
     pub fn remove_remote(&self, id: &str) {
         if self.participants.get(id).is_some_and(|p| p.remote) {
+            self.remote_speakers.remove(id);
             self.participant_left(id);
             debug!(room = %self.id, remote = %id, "remote video tile removed");
         }
@@ -605,6 +641,32 @@ impl VideoRoom {
     /// Whether the id names a peer node's tile rather than a caller here.
     pub fn is_remote(&self, id: &str) -> bool {
         self.participants.get(id).is_some_and(|p| p.remote)
+    }
+
+    /// Name this node, so a tie between its caller and a peer's claim is
+    /// settled the same way here and there (§15.4, 5c). Unset, the room
+    /// still works; ties then fall to the id.
+    pub fn set_local_node(&self, node: &str) {
+        *self.local_node.lock() = node.to_string();
+    }
+
+    /// What a peer says is speaking behind its remote tile, or `None` to
+    /// withdraw the claim. Fed to the same election as this node's own
+    /// levels, so every node reaches the same speaker.
+    pub fn set_remote_speaker(&self, remote_id: &str, speaker: Option<RemoteSpeaker>) {
+        match speaker {
+            Some(s) => {
+                self.remote_speakers.insert(remote_id.to_string(), s);
+            }
+            None => {
+                self.remote_speakers.remove(remote_id);
+            }
+        }
+    }
+
+    /// The claim standing against a remote tile, if any.
+    pub fn remote_speaker(&self, remote_id: &str) -> Option<RemoteSpeaker> {
+        self.remote_speakers.get(remote_id).map(|s| s.clone())
     }
 
     /// The participant sends `codec`; start decoding it.
@@ -994,8 +1056,47 @@ impl VideoRoom {
         self.fps.load(Ordering::Relaxed)
     }
 
+    /// The person speaking, whichever node they are on: a caller here,
+    /// or the participant a peer claims behind its remote tile.
     pub fn active_speaker(&self) -> Option<String> {
+        let tile = self.speaker.lock().current().map(str::to_string)?;
+        Some(self.resolve_speaker(&tile).0)
+    }
+
+    /// The remote tile the speaker is behind, when they are on a peer
+    /// node; `None` when the speaker is a caller here or there is none.
+    pub fn active_speaker_via(&self) -> Option<String> {
+        let tile = self.speaker.lock().current().map(str::to_string)?;
+        self.resolve_speaker(&tile).1
+    }
+
+    /// The tile the room is treating as the speaker — what the layouts
+    /// move around, which for a peer's caller is the remote tile.
+    pub fn active_speaker_tile(&self) -> Option<String> {
         self.speaker.lock().current().map(str::to_string)
+    }
+
+    /// What a tile is labelled: a caller's display name, and for a peer's
+    /// remote tile whoever that peer says is speaking behind it, falling
+    /// back to the node's own name.
+    fn tile_name(&self, id: &str, p: &Participant) -> String {
+        if p.remote {
+            if let Some(claim) = self.remote_speakers.get(id) {
+                if !claim.display_name.is_empty() {
+                    return claim.display_name.clone();
+                }
+            }
+        }
+        p.name.clone()
+    }
+
+    /// Turn the winning tile into the person and the tile they came
+    /// through.
+    fn resolve_speaker(&self, tile: &str) -> (String, Option<String>) {
+        match self.remote_speakers.get(tile) {
+            Some(claim) => (claim.participant_id.clone(), Some(tile.to_string())),
+            None => (tile.to_string(), None),
+        }
     }
 
     // ---- status -----------------------------------------------------------
@@ -1053,7 +1154,7 @@ impl VideoRoom {
         VideoParticipantInfo {
             participant_id: id.to_string(),
             state: p.state,
-            display_name: p.name.clone(),
+            display_name: self.tile_name(id, p),
             speaking: self.speaker.lock().current() == Some(id),
             remote: p.remote,
             source,
@@ -1102,6 +1203,7 @@ impl VideoRoom {
             pinned: c.pinned,
             spotlight: c.spotlight,
             active_speaker: self.active_speaker(),
+            active_speaker_via: self.active_speaker_via(),
             sources: self.sources.len(),
             encoders,
             ticks: self.ticks.load(Ordering::Relaxed),
@@ -1181,8 +1283,9 @@ impl VideoRoom {
             .upgrade()
             .map(|a| a.get_all_participant_metadata())
             .unwrap_or_default();
+        let local_node = self.local_node.lock().clone();
         let mut muted: HashMap<String, bool> = HashMap::new();
-        let mut levels: Vec<(String, f32, bool)> = Vec::new();
+        let mut levels: Vec<(String, f32, bool, String)> = Vec::new();
         for m in metadata {
             if m.id.starts_with("__") {
                 continue;
@@ -1191,22 +1294,42 @@ impl VideoRoom {
                 m.id.clone(),
                 m.state != forge_mixer::ParticipantState::Active,
             );
-            levels.push((m.id, m.energy, m.is_speaking));
+            levels.push((m.id, m.energy, m.is_speaking, local_node.clone()));
         }
+        // A peer's remote tile stands in the election for whoever that
+        // node says is speaking behind it, under the tile's own id: the
+        // tile is what the layouts move around, and the person is
+        // reported. A tile with no claim never wins, since its own
+        // energy is a whole node's mix (§15.4, 5c).
+        for e in self.remote_speakers.iter() {
+            let claim = e.value();
+            levels.push((
+                e.key().clone(),
+                claim.energy,
+                claim.speaking,
+                claim.node.clone(),
+            ));
+        }
+        // Every node feeds the same candidates in the same order, so the
+        // rule and its tie-break give the same answer everywhere.
+        levels.sort_by(|a, b| (&a.3, &a.0).cmp(&(&b.3, &b.0)));
         let (speaker, recent) = {
             let mut sp = self.speaker.lock();
             let lv: Vec<Level<'_>> = levels
                 .iter()
-                .map(|(id, e, s)| Level {
+                .map(|(id, e, s, node)| Level {
                     id,
                     energy: *e,
                     speaking: *s,
+                    node,
                 })
                 .collect();
             if let Some(new) = sp.update(&lv, now) {
-                debug!(room = %self.id, speaker = %new, "active speaker changed");
+                let (participant_id, via) = self.resolve_speaker(&new);
+                debug!(room = %self.id, speaker = %participant_id, via = ?via, "active speaker changed");
                 let _ = self.events.send(VideoRoomEvent::ActiveSpeaker {
-                    participant_id: Some(new),
+                    participant_id: Some(participant_id),
+                    via,
                 });
             }
             (sp.current().map(str::to_string), sp.recent().to_vec())
@@ -1245,7 +1368,7 @@ impl VideoRoom {
                 },
                 None => (None, VideoState::Off),
             };
-            let name = p.name.clone();
+            let name = self.tile_name(id, &p);
             let remote = p.remote;
             drop(p);
             self.set_state(id, state);

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-08.2] — workspace release
+
+**One speaker a whole room agrees on** (FCP video conferencing, phase 5c).
+A remote tile's own energy is a peer node's entire mix, which says nothing
+about who is talking behind it. The node that has the caller says instead.
+
+**`forge-conference` 0.8.0**: `VideoRoom::set_remote_speaker(remote_id,
+Option<RemoteSpeaker>)` records what a peer claims — node, participant,
+display name, energy, speaking — and the claim joins this node's own levels
+in the same election, under the tile's id. So the layouts keep moving tiles
+around, while `active_speaker()` names the person, `active_speaker_via()`
+the tile they are behind, and `VideoRoomEvent::ActiveSpeaker` carries both.
+A tile with no claim never wins. The tile is also labelled with whoever
+holds the floor behind it, falling back to the node's name.
+
+Every node runs the same rule over the same candidates, so they converge:
+`Level` gained a `node`, `ActiveSpeaker` breaks an exact tie by node and
+then by id, and the candidates are sorted before the election, so the
+answer no longer depends on which order a node's own map happened to
+iterate in. `VideoRoom::set_local_node` names this node for that purpose.
+
+Breaking: `Level` has a new `node` field, `VideoRoomEvent::ActiveSpeaker` a
+new `via` field, `VideoRoomStatus` a new `active_speaker_via`, and
+`active_speaker()` now returns the participant rather than the tile (use
+`active_speaker_tile()` for the old value).
+
 ## [2026-09-08.1] — workspace release
 
 **A remote tile, and the composite a trunk carries** (FCP video conferencing,

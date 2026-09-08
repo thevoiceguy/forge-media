@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Recording a conference (FCP video conferencing, phase 5a).** The two halves a
+recording needs, and the container to put them in.
+
+**`forge-webm`** (new): a Matroska writer for VP8 or VP9 video and Opus audio —
+EBML header, a Segment whose size starts as the unknown-size marker so a file cut
+short by a crash still plays, Info at a 1 ms timecode scale, Tracks (an OpusHead
+`CodecPrivate` with `CodecDelay` and `SeekPreRoll`), Clusters of SimpleBlocks
+bounded by keyframes, duration and bytes, a Cue per keyframe Cluster, and, on
+`finish`, the Segment size, the duration and the SeekHead patched in. It has no
+dependencies beyond `thiserror`: Matroska is a small, well-specified corner of
+EBML, and this workspace already writes Ogg/Opus by hand in `forge-recorder`. A
+`read` module walks a file back — tracks, every block's track, timestamp and
+keyframe flag, and whether each Cue points at a real Cluster — which is what the
+round-trip tests assert.
+
+**`forge-conference`**: a recording is one more consumer of a flavor, but not a
+participant. `VideoRoom::record(id, RecordRequest)` returns a `RecordingSink` of
+**coded frames** rather than packets (a muxer wants frames; packetizing one only
+to take it apart again is waste), composed from an output that leaves nobody out
+whatever `exclude_self` says, and drawing no tile of its own. A recording at the
+room's own codec and resolution shares a subscriber's encoder, so it costs no
+extra encode; `stop_record` releases it. `ConferenceRoom::tap_mix()` hands out
+the room's mixed frames as they are made — the same audio the room recorder
+writes — and the frame clock feeds it whether or not anything is being recorded.
+Each side carries the instant its frame was made, and video frames keep the
+room's 90 kHz timestamps (`VideoRoom::started_at`), which is how the two are
+lined up in one file.
+
+**Crate versions:** **forge-webm 0.1.0** (new), **forge-conference 0.6.0**.
+
+**Breaking changes:** `VideoRoomStatus` gains `recordings`; nothing in the
+workspace or FCP constructs it.
+
+### Added
+
+- **forge-webm**: `WebmWriter`, `WebmConfig`, `VideoTrack`, `AudioTrack`,
+  `WebmVideoCodec`, `ClusterLimits`, `WebmStats`, `WebmError`, and
+  `read_summary` / `read_summary_file` with `WebmSummary`, `TrackInfo`,
+  `BlockInfo`, `CueInfo`, `TrackKind`.
+- **forge-conference**: `VideoRoom::{record, stop_record, is_recording,
+  recordings, started_at}`, `RecordRequest`, `RecordedFrame`, `RecordingSink`,
+  `VideoRecordingInfo`, `VideoRoomStatus::recordings`;
+  `ConferenceRoom::{tap_mix, mix_tapped}` and `MixedFrame`. Metrics
+  `forge_conference_video_recordings` and
+  `forge_conference_video_recording_frames_dropped_total`.
+- Tests: a WebM round trip (tracks, blocks, cluster boundaries against keyframes
+  and the size and duration limits, cues, the SeekHead, an audio-only and a
+  video-only file, a recording left unfinished, and a frame too far behind its
+  Cluster); a room recording that takes the composite without joining the room,
+  shares a subscriber's encoder, sees a composite nobody is left out of, and a
+  mix tap that carries exactly what the room mixed, on the frame clock too.
+
+### Changed
+
+- **forge-conference**: `ConferenceRoom::advance_frame` mixes for a mix tap as
+  well as for a recorder; the encoder for a flavor is now created and released
+  through one path shared by subscriptions and recordings.
+
 ## [2026-09-07.1] — workspace release
 
 **Video over WebRTC (FCP video conferencing, phase 4a).** `forge-webrtc` negotiates

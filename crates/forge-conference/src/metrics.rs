@@ -48,6 +48,9 @@ pub const M_VIDEO_PLIS_RECEIVED: &str = "forge_conference_video_plis_received_to
 pub const M_VIDEO_NACKS_SENT: &str = "forge_conference_video_nacks_sent_total";
 pub const M_VIDEO_NACKS_RECEIVED: &str = "forge_conference_video_nacks_received_total";
 pub const M_VIDEO_COMPOSE_DURATION: &str = "forge_conference_video_compose_duration_seconds";
+pub const M_VIDEO_RECORDINGS: &str = "forge_conference_video_recordings";
+pub const M_VIDEO_RECORDING_FRAMES_DROPPED: &str =
+    "forge_conference_video_recording_frames_dropped_total";
 
 /// Every counter family forge-conference emits.
 pub const ALL_COUNTERS: &[&str] = &[
@@ -72,6 +75,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     M_VIDEO_PLIS_RECEIVED,
     M_VIDEO_NACKS_SENT,
     M_VIDEO_NACKS_RECEIVED,
+    M_VIDEO_RECORDING_FRAMES_DROPPED,
 ];
 
 /// Every gauge family forge-conference emits.
@@ -83,6 +87,7 @@ pub const ALL_GAUGES: &[&str] = &[
     M_VIDEO_SOURCES,
     M_VIDEO_ENCODERS,
     M_VIDEO_FPS,
+    M_VIDEO_RECORDINGS,
 ];
 
 /// Every histogram family forge-conference emits.
@@ -156,6 +161,14 @@ pub fn describe_metrics() {
     describe_gauge!(M_VIDEO_ROOMS, "Rooms with video running.");
     describe_gauge!(M_VIDEO_SOURCES, "Participants sending video, node-wide.");
     describe_gauge!(M_VIDEO_ENCODERS, "Video encoders running, node-wide.");
+    describe_gauge!(
+        M_VIDEO_RECORDINGS,
+        "Recordings taking a room's composite, node-wide."
+    );
+    describe_counter!(
+        M_VIDEO_RECORDING_FRAMES_DROPPED,
+        "Composite frames a recording could not take, by room_id."
+    );
     describe_gauge!(
         M_VIDEO_FPS,
         "A room's current video frame rate, by room_id."

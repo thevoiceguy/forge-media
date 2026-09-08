@@ -30,6 +30,25 @@ pub type RoomId = String;
 /// `play_sound_to_all`). A virtual participant, not a caller.
 pub const AUDIO_FEEDBACK_PARTICIPANT_ID: &str = "__audio_feedback__";
 
+/// One mixed frame of the room, as [`ConferenceRoom::tap_mix`] hands it
+/// out: what the room sounds like at that moment, which is what a
+/// recording writes beside the composite video (design §11).
+#[derive(Debug, Clone)]
+pub struct MixedFrame {
+    /// Interleaved samples at [`MixedFrame::sample_rate`]; shared, so a
+    /// second listener costs nothing.
+    pub samples: Arc<Vec<i16>>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// When the frame was mixed, for lining audio up with the video
+    /// composed at the same moment.
+    pub at: std::time::Instant,
+}
+
+/// Frames a slow listener may fall behind by before it starts missing
+/// them: two seconds of 20 ms frames.
+const MIX_TAP_BACKLOG: usize = 100;
+
 /// Conference room with audio mixing and optional recording
 pub struct ConferenceRoom {
     /// Room identifier
@@ -38,6 +57,8 @@ pub struct ConferenceRoom {
     mixer: Arc<AudioMixer>,
     /// Optional recorder for capturing the conference
     recorder: Arc<RwLock<Option<AudioRecorder>>>,
+    /// Listeners on the room's mix (see [`ConferenceRoom::tap_mix`]).
+    mix_taps: tokio::sync::broadcast::Sender<MixedFrame>,
     /// Optional AI manager for this room
     ai_manager: Arc<RwLock<Option<crate::ai_manager::ConferenceAIManager>>>,
     /// Optional DTMF command handler
@@ -100,6 +121,7 @@ impl ConferenceRoom {
             id,
             mixer: Arc::new(mixer),
             recorder: Arc::new(RwLock::new(None)),
+            mix_taps: tokio::sync::broadcast::channel(MIX_TAP_BACKLOG).0,
             ai_manager: Arc::new(RwLock::new(None)),
             dtmf_handler: Arc::new(RwLock::new(None)),
             dtmf_task: Arc::new(RwLock::new(None)),
@@ -817,9 +839,33 @@ impl ConferenceRoom {
                     recorder.write_samples(samples)?;
                 }
             }
+            if self.mix_taps.receiver_count() > 0 {
+                let _ = self.mix_taps.send(MixedFrame {
+                    samples: Arc::new(samples.clone()),
+                    sample_rate: self.format.sample_rate,
+                    channels: self.format.channels,
+                    at: std::time::Instant::now(),
+                });
+            }
         }
 
         Ok(mixed)
+    }
+
+    /// Listen to the room's mix, frame by frame — the same audio the
+    /// room recorder writes, for a listener that muxes it with video
+    /// (design §11) or feeds it somewhere else.
+    ///
+    /// Frames arrive while the mixer's clock runs. A listener that falls
+    /// more than [`MIX_TAP_BACKLOG`] frames behind misses them and its
+    /// receiver reports the gap, as a broadcast channel does.
+    pub fn tap_mix(&self) -> tokio::sync::broadcast::Receiver<MixedFrame> {
+        self.mix_taps.subscribe()
+    }
+
+    /// Whether anyone is listening to the mix.
+    pub fn mix_tapped(&self) -> bool {
+        self.mix_taps.receiver_count() > 0
     }
 
     /// Mix audio for a specific participant (excluding their own audio)
@@ -846,9 +892,10 @@ impl ConferenceRoom {
     /// this is for drivers with their own clock, and for tests.
     pub fn advance_frame(&self) -> u64 {
         let seq = self.mixer.advance_frame();
-        if self.is_recording() {
+        if self.is_recording() || self.mix_tapped() {
             // In frame-clock mode `mix()` reads the snapshot, so feeding
-            // the recorder here consumes nothing from the participants.
+            // the recorder and the mix taps here consumes nothing from
+            // the participants.
             if let Err(e) = self.mix() {
                 warn!("Room {} recorder feed failed: {}", self.id, e);
             }

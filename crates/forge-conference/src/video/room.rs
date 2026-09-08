@@ -8,6 +8,11 @@
 //! active speaker, orders the tiles per layout, renders one canvas per
 //! layout output, encodes it once per flavor, and packetizes into each
 //! subscriber's stream.
+//!
+//! A **recording** (design §11) is one more consumer of a flavor, but not
+//! a participant: it draws no tile, sees the room whole, and takes coded
+//! frames rather than packets, because a muxer wants frames and
+//! packetizing one only to take it apart again is waste.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -17,7 +22,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use forge_core::VideoCodec;
 use forge_rtp::rtcp::{PayloadFeedback, RtcpPacket, TransportFeedback};
-use forge_rtp::RtpPacket;
+use forge_rtp::{CodedFrame, RtpPacket};
 use forge_video::codec::{CodecRegistry, EncoderSettings};
 use forge_video::compose::{Compositor, HostCompositor, TileSource};
 use forge_video::flavor::Flavor;
@@ -26,7 +31,7 @@ use forge_video::layout::Layout;
 use forge_video::{ClockEvent, VideoClock};
 use metrics::{counter, gauge, histogram};
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 use super::egress::{default_kbps, FlavorEncoder, OutputKey, Subscriber, VideoSubscription};
@@ -199,6 +204,97 @@ pub struct SubscribeRequest {
     pub max_kbps: Option<u32>,
 }
 
+/// What a recording asks the room for (§11). Unlike a subscription this
+/// is not a participant: it draws no tile and its composite leaves
+/// nobody out, whatever `exclude_self` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordRequest {
+    pub codec: VideoCodec,
+    /// Wanted resolution; the room's is the cap and the default.
+    pub resolution: Option<Resolution>,
+    /// Wanted frame rate; the room's is the cap and the default.
+    pub fps: Option<u32>,
+    /// Bitrate cap; the ladder's default for the resolution otherwise.
+    pub max_kbps: Option<u32>,
+    /// Frames buffered before the recorder is taken to be too slow and
+    /// frames are dropped.
+    pub queue: usize,
+}
+
+impl RecordRequest {
+    /// A recording of `codec` at the room's own resolution and rate.
+    pub fn new(codec: VideoCodec) -> Self {
+        Self {
+            codec,
+            resolution: None,
+            fps: None,
+            max_kbps: None,
+            queue: 120,
+        }
+    }
+}
+
+/// One coded frame of the composite, on its way to a recording.
+#[derive(Debug, Clone)]
+pub struct RecordedFrame {
+    /// The frame, timestamped in the room's 90 kHz clock since it
+    /// started ([`VideoRoom::started_at`]).
+    pub frame: CodedFrame,
+    /// When the canvas behind it was composed, for lining the video up
+    /// with the audio the room was mixing at that moment.
+    pub at: Instant,
+}
+
+/// A recording's stream of coded composite frames. Dropping it stops the
+/// recording at the next tick, as [`VideoRoom::stop_record`] does.
+#[derive(Debug)]
+pub struct RecordingSink {
+    pub id: String,
+    /// What the frames are: codec, resolution, rate and bitrate cap.
+    pub flavor: Flavor,
+    pub frames: mpsc::Receiver<RecordedFrame>,
+}
+
+/// A recording as the room holds it.
+struct RecorderTap {
+    output: OutputKey,
+    flavor: Flavor,
+    frames: mpsc::Sender<RecordedFrame>,
+    sent: AtomicU64,
+    dropped: AtomicU64,
+}
+
+impl RecorderTap {
+    fn send(&self, room: &str, id: &str, frame: &CodedFrame, at: Instant) {
+        match self.frames.try_send(RecordedFrame {
+            frame: frame.clone(),
+            at,
+        }) {
+            Ok(()) => {
+                self.sent.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 1 || n.is_multiple_of(100) {
+                    warn!(room = %room, recording = %id, dropped = n, "recording is behind; video frames dropped");
+                }
+                counter!("forge_conference_video_recording_frames_dropped_total", "room_id" => room.to_string())
+                    .increment(1);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+}
+
+/// What a recording is taking from the room.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoRecordingInfo {
+    pub id: String,
+    pub flavor: Flavor,
+    pub frames_sent: u64,
+    pub frames_dropped: u64,
+}
+
 /// One participant's video, for the API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoParticipantInfo {
@@ -272,6 +368,8 @@ pub struct VideoRoomStatus {
     pub ticks: u64,
     pub overruns: u64,
     pub outputs: Vec<VideoOutputInfo>,
+    /// Recordings taking the composite (§11).
+    pub recordings: Vec<VideoRecordingInfo>,
 }
 
 pub struct VideoRoom {
@@ -283,6 +381,8 @@ pub struct VideoRoom {
     join_seq: AtomicU64,
     sources: DashMap<String, Arc<VideoSource>>,
     subscribers: DashMap<String, Arc<Subscriber>>,
+    /// Recordings: consumers of a flavor that are not participants.
+    recorders: DashMap<String, Arc<RecorderTap>>,
     outputs: Mutex<HashMap<OutputKey, Output>>,
     speaker: Mutex<ActiveSpeaker>,
     control: Mutex<Control>,
@@ -320,6 +420,7 @@ impl VideoRoom {
             join_seq: AtomicU64::new(0),
             sources: DashMap::new(),
             subscribers: DashMap::new(),
+            recorders: DashMap::new(),
             outputs: Mutex::new(HashMap::new()),
             speaker: Mutex::new(ActiveSpeaker::default()),
             control: Mutex::new(Control::default()),
@@ -361,6 +462,12 @@ impl VideoRoom {
         self.events.subscribe()
     }
 
+    /// When the room's clock started. Frame timestamps are 90 kHz from
+    /// this instant, which is how a recording lines video up with audio.
+    pub fn started_at(&self) -> Instant {
+        self.started
+    }
+
     /// Stop the clock and drop every source, subscriber and encoder.
     pub fn stop(&self) {
         if self.stopped.swap(true, Ordering::AcqRel) {
@@ -371,6 +478,7 @@ impl VideoRoom {
         }
         self.sources.clear();
         self.subscribers.clear();
+        self.recorders.clear();
         self.outputs.lock().clear();
         gauge!("forge_conference_video_rooms").decrement(1.0);
         info!(room = %self.id, "video room stopped");
@@ -531,40 +639,7 @@ impl VideoRoom {
 
         self.unsubscribe(id);
 
-        let layout = self.layout();
-        let wants_keyframe = {
-            let mut outputs = self.outputs.lock();
-            let out = outputs.entry(output.clone()).or_insert_with(|| Output {
-                compositor: HostCompositor::new(res.width, res.height, layout),
-                encoders: HashMap::new(),
-            });
-            if let Some(enc) = out.encoders.get(&flavor) {
-                // A new subscriber on a shared encoder: everyone gets a
-                // keyframe (§5.4).
-                enc.wants_keyframe.store(true, Ordering::Release);
-                Arc::clone(&enc.wants_keyframe)
-            } else {
-                let es = EncoderSettings::for_flavor(
-                    &flavor,
-                    (settings.keyframe_interval.as_secs_f64() * fps as f64).round() as u32,
-                );
-                let encoder = self
-                    .backend
-                    .registry
-                    .encoder(&es, &self.backend.device)
-                    .map_err(|e| ConferenceError::Internal(format!("no video encoder: {e}")))?;
-                let fe = FlavorEncoder::new(
-                    flavor.clone(),
-                    encoder,
-                    settings.keyframe_interval,
-                    settings.keyframe_min_interval,
-                );
-                let wk = Arc::clone(&fe.wants_keyframe);
-                out.encoders.insert(flavor.clone(), fe);
-                gauge!("forge_conference_video_encoders").increment(1.0);
-                wk
-            }
-        };
+        let wants_keyframe = self.ensure_encoder(&output, &flavor, &settings)?;
 
         let (sub, rx) = Subscriber::new(
             id,
@@ -593,22 +668,162 @@ impl VideoRoom {
         let Some((_, sub)) = self.subscribers.remove(id) else {
             return;
         };
+        self.release_flavor(&sub.output, &sub.flavor);
+        debug!(room = %self.id, participant = %id, "video subscriber removed");
+    }
+
+    /// The encoder for a flavor on an output, created when it is new.
+    /// Whoever just arrived needs a keyframe, so one is asked for either
+    /// way (§5.4); the flag it returns is the encoder's own.
+    fn ensure_encoder(
+        &self,
+        output: &OutputKey,
+        flavor: &Flavor,
+        settings: &VideoRoomSettings,
+    ) -> Result<Arc<AtomicBool>> {
+        let layout = self.layout();
+        let mut outputs = self.outputs.lock();
+        let out = outputs.entry(output.clone()).or_insert_with(|| Output {
+            compositor: HostCompositor::new(
+                output.resolution.width,
+                output.resolution.height,
+                layout,
+            ),
+            encoders: HashMap::new(),
+        });
+        if let Some(enc) = out.encoders.get(flavor) {
+            enc.wants_keyframe.store(true, Ordering::Release);
+            return Ok(Arc::clone(&enc.wants_keyframe));
+        }
+        let es = EncoderSettings::for_flavor(
+            flavor,
+            (settings.keyframe_interval.as_secs_f64() * flavor.fps as f64).round() as u32,
+        );
+        let encoder = self
+            .backend
+            .registry
+            .encoder(&es, &self.backend.device)
+            .map_err(|e| ConferenceError::Internal(format!("no video encoder: {e}")))?;
+        let fe = FlavorEncoder::new(
+            flavor.clone(),
+            encoder,
+            settings.keyframe_interval,
+            settings.keyframe_min_interval,
+        );
+        let wk = Arc::clone(&fe.wants_keyframe);
+        out.encoders.insert(flavor.clone(), fe);
+        gauge!("forge_conference_video_encoders").increment(1.0);
+        Ok(wk)
+    }
+
+    /// Drop an encoder no subscriber or recording wants any more, and the
+    /// output when its last encoder goes.
+    fn release_flavor(&self, output: &OutputKey, flavor: &Flavor) {
         let still_used = self
             .subscribers
             .iter()
-            .any(|s| s.output == sub.output && s.flavor == sub.flavor);
-        if !still_used {
-            let mut outputs = self.outputs.lock();
-            if let Some(out) = outputs.get_mut(&sub.output) {
-                if out.encoders.remove(&sub.flavor).is_some() {
-                    gauge!("forge_conference_video_encoders").decrement(1.0);
-                }
-                if out.encoders.is_empty() {
-                    outputs.remove(&sub.output);
-                }
+            .any(|s| &s.output == output && &s.flavor == flavor)
+            || self
+                .recorders
+                .iter()
+                .any(|r| &r.output == output && &r.flavor == flavor);
+        if still_used {
+            return;
+        }
+        let mut outputs = self.outputs.lock();
+        if let Some(out) = outputs.get_mut(output) {
+            if out.encoders.remove(flavor).is_some() {
+                gauge!("forge_conference_video_encoders").decrement(1.0);
+            }
+            if out.encoders.is_empty() {
+                outputs.remove(output);
             }
         }
-        debug!(room = %self.id, participant = %id, "video subscriber removed");
+    }
+
+    // ---- recording ----------------------------------------------------------
+
+    /// Take the composite as coded frames, for a recording (§11). The
+    /// recording is not a participant: it draws no tile, and its
+    /// composite holds everyone whatever `exclude_self` says. A flavor a
+    /// subscriber already watches is shared, so recording at the room's
+    /// own resolution and codec costs no extra encode.
+    pub fn record(&self, id: &str, req: RecordRequest) -> Result<RecordingSink> {
+        let settings = self.settings.read().clone();
+        let cap = settings.resolution;
+        let res = req
+            .resolution
+            .map(|r| Resolution::new(r.width.min(cap.width), r.height.min(cap.height)))
+            .unwrap_or(cap);
+        let fps = req
+            .fps
+            .unwrap_or(settings.fps)
+            .clamp(1, settings.fps.max(1));
+        let kbps = req.max_kbps.unwrap_or_else(|| default_kbps(res)).max(1);
+        let flavor = Flavor::new(req.codec, "", res, fps, kbps);
+        let output = OutputKey {
+            exclude: None,
+            resolution: res,
+        };
+
+        self.stop_record(id);
+        self.ensure_encoder(&output, &flavor, &settings)?;
+
+        let (tx, rx) = mpsc::channel(req.queue.max(8));
+        self.recorders.insert(
+            id.to_string(),
+            Arc::new(RecorderTap {
+                output,
+                flavor: flavor.clone(),
+                frames: tx,
+                sent: AtomicU64::new(0),
+                dropped: AtomicU64::new(0),
+            }),
+        );
+        gauge!("forge_conference_video_recordings").increment(1.0);
+        info!(room = %self.id, recording = %id, %flavor, "video recording started");
+        Ok(RecordingSink {
+            id: id.to_string(),
+            flavor,
+            frames: rx,
+        })
+    }
+
+    /// Stop a recording; its encoder goes when nothing else wants it.
+    pub fn stop_record(&self, id: &str) {
+        let Some((_, tap)) = self.recorders.remove(id) else {
+            return;
+        };
+        self.release_flavor(&tap.output, &tap.flavor);
+        gauge!("forge_conference_video_recordings").decrement(1.0);
+        info!(
+            room = %self.id,
+            recording = %id,
+            frames = tap.sent.load(Ordering::Relaxed),
+            dropped = tap.dropped.load(Ordering::Relaxed),
+            "video recording stopped"
+        );
+    }
+
+    /// Whether a recording of that name is taking the composite.
+    pub fn is_recording(&self, id: &str) -> bool {
+        self.recorders.contains_key(id)
+    }
+
+    /// Every recording under way.
+    pub fn recordings(&self) -> Vec<VideoRecordingInfo> {
+        let mut v: Vec<_> = self
+            .recorders
+            .iter()
+            .map(|e| VideoRecordingInfo {
+                id: e.key().clone(),
+                flavor: e.flavor.clone(),
+                frames_sent: e.sent.load(Ordering::Relaxed),
+                frames_dropped: e.dropped.load(Ordering::Relaxed),
+            })
+            .collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
     }
 
     pub fn has_subscriber(&self, id: &str) -> bool {
@@ -823,6 +1038,7 @@ impl VideoRoom {
             ticks: self.ticks.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
             outputs: outs,
+            recordings: self.recordings(),
         }
     }
 
@@ -1021,7 +1237,13 @@ impl VideoRoom {
                     .filter(|s| &s.output == key && s.flavor == enc.flavor)
                     .map(|s| Arc::clone(s.value()))
                     .collect();
-                if subs.is_empty() {
+                let recorders: Vec<(String, Arc<RecorderTap>)> = self
+                    .recorders
+                    .iter()
+                    .filter(|r| &r.output == key && r.flavor == enc.flavor)
+                    .map(|r| (r.key().clone(), Arc::clone(r.value())))
+                    .collect();
+                if subs.is_empty() && recorders.is_empty() {
                     continue;
                 }
                 // The encoder targets the slowest receiver (§7).
@@ -1036,6 +1258,9 @@ impl VideoRoom {
                 for frame in enc.encode(&canvas, now, &self.id) {
                     for s in &subs {
                         s.send_frame(codec, &frame, pts);
+                    }
+                    for (id, tap) in &recorders {
+                        tap.send(&self.id, id, &frame, now);
                     }
                     counter!("forge_conference_video_packets_sent_total", "room_id" => self.id.clone())
                         .increment(subs.len() as u64);

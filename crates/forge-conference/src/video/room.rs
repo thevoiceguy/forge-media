@@ -34,7 +34,9 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
-use super::egress::{default_kbps, FlavorEncoder, OutputKey, Subscriber, VideoSubscription};
+use super::egress::{
+    default_kbps, FlavorEncoder, OutputKey, OutputScope, Subscriber, VideoSubscription,
+};
 use super::pool::CodecPool;
 use super::source::{SourceLimits, VideoSource};
 use super::speaker::{ActiveSpeaker, Level};
@@ -175,6 +177,11 @@ struct Participant {
     enabled: bool,
     state: VideoState,
     joined: u64,
+    /// A peer node's tile rather than a caller on this one: it draws a
+    /// tile and decodes like any source, but it is not in the audio
+    /// room and a trunk's own composite leaves it out
+    /// ([`OutputScope::LocalOnly`]).
+    remote: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -202,6 +209,10 @@ pub struct SubscribeRequest {
     pub fps: Option<u32>,
     /// Bitrate cap; the ladder's default for the resolution otherwise.
     pub max_kbps: Option<u32>,
+    /// Whose tiles to compose. `None` is the room's own rule: the
+    /// subscriber's own tile left out when `exclude_self` is set, every
+    /// tile otherwise. A trunk asks for [`OutputScope::LocalOnly`].
+    pub scope: Option<OutputScope>,
 }
 
 /// What a recording asks the room for (§11). Unlike a subscription this
@@ -306,6 +317,9 @@ pub struct VideoParticipantInfo {
     pub state: VideoState,
     pub display_name: String,
     pub speaking: bool,
+    /// A peer node's tile, standing for the callers on that node,
+    /// rather than a caller on this one.
+    pub remote: bool,
     /// The ingress side, when the participant sends video.
     pub source: Option<VideoSourceInfo>,
     /// The egress side, when the participant receives video.
@@ -352,7 +366,8 @@ pub struct VideoFlavorInfo {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoOutputInfo {
-    pub exclude: Option<String>,
+    /// Whose tiles this composite is drawn from.
+    pub scope: OutputScope,
     pub resolution: Resolution,
     pub flavors: Vec<VideoFlavorInfo>,
 }
@@ -500,6 +515,7 @@ impl VideoRoom {
                 enabled: true,
                 state: VideoState::Off,
                 joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
+                remote: false,
             });
     }
 
@@ -549,6 +565,47 @@ impl VideoRoom {
     }
 
     // ---- ingress ----------------------------------------------------------
+
+    /// A peer node's composite arriving over a trunk: one tile, drawn
+    /// like any other, that is not a participant of this room.
+    ///
+    /// The tile carries what the peer is showing — its own callers,
+    /// composed there — so a composite this node sends back to a peer
+    /// must leave it out ([`OutputScope::LocalOnly`]). It is not in the
+    /// audio room either, so it is never the active speaker on its own
+    /// energy; the peer says who is speaking behind it.
+    pub fn add_remote(&self, id: &str, codec: VideoCodec) -> Result<()> {
+        self.participants
+            .entry(id.to_string())
+            .or_insert_with(|| Participant {
+                name: id.to_string(),
+                enabled: true,
+                state: VideoState::Off,
+                joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
+                remote: true,
+            })
+            .remote = true;
+        let out = self.add_source(id, codec);
+        if out.is_err() {
+            self.participants.remove(id);
+        } else {
+            debug!(room = %self.id, remote = %id, %codec, "remote video tile added");
+        }
+        out
+    }
+
+    /// The trunk went: the tile and its decoder go with it.
+    pub fn remove_remote(&self, id: &str) {
+        if self.participants.get(id).is_some_and(|p| p.remote) {
+            self.participant_left(id);
+            debug!(room = %self.id, remote = %id, "remote video tile removed");
+        }
+    }
+
+    /// Whether the id names a peer node's tile rather than a caller here.
+    pub fn is_remote(&self, id: &str) -> bool {
+        self.participants.get(id).is_some_and(|p| p.remote)
+    }
 
     /// The participant sends `codec`; start decoding it.
     pub fn add_source(&self, id: &str, codec: VideoCodec) -> Result<()> {
@@ -636,8 +693,15 @@ impl VideoRoom {
             .clamp(1, settings.fps.max(1));
         let kbps = req.max_kbps.unwrap_or_else(|| default_kbps(res)).max(1);
         let flavor = Flavor::new(req.codec, &req.profile, res, fps, kbps);
+        let scope = req.scope.clone().unwrap_or_else(|| {
+            if settings.exclude_self {
+                OutputScope::Excluding(id.to_string())
+            } else {
+                OutputScope::All
+            }
+        });
         let output = OutputKey {
-            exclude: settings.exclude_self.then(|| id.to_string()),
+            scope,
             resolution: res,
         };
 
@@ -766,7 +830,7 @@ impl VideoRoom {
         let kbps = req.max_kbps.unwrap_or_else(|| default_kbps(res)).max(1);
         let flavor = Flavor::new(req.codec, "", res, fps, kbps);
         let output = OutputKey {
-            exclude: None,
+            scope: OutputScope::All,
             resolution: res,
         };
 
@@ -991,6 +1055,7 @@ impl VideoRoom {
             state: p.state,
             display_name: p.name.clone(),
             speaking: self.speaker.lock().current() == Some(id),
+            remote: p.remote,
             source,
             subscription,
         }
@@ -1020,13 +1085,13 @@ impl VideoRoom {
                     .collect();
                 flavors.sort_by(|a, b| a.flavor.cmp(&b.flavor));
                 VideoOutputInfo {
-                    exclude: k.exclude.clone(),
+                    scope: k.scope.clone(),
                     resolution: k.resolution,
                     flavors,
                 }
             })
             .collect();
-        outs.sort_by(|a, b| (&a.exclude, a.resolution).cmp(&(&b.exclude, b.resolution)));
+        outs.sort_by(|a, b| (&a.scope, a.resolution).cmp(&(&b.scope, b.resolution)));
         let encoders = outputs.values().map(|o| o.encoders.len()).sum();
         drop(outputs);
         VideoRoomStatus {
@@ -1163,6 +1228,8 @@ impl VideoRoom {
             frame: Option<Arc<VideoFrame>>,
             speaking: bool,
             muted: bool,
+            /// A peer node's tile: left out of a trunk's own composite.
+            remote: bool,
         }
         let mut tiles: HashMap<String, Tile> = HashMap::new();
         for id in &join_order {
@@ -1179,6 +1246,7 @@ impl VideoRoom {
                 None => (None, VideoState::Off),
             };
             let name = p.name.clone();
+            let remote = p.remote;
             drop(p);
             self.set_state(id, state);
             tiles.insert(
@@ -1189,6 +1257,7 @@ impl VideoRoom {
                     frame,
                     speaking: speaker.as_deref() == Some(id.as_str()),
                     muted: muted.get(id).copied().unwrap_or(false),
+                    remote,
                 },
             );
         }
@@ -1219,8 +1288,8 @@ impl VideoRoom {
             }
             let sources: Vec<TileSource<'_>> = order
                 .iter()
-                .filter(|id| key.exclude.as_deref() != Some(id.as_str()))
                 .filter_map(|id| tiles.get(id))
+                .filter(|t| key.scope.admits(&t.id, t.remote))
                 .map(|t| TileSource {
                     id: &t.id,
                     name: &t.name,

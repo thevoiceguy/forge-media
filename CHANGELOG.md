@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-08.1] — workspace release
+
+**A remote tile, and the composite a trunk carries** (FCP video conferencing,
+phase 5b). A room spread over several nodes needs each node to see the others,
+and the rule that keeps it from seeing itself.
+
+**`forge-conference` 0.7.0**: `VideoRoom::add_remote(id, codec)` registers a
+source that is a **tile without being a participant** — a peer node's composite,
+arriving over a trunk, drawn like any other tile and decoded like any other
+source, but not in the audio room and so never the active speaker on its own
+energy (the peer says who is speaking behind it; that is 5c). `remove_remote`
+and `is_remote` go with it, and `VideoParticipantInfo::remote` says which is
+which.
+
+`OutputKey::exclude` becomes `OutputKey::scope`, an `OutputScope` with three
+answers: `All` (every tile, a remote one included — the shared composite and
+every recording), `Excluding(id)` (the private composite `exclude_self` gives a
+participant) and **`LocalOnly`** (this node's callers only). `LocalOnly` is what
+a trunk subscribes with, the exact analogue of the audio mix's anti-echo rule:
+without it, a tile forwarded through one peer would be drawn a second time via
+another, and a three-node room would show the same caller twice.
+`SubscribeRequest::scope` asks for one; `None` keeps the room's own rule.
+
+Breaking: `SubscribeRequest` has a new field, `VideoOutputInfo::exclude` is now
+`scope`, and `VideoParticipantInfo` has a new field.
+
 ## [2026-09-08] — workspace release
 
 **A recording the room really lets go, and the reader in reach.**

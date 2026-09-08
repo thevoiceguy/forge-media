@@ -5,7 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use forge_conference::video::{RecordRequest, SubscribeRequest, VideoBackend, VideoRoomSettings};
+use forge_conference::video::{
+    OutputScope, RecordRequest, SubscribeRequest, VideoBackend, VideoRoomSettings,
+};
 use forge_conference::{AudioFormat, ConferenceRoom};
 use forge_core::VideoCodec;
 use forge_rtp::video::payload::packetize;
@@ -103,6 +105,7 @@ fn subscribe(codec: VideoCodec) -> SubscribeRequest {
         resolution: None,
         fps: None,
         max_kbps: None,
+        scope: None,
     }
 }
 
@@ -222,7 +225,7 @@ async fn a_recording_shares_a_subscriber_s_encoder() {
     assert_eq!(recording.flavor.resolution, Resolution::new(128, 72));
     let outputs = video.status().outputs;
     assert_eq!(outputs.len(), 1, "one composite, watched by both");
-    assert_eq!(outputs[0].exclude, None);
+    assert_eq!(outputs[0].scope, OutputScope::All);
 
     // A smaller recording needs its own output and encoder.
     let small = video
@@ -278,13 +281,13 @@ async fn a_recording_sees_a_composite_nobody_is_left_out_of() {
         3,
         "one per subscriber, one for the recording"
     );
-    let excludes: Vec<Option<String>> = outputs.iter().map(|o| o.exclude.clone()).collect();
+    let scopes: Vec<OutputScope> = outputs.iter().map(|o| o.scope.clone()).collect();
     assert!(
-        excludes.contains(&None),
+        scopes.contains(&OutputScope::All),
         "the recording's leaves nobody out"
     );
-    assert!(excludes.contains(&Some("alice".to_string())));
-    assert!(excludes.contains(&Some("bob".to_string())));
+    assert!(scopes.contains(&OutputScope::Excluding("alice".to_string())));
+    assert!(scopes.contains(&OutputScope::Excluding("bob".to_string())));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

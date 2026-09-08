@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use forge_conference::video::{
-    SubscribeRequest, VideoBackend, VideoRoomEvent, VideoRoomSettings, VideoState,
+    OutputScope, SubscribeRequest, VideoBackend, VideoRoomEvent, VideoRoomSettings, VideoState,
 };
 use forge_conference::{AudioFormat, ConferenceRoom};
 use forge_core::VideoCodec;
@@ -134,6 +134,7 @@ fn subscribe(codec: VideoCodec, res: Option<Resolution>) -> SubscribeRequest {
         resolution: res,
         fps: None,
         max_kbps: None,
+        scope: None,
     }
 }
 
@@ -328,7 +329,10 @@ async fn subscribers_with_the_same_needs_share_an_encoder_and_exclude_self_split
     let status = video.status();
     assert_eq!(status.encoders, 2);
     assert_eq!(status.outputs.len(), 2);
-    assert!(status.outputs.iter().all(|o| o.exclude.is_some()));
+    assert!(status
+        .outputs
+        .iter()
+        .all(|o| matches!(o.scope, OutputScope::Excluding(_))));
 
     let mut cam_a = Camera::new(1, 128, 72);
     let mut cam_b = Camera::new(2, 128, 72);
@@ -578,4 +582,112 @@ async fn the_loudest_speaker_takes_the_spotlight_from_the_audio_mixer() {
     }
     assert_eq!(got.as_deref(), Some("loud"));
     audio.disable_video();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_remote_tile_is_drawn_for_callers_and_left_out_of_a_trunk_s_own_composite() {
+    // Two nodes, one room. This node has Alice; the peer sends its own
+    // composite over a trunk, which is one tile here. What this node
+    // sends back down that trunk must not carry the peer's tile, or a
+    // third node would draw it twice (design §15.4, 5b).
+    let audio = audio_room("trunk");
+    audio.add_participant("alice", true).unwrap();
+    // A trunk's audio side is a virtual participant, not a caller.
+    audio.add_virtual_participant("__trunk__node-b").unwrap();
+    let video = audio.enable_video(settings(256, 72, 30), &VideoBackend::raw());
+
+    video.add_source("alice", VideoCodec::VP8).unwrap();
+    video
+        .add_remote("__trunk__node-b", VideoCodec::VP8)
+        .unwrap();
+    assert!(video.is_remote("__trunk__node-b"));
+    assert!(!video.is_remote("alice"));
+
+    // Alice watches the room: her composite has the peer's tile in it.
+    let mut alice_screen = video
+        .subscribe("alice", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    // The trunk watches the local half only.
+    let mut trunk_screen = video
+        .subscribe(
+            "__trunk__node-b",
+            SubscribeRequest {
+                scope: Some(OutputScope::LocalOnly),
+                ..subscribe(VideoCodec::VP8, None)
+            },
+        )
+        .unwrap();
+    // Two composites, two encoders: they are not the same picture.
+    let status = video.status();
+    assert_eq!(status.outputs.len(), 2, "{:?}", status.outputs);
+    let scopes: Vec<OutputScope> = status.outputs.iter().map(|o| o.scope.clone()).collect();
+    assert!(scopes.contains(&OutputScope::All));
+    assert!(scopes.contains(&OutputScope::LocalOnly));
+
+    let mut alice = Camera::new(0xA11CE, 128, 72);
+    let mut peer = Camera::new(0xBEEF, 128, 72);
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            for _ in 0..80 {
+                for p in alice.frame(200) {
+                    video.push_rtp("alice", p);
+                }
+                for p in peer.frame(60) {
+                    video.push_rtp("__trunk__node-b", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+
+    // Alice sees two tiles side by side: her own bright one, the peer's dark one.
+    let mut screen = Screen::new();
+    let seen = wait_for_composite(&mut alice_screen.packets, &mut screen, |f| {
+        f.luma(64, 30) == 200 && f.luma(192, 30) == 60
+    })
+    .await;
+    assert_eq!(seen.resolution(), Resolution::new(256, 72));
+
+    // The trunk sees one tile — Alice — filling the frame. Nothing of
+    // the peer's own picture comes back to it.
+    let mut trunk = Screen::new();
+    let sent = wait_for_composite(&mut trunk_screen.packets, &mut trunk, |f| {
+        f.luma(128, 30) == 200
+    })
+    .await;
+    for x in [32, 128, 224] {
+        assert_ne!(
+            sent.luma(x, 30),
+            60,
+            "the peer's own tile came back to it at x={x}"
+        );
+    }
+
+    // The tile is not a caller: it draws, but the room's own speaker
+    // logic never picks it (its energy is the peer's, not a person's).
+    let info = video.participant("__trunk__node-b").expect("a tile");
+    assert!(info.remote);
+    assert!(!info.speaking);
+    assert_eq!(
+        info.source.expect("decoding the peer").codec,
+        VideoCodec::VP8
+    );
+    assert!(video
+        .participants()
+        .iter()
+        .any(|p| p.participant_id == "alice" && !p.remote));
+
+    // The trunk goes: tile, decoder and subscription go with it.
+    feeder.abort();
+    video.unsubscribe("__trunk__node-b");
+    video.remove_remote("__trunk__node-b");
+    assert!(!video.is_remote("__trunk__node-b"));
+    assert!(video.participant("__trunk__node-b").is_none());
+    assert!(!video.has_source("__trunk__node-b"));
+    assert_eq!(
+        video.status().outputs.len(),
+        1,
+        "the local-only composite went with the trunk"
+    );
 }

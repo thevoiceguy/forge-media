@@ -27,11 +27,44 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
-/// Which composite a subscriber watches: the shared one, or a private
-/// one that leaves the subscriber's own tile out (`exclude_self`).
+/// Whose tiles a composite is drawn from.
+///
+/// Three answers, and a composite is shared by everyone who wants the
+/// same one at the same size, so a room usually has very few.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum OutputScope {
+    /// Every tile in the room, a peer node's remote tile included. What
+    /// an ordinary subscriber and a recording get.
+    #[default]
+    All,
+    /// Every tile but this one: the private composite `exclude_self`
+    /// gives a participant.
+    Excluding(String),
+    /// Local participants only, no remote tile. What a trunk sends to a
+    /// peer — the analogue of the audio mix's anti-echo rule. Without
+    /// it, a three-node room would draw a tile forwarded through one
+    /// peer a second time via another.
+    LocalOnly,
+}
+
+impl OutputScope {
+    /// Whether a tile belongs in this composite. `remote` marks a peer
+    /// node's tile rather than a caller on this one.
+    pub fn admits(&self, id: &str, remote: bool) -> bool {
+        match self {
+            OutputScope::All => true,
+            OutputScope::Excluding(other) => other != id,
+            OutputScope::LocalOnly => !remote,
+        }
+    }
+}
+
+/// Which composite a subscriber watches: the shared one, a private one
+/// that leaves the subscriber's own tile out (`exclude_self`), or the
+/// local-only one a trunk carries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OutputKey {
-    pub exclude: Option<String>,
+    pub scope: OutputScope,
     pub resolution: Resolution,
 }
 
@@ -334,5 +367,33 @@ impl std::fmt::Debug for FlavorEncoder {
             .field("flavor", &self.flavor)
             .field("target_kbps", &self.target_kbps)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_scope_decides_which_tiles_a_composite_is_drawn_from() {
+        // The shared composite: everyone, a peer node's tile included.
+        let all = OutputScope::All;
+        assert!(all.admits("alice", false));
+        assert!(all.admits("__trunk__node-b", true));
+
+        // A private composite leaves one tile out, whether or not it is
+        // a remote one.
+        let mine = OutputScope::Excluding("alice".to_string());
+        assert!(!mine.admits("alice", false));
+        assert!(mine.admits("bob", false));
+        assert!(mine.admits("__trunk__node-b", true));
+
+        // What a trunk carries: this node's callers and nothing that
+        // came from another node, so a tile is never drawn twice in a
+        // room spread over three.
+        let trunk = OutputScope::LocalOnly;
+        assert!(trunk.admits("alice", false));
+        assert!(!trunk.admits("__trunk__node-b", true));
+        assert!(!trunk.admits("__trunk__node-c", true));
     }
 }

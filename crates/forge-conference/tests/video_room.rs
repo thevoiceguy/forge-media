@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use forge_conference::video::{
-    OutputScope, SubscribeRequest, VideoBackend, VideoRoomEvent, VideoRoomSettings, VideoState,
+    OutputScope, RemoteSpeaker, SubscribeRequest, VideoBackend, VideoRoomEvent, VideoRoomSettings,
+    VideoState,
 };
 use forge_conference::{AudioFormat, ConferenceRoom};
 use forge_core::VideoCodec;
@@ -576,7 +577,7 @@ async fn the_loudest_speaker_takes_the_spotlight_from_the_audio_mixer() {
     assert!(video.participant("loud").unwrap().speaking);
     let mut got = None;
     while let Ok(ev) = events.try_recv() {
-        if let VideoRoomEvent::ActiveSpeaker { participant_id } = ev {
+        if let VideoRoomEvent::ActiveSpeaker { participant_id, .. } = ev {
             got = participant_id;
         }
     }
@@ -689,5 +690,111 @@ async fn a_remote_tile_is_drawn_for_callers_and_left_out_of_a_trunk_s_own_compos
         video.status().outputs.len(),
         1,
         "the local-only composite went with the trunk"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_s_claim_decides_who_is_speaking_behind_its_tile() {
+    // A remote tile's own energy is a whole node's mix, which says
+    // nothing about who is talking. The node that has the caller says
+    // instead, and every node runs the same rule over the same inputs
+    // (design §15.4, 5c).
+    let audio = audio_room("speaker-across-nodes");
+    audio.add_participant("alice", true).unwrap();
+    audio.add_virtual_participant("__trunk__node-b").unwrap();
+    let video = audio.enable_video(settings(256, 72, 30), &VideoBackend::raw());
+    video.set_local_node("node-a");
+    video.add_source("alice", VideoCodec::VP8).unwrap();
+    video
+        .add_remote("__trunk__node-b", VideoCodec::VP8)
+        .unwrap();
+    let mut events = video.events();
+
+    // Nobody claims anything yet: a tile with no claim never wins.
+    audio.write_audio("alice", &[1_200i16; 480]).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while video.active_speaker().is_none() && tokio::time::Instant::now() < deadline {
+        audio.write_audio("alice", &[1_200i16; 480]).unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert_eq!(video.active_speaker().as_deref(), Some("alice"));
+    assert_eq!(video.active_speaker_via(), None, "alice is a caller here");
+
+    // Node B says Bob is speaking behind its tile, louder than Alice.
+    // The room reports Bob — by his own name, through the tile.
+    video.set_remote_speaker(
+        "__trunk__node-b",
+        Some(RemoteSpeaker {
+            node: "node-b".to_string(),
+            participant_id: "bob".to_string(),
+            // The mixer's energy is a raw RMS in i16 units, the same
+            // scale on every node, so a peer's claim is comparable with
+            // this node's own levels.
+            display_name: "Bob".to_string(),
+            energy: 3_000.0,
+            speaking: true,
+        }),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while video.active_speaker().as_deref() != Some("bob") && tokio::time::Instant::now() < deadline
+    {
+        audio.write_audio("alice", &[200i16; 480]).unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert_eq!(video.active_speaker().as_deref(), Some("bob"));
+    assert_eq!(
+        video.active_speaker_via().as_deref(),
+        Some("__trunk__node-b"),
+        "reported through the tile he is behind"
+    );
+    // The tile, not the person, is what the layouts move around.
+    assert_eq!(
+        video.active_speaker_tile().as_deref(),
+        Some("__trunk__node-b")
+    );
+    // And the tile wears his name while he holds the floor.
+    let tile = video.participant("__trunk__node-b").unwrap();
+    assert_eq!(tile.display_name, "Bob");
+    assert!(tile.speaking);
+    assert!(!video.participant("alice").unwrap().speaking);
+    let status = video.status();
+    assert_eq!(status.active_speaker.as_deref(), Some("bob"));
+    assert_eq!(
+        status.active_speaker_via.as_deref(),
+        Some("__trunk__node-b")
+    );
+
+    // The event names the person and the way in.
+    let mut saw_bob = false;
+    while let Ok(ev) = events.try_recv() {
+        if let VideoRoomEvent::ActiveSpeaker {
+            participant_id,
+            via,
+        } = ev
+        {
+            if participant_id.as_deref() == Some("bob") {
+                assert_eq!(via.as_deref(), Some("__trunk__node-b"));
+                saw_bob = true;
+            }
+        }
+    }
+    assert!(saw_bob, "the change was announced");
+
+    // The claim is withdrawn: the tile stops standing for anyone, and
+    // the room falls back to its own caller.
+    video.set_remote_speaker("__trunk__node-b", None);
+    assert!(video.remote_speaker("__trunk__node-b").is_none());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while video.active_speaker().as_deref() != Some("alice")
+        && tokio::time::Instant::now() < deadline
+    {
+        audio.write_audio("alice", &[1_200i16; 480]).unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert_eq!(video.active_speaker().as_deref(), Some("alice"));
+    assert_eq!(
+        video.participant("__trunk__node-b").unwrap().display_name,
+        "__trunk__node-b",
+        "the tile goes back to naming its node"
     );
 }

@@ -115,7 +115,7 @@ async fn a_recording_takes_the_composite_without_joining_the_room() {
     audio.add_participant("alice", true).unwrap();
     audio.add_participant("bob", false).unwrap();
     let video = audio.enable_video(settings(256, 72, 30), &VideoBackend::raw());
-    video.add_source("alice", VideoCodec::VP8).unwrap();
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
 
     let mut recording = video
         .record("rec-1", RecordRequest::new(VideoCodec::VP8))
@@ -210,7 +210,7 @@ async fn a_recording_shares_a_subscriber_s_encoder() {
     let audio = audio_room("share", false);
     audio.add_participant("alice", true).unwrap();
     let video = audio.enable_video(settings(128, 72, 15), &VideoBackend::raw());
-    video.add_source("alice", VideoCodec::VP8).unwrap();
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
 
     let _sub = video
         .subscribe("alice", subscribe(VideoCodec::VP8))
@@ -353,7 +353,7 @@ async fn dropping_the_sink_stops_the_recording() {
     let audio = audio_room("dropped", false);
     audio.add_participant("alice", true).unwrap();
     let video = audio.enable_video(settings(128, 72, 15), &VideoBackend::raw());
-    video.add_source("alice", VideoCodec::VP8).unwrap();
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
 
     let sink = video
         .record("rec-1", RecordRequest::new(VideoCodec::VP8))

@@ -131,6 +131,8 @@ pub struct VideoSource {
     id: String,
     room_id: String,
     codec: VideoCodec,
+    /// The sender's negotiated `a=fmtp`, for forwarding decisions.
+    profile: String,
     limits: SourceLimits,
     assembler: Mutex<FrameAssembler>,
     /// `true` while the assembler's picture is decodable (a keyframe has
@@ -154,10 +156,12 @@ pub struct VideoSource {
 }
 
 impl VideoSource {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: &str,
         room_id: &str,
         codec: VideoCodec,
+        profile: &str,
         decoder: Box<dyn VideoDecoder>,
         limits: SourceLimits,
         local_ssrc: u32,
@@ -167,6 +171,7 @@ impl VideoSource {
             id: id.to_string(),
             room_id: room_id.to_string(),
             codec,
+            profile: profile.to_string(),
             assembler: Mutex::new(FrameAssembler::with_limits(
                 codec,
                 16,
@@ -202,6 +207,20 @@ impl VideoSource {
 
     pub fn codec(&self) -> VideoCodec {
         self.codec
+    }
+
+    /// The `a=fmtp` this sender negotiated, `""` when its codec has
+    /// none. Forwarding its stream on to someone else needs it (§5.6).
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    /// The size of the last frame decoded, or 0×0 before the first.
+    pub fn measured_resolution(&self) -> Resolution {
+        Resolution::new(
+            self.stats.width.load(Ordering::Relaxed),
+            self.stats.height.load(Ordering::Relaxed),
+        )
     }
 
     /// The decoder gave up (§13): the tile shows an avatar from now on.

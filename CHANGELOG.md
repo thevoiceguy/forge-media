@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-08.3] — workspace release
+
+**The passthrough fast path** (FCP video conferencing, phase 6a). §2 and §5.6
+always said forwarding is an optimisation inside the mixer rather than an
+architecture; this is it. Phase 1 built `StreamRewriter` and
+`H264Fmtp::forwardable_to` for the day, and neither had been called since.
+
+**`forge-conference` 0.9.0**: a subscriber whose view comes to exactly one
+source with a picture, and whose stream that source can already be decoded as
+— same codec, an H.264 profile `forwardable_to` its own, a frame no larger
+than it asked for — is sent that source's **own packets** instead of a
+composite. `Subscriber::start_forwarding` seeds a `StreamRewriter` from where
+the subscriber's stream has got to, so the SSRC, the sequence numbers and the
+timestamps carry straight on and the receiver never learns the picture stopped
+being composed for it; the switch lands on a keyframe, which the source is
+asked for. Forwarded packets go out on ingress, off the compose clock, since a
+tick of latency would undo the point of it; the retransmission cache holds
+them exactly as it holds encoded ones; and a PLI from the receiver is sent to
+the source rather than re-keying an encoder that is not running.
+
+An output that every subscriber has been forwarded away from is not rendered
+or encoded at all, which is where the saving is: for a two-party call in
+spotlight, one composite and one encode per tick become none.
+
+`VideoRoomSettings::passthrough` is a `PassthroughMode`: `Off`, `On`, or
+`Auto` (the default) — forward only while the room is showing one participant
+full canvas. A forwarded frame is the sender's own picture, so it carries no
+name banner, no speaking border and no avatar; that is right for a presenter
+and wrong for a grid where the labels are how you tell people apart.
+`VideoSubscriberInfo::forwarding` says which subscribers are on the fast path.
+
+**`forge-rtp` 0.6.0**: `RtpHeader::set_payload_type`, since two legs negotiate
+their own numbers for the same codec.
+
+Breaking: `VideoRoom::add_source` and `add_remote` take the sender's `a=fmtp`
+(H.264 forwardability needs it), `VideoRoomSettings::passthrough` is new, and
+`VideoSubscriberInfo` has a new `forwarding` field.
+
 ## [2026-09-08.2] — workspace release
 
 **One speaker a whole room agrees on** (FCP video conferencing, phase 5c).

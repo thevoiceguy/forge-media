@@ -15,9 +15,9 @@ pub mod speaker;
 pub use egress::{default_kbps, OutputKey, OutputScope, SubscriberStats, VideoSubscription};
 pub use pool::CodecPool;
 pub use room::{
-    RecordRequest, RecordedFrame, RecordingSink, RemoteSpeaker, SubscribeRequest, VideoBackend,
-    VideoFlavorInfo, VideoOutputInfo, VideoParticipantInfo, VideoRecordingInfo, VideoRoom,
-    VideoRoomEvent, VideoRoomSettings, VideoRoomStatus, VideoSourceInfo, VideoState,
+    PassthroughMode, RecordRequest, RecordedFrame, RecordingSink, RemoteSpeaker, SubscribeRequest,
+    VideoBackend, VideoFlavorInfo, VideoOutputInfo, VideoParticipantInfo, VideoRecordingInfo,
+    VideoRoom, VideoRoomEvent, VideoRoomSettings, VideoRoomStatus, VideoSourceInfo, VideoState,
     VideoSubscriberInfo,
 };
 pub use source::{SourceLimits, SourceStats};

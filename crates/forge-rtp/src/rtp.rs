@@ -47,6 +47,13 @@ impl RtpHeader {
         self.marker_payload_type & 0x7F
     }
 
+    /// Set the payload type, keeping the marker bit. Forwarding a packet
+    /// between two legs needs this: each negotiated its own number for
+    /// the same codec.
+    pub fn set_payload_type(&mut self, pt: u8) {
+        self.marker_payload_type = (self.marker_payload_type & 0x80) | (pt & 0x7F);
+    }
+
     /// Parse RTP header from bytes
     pub fn parse(data: &[u8]) -> Result<Self, ForgeError> {
         if data.len() < Self::SIZE {

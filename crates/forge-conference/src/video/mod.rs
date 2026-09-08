@@ -12,7 +12,7 @@ pub mod room;
 pub mod source;
 pub mod speaker;
 
-pub use egress::{default_kbps, OutputKey, SubscriberStats, VideoSubscription};
+pub use egress::{default_kbps, OutputKey, OutputScope, SubscriberStats, VideoSubscription};
 pub use pool::CodecPool;
 pub use room::{
     RecordRequest, RecordedFrame, RecordingSink, SubscribeRequest, VideoBackend, VideoFlavorInfo,

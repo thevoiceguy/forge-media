@@ -265,13 +265,16 @@ struct RecorderTap {
 }
 
 impl RecorderTap {
-    fn send(&self, room: &str, id: &str, frame: &CodedFrame, at: Instant) {
+    /// Hand the recorder a frame. `false` means the recording is gone —
+    /// its sink was dropped — and the room should let it go.
+    fn send(&self, room: &str, id: &str, frame: &CodedFrame, at: Instant) -> bool {
         match self.frames.try_send(RecordedFrame {
             frame: frame.clone(),
             at,
         }) {
             Ok(()) => {
                 self.sent.fetch_add(1, Ordering::Relaxed);
+                true
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
                 let n = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
@@ -280,8 +283,9 @@ impl RecorderTap {
                 }
                 counter!("forge_conference_video_recording_frames_dropped_total", "room_id" => room.to_string())
                     .increment(1);
+                true
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
     }
 }
@@ -1206,6 +1210,9 @@ impl VideoRoom {
         let pts = (now.duration_since(self.started).as_secs_f64() * 90_000.0) as u32;
         let room_fps = self.fps();
         let mut outputs = self.outputs.lock();
+        // Recordings whose sink has gone, stopped after the loop:
+        // `stop_record` wants the outputs lock this holds.
+        let mut gone: Vec<String> = Vec::new();
         for (key, out) in outputs.iter_mut() {
             if out.encoders.is_empty() {
                 continue;
@@ -1260,7 +1267,11 @@ impl VideoRoom {
                         s.send_frame(codec, &frame, pts);
                     }
                     for (id, tap) in &recorders {
-                        tap.send(&self.id, id, &frame, now);
+                        if !tap.send(&self.id, id, &frame, now) {
+                            // The sink was dropped: reap the recording
+                            // once the outputs are unlocked.
+                            gone.push(id.clone());
+                        }
                     }
                     counter!("forge_conference_video_packets_sent_total", "room_id" => self.id.clone())
                         .increment(subs.len() as u64);
@@ -1268,6 +1279,9 @@ impl VideoRoom {
             }
         }
         drop(outputs);
+        for id in gone {
+            self.stop_record(&id);
+        }
         histogram!("forge_conference_video_compose_duration_seconds", "room_id" => self.id.clone())
             .record(started.elapsed().as_secs_f64());
     }

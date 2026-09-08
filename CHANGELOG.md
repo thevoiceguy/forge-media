@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-08] — workspace release
+
+**A recording the room really lets go, and the reader in reach.**
+
+**`forge-conference`**: dropping a `RecordingSink` now does what its
+documentation always said it did — stop the recording. The tap's send told the
+room nothing when its channel had closed, so a recorder that went away without
+calling `stop_record` left the room composing and encoding a flavor nobody read,
+for as long as the room lived. `RecorderTap::send` now reports a closed channel
+and `compose_tick` reaps those recordings once it has let go of the outputs
+lock. A new test drops a sink and watches the recording, and its encoder, go.
+
+**`forge-webm`**: `read_summary_file` and `CueInfo` are re-exported from the
+crate root beside `read_summary`, so a caller reading a finished file back does
+not have to reach into the `read` module for half of it.
+
 ## [2026-09-07.2] — workspace release
 
 **Recording a conference (FCP video conferencing, phase 5a).** The two halves a

@@ -42,7 +42,9 @@ pub mod read;
 use std::io::{self, Seek, SeekFrom, Write};
 
 use ebml::id;
-pub use read::{read_summary, BlockInfo, TrackInfo, TrackKind, WebmSummary};
+pub use read::{
+    read_summary, read_summary_file, BlockInfo, CueInfo, TrackInfo, TrackKind, WebmSummary,
+};
 
 /// The video track's number; audio is [`AUDIO_TRACK`].
 pub const VIDEO_TRACK: u64 = 1;

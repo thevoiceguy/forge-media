@@ -341,3 +341,38 @@ async fn the_frame_clock_feeds_the_mix_tap() {
         "every advanced frame reached the tap: {frames}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_the_sink_stops_the_recording() {
+    // A recorder that goes away without saying so — its task panicked,
+    // or it was simply dropped — must not leave the room encoding a
+    // composite nobody reads.
+    let audio = audio_room("dropped", false);
+    audio.add_participant("alice", true).unwrap();
+    let video = audio.enable_video(settings(128, 72, 15), &VideoBackend::raw());
+    video.add_source("alice", VideoCodec::VP8).unwrap();
+
+    let sink = video
+        .record("rec-1", RecordRequest::new(VideoCodec::VP8))
+        .unwrap();
+    assert!(video.is_recording("rec-1"));
+    assert_eq!(video.status().encoders, 1);
+
+    drop(sink);
+
+    // The room notices at its next composite, so feed it one.
+    let mut alice = Camera::new(0xA11CE, 128, 72);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while video.is_recording("rec-1") && tokio::time::Instant::now() < deadline {
+        for p in alice.frame(90) {
+            video.push_rtp("alice", p);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !video.is_recording("rec-1"),
+        "the room let the recording go"
+    );
+    assert!(video.status().recordings.is_empty());
+    assert_eq!(video.status().encoders, 0, "and the encoder with it");
+}

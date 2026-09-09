@@ -1,0 +1,84 @@
+# Its own workspace: cargo-fuzz builds these with a nightly toolchain and
+# sanitizer flags that have no business reaching the main workspace, and the
+# parent's `exclude` keeps `cargo check --workspace` from trying.
+[workspace]
+
+[package]
+name = "forge-media-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes = "1"
+forge-core = { path = "../crates/forge-core" }
+forge-rtp = { path = "../crates/forge-rtp" }
+forge-webm = { path = "../crates/forge-webm" }
+
+# Every target parses attacker-supplied bytes and must not panic on any of
+# them. Debug assertions stay on: an overflow or a slice out of bounds should
+# be a finding, not a silently wrapped number.
+[profile.release]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "depacketize_h264"
+path = "fuzz_targets/depacketize_h264.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "depacketize_h265"
+path = "fuzz_targets/depacketize_h265.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "depacketize_vp8"
+path = "fuzz_targets/depacketize_vp8.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "depacketize_vp9"
+path = "fuzz_targets/depacketize_vp9.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "depacketize_av1"
+path = "fuzz_targets/depacketize_av1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame_assembler"
+path = "fuzz_targets/frame_assembler.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtcp_parse"
+path = "fuzz_targets/rtcp_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webm_read_summary"
+path = "fuzz_targets/webm_read_summary.rs"
+test = false
+doc = false
+bench = false

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-08.4] — workspace release
+
+**The bitrate ladder** (FCP video conferencing, phase 6b). A flavor's encoder
+targets the lowest rate any of its subscribers can take, so one caller on a
+poor link dragged every other subscriber of that flavor down to their bitrate.
+Now that caller is moved instead, and the rest keep the picture they can
+afford.
+
+**`forge-video` 0.3.0**: a `ladder` module. `Ladder::for_room` gives the rungs
+at or below a room's own size — 1080p at 2.5 Mb/s, 720p at 1.2, 360p at 500
+kb/s, 180p at 200 (§7) — and `wants` says whether a link should move, given
+its estimate and a `LadderPolicy` (below 70% of the current rung, go down;
+above 120% of the next one up, climb). A link that has collapsed goes straight
+to the rung it can carry rather than walking down one step at a time.
+
+**`forge-conference` 0.10.0**: `VideoRoom` walks the ladder each tick and moves
+whoever has been asking for long enough — five seconds to go down, fifteen to
+go up, since a picture nobody can decode is worse than a small one and
+climbing only to fall back is the worst of both. A move is invisible to
+signaling: the subscriber keeps its SSRC, its payload type and its sequence,
+and sees a resolution change with a keyframe to start it. The old rung's
+encoder is released if it was the last one there, so a room ends up with as
+many encoders as it has distinct needs, no more. `forge_conference_video_ladder_moves_total`
+counts the moves.
+
+A subscriber on the passthrough fast path is left alone: it is not being
+encoded for at all.
+
+Breaking: `Subscriber::flavor` and `output` are now methods rather than fields
+(a subscriber's rung changes under it), and `VideoRoomSettings` is no longer
+`Eq` — it carries the policy's thresholds.
+
 ## [2026-09-08.3] — workspace release
 
 **The passthrough fast path** (FCP video conferencing, phase 6a). §2 and §5.6

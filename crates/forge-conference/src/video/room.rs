@@ -27,6 +27,7 @@ use forge_video::codec::{CodecRegistry, EncoderSettings};
 use forge_video::compose::{Compositor, HostCompositor, TileSource};
 use forge_video::flavor::Flavor;
 use forge_video::frame::{MediaDevice, Resolution, VideoFrame};
+use forge_video::ladder::{Ladder, LadderPolicy};
 use forge_video::layout::Layout;
 use forge_video::{ClockEvent, VideoClock};
 use metrics::{counter, gauge, histogram};
@@ -123,7 +124,7 @@ impl PassthroughMode {
 }
 
 /// A room's video settings (the meeting's `video_*` fields plus tunables).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VideoRoomSettings {
     pub layout: Layout,
     /// Tiles in the composite (1–16).
@@ -151,6 +152,17 @@ pub struct VideoRoomSettings {
     /// decode is served that source's own packets rather than a
     /// composite (§5.6).
     pub passthrough: PassthroughMode,
+    /// Move a subscriber down the bitrate ladder when its link cannot
+    /// carry its rung, and back up when it can again (§7). Off leaves
+    /// every subscriber where it subscribed, and one poor link drags
+    /// its flavor's encoder down for everyone sharing it.
+    pub ladder: bool,
+    /// How the ladder reads an estimate.
+    pub ladder_policy: LadderPolicy,
+    /// How long a link must ask before it is moved down, and up. Down is
+    /// the shorter: a picture nobody can decode is worse than a small one.
+    pub ladder_down_after: Duration,
+    pub ladder_up_after: Duration,
     pub limits: SourceLimits,
 }
 
@@ -170,6 +182,10 @@ impl Default for VideoRoomSettings {
             egress_queue_packets: 256,
             max_payload: 1200,
             passthrough: PassthroughMode::Off,
+            ladder: true,
+            ladder_policy: LadderPolicy::default(),
+            ladder_down_after: Duration::from_secs(5),
+            ladder_up_after: Duration::from_secs(15),
             limits: SourceLimits::default(),
         }
     }
@@ -872,7 +888,7 @@ impl VideoRoom {
         let Some((_, sub)) = self.subscribers.remove(id) else {
             return;
         };
-        self.release_flavor(&sub.output, &sub.flavor);
+        self.release_flavor(&sub.output(), &sub.flavor());
         debug!(room = %self.id, participant = %id, "video subscriber removed");
     }
 
@@ -923,10 +939,7 @@ impl VideoRoom {
     /// Drop an encoder no subscriber or recording wants any more, and the
     /// output when its last encoder goes.
     fn release_flavor(&self, output: &OutputKey, flavor: &Flavor) {
-        let still_used = self
-            .subscribers
-            .iter()
-            .any(|s| &s.output == output && &s.flavor == flavor)
+        let still_used = self.subscribers.iter().any(|s| s.watches(output, flavor))
             || self
                 .recorders
                 .iter()
@@ -1223,7 +1236,7 @@ impl VideoRoom {
         let subscription = self.subscribers.get(id).map(|s| {
             let st = &s.stats;
             VideoSubscriberInfo {
-                flavor: s.flavor.clone(),
+                flavor: s.flavor(),
                 ssrc: s.ssrc,
                 forwarding: s.forwarded_source(),
                 packets_sent: st.packets_sent.load(Ordering::Relaxed),
@@ -1262,7 +1275,7 @@ impl VideoRoom {
                         subscribers: self
                             .subscribers
                             .iter()
-                            .filter(|s| &s.output == k && s.flavor == e.flavor)
+                            .filter(|s| s.watches(k, &e.flavor))
                             .count(),
                         target_kbps: e.target_kbps(),
                         keyframes: e.keyframes,
@@ -1492,6 +1505,9 @@ impl VideoRoom {
             .filter(|(_, t)| t.frame.is_some())
             .map(|(id, _)| id.clone())
             .collect();
+        if settings.ladder {
+            self.walk_the_ladder(&settings, now);
+        }
         let composing = self.decide_forwarding(&settings, layout, &order, &with_frames);
 
         // Render each output and encode each flavor.
@@ -1535,7 +1551,7 @@ impl VideoRoom {
                 let subs: Vec<Arc<Subscriber>> = self
                     .subscribers
                     .iter()
-                    .filter(|s| &s.output == key && s.flavor == enc.flavor)
+                    .filter(|s| s.watches(key, &enc.flavor))
                     .map(|s| Arc::clone(s.value()))
                     .collect();
                 let recorders: Vec<(String, Arc<RecorderTap>)> = self
@@ -1580,6 +1596,86 @@ impl VideoRoom {
             .record(started.elapsed().as_secs_f64());
     }
 
+    /// Move whoever needs moving between rungs of the bitrate ladder
+    /// (§7).
+    ///
+    /// The encoder of a flavor targets the lowest rate any of its
+    /// subscribers can take, so without this one caller on a poor link
+    /// drags everybody sharing that flavor down with them. Moving them
+    /// instead leaves the rest where they were, and the minimum is then
+    /// taken over subscribers that belong together.
+    ///
+    /// A move is invisible to signaling: same SSRC, same payload type,
+    /// the same sequence — the receiver sees a resolution change, which
+    /// every decoder handles, and a keyframe to start it.
+    fn walk_the_ladder(&self, settings: &VideoRoomSettings, now: Instant) {
+        let ladder = Ladder::for_room(settings.resolution);
+        if ladder.rungs().len() < 2 {
+            return;
+        }
+        let moves: Vec<(String, forge_video::ladder::Rung)> = self
+            .subscribers
+            .iter()
+            .filter(|s| s.forwarded_source().is_none())
+            .filter_map(|s| {
+                s.ladder_move(
+                    &ladder,
+                    settings.ladder_policy,
+                    settings.ladder_down_after,
+                    settings.ladder_up_after,
+                    now,
+                )
+                .map(|rung| (s.id.clone(), rung))
+            })
+            .collect();
+        for (id, rung) in moves {
+            self.move_to_rung(&id, rung, settings);
+        }
+    }
+
+    /// Put one subscriber on another rung: a flavor at that size and
+    /// rate, the output that goes with it, an encoder for it, and the
+    /// old flavor released if nobody is left on it.
+    fn move_to_rung(
+        &self,
+        id: &str,
+        rung: forge_video::ladder::Rung,
+        settings: &VideoRoomSettings,
+    ) {
+        let Some(sub) = self.subscribers.get(id).map(|s| Arc::clone(&s)) else {
+            return;
+        };
+        let was = sub.flavor();
+        let flavor = Flavor::new(was.codec, &was.profile, rung.resolution, was.fps, rung.kbps);
+        if flavor == was {
+            return;
+        }
+        let old_output = sub.output();
+        let output = OutputKey {
+            scope: old_output.scope.clone(),
+            resolution: rung.resolution,
+        };
+        // The encoder has to exist before anyone is pointed at it, or a
+        // tick could find a subscriber with nothing to send it.
+        if let Err(e) = self.ensure_encoder(&output, &flavor, settings) {
+            warn!(room = %self.id, subscriber = %id, %flavor, error = %e, "could not open the encoder for the new rung");
+            return;
+        }
+        sub.move_to(flavor.clone(), output);
+        // Whoever it left behind may have been the last one there.
+        self.release_flavor(&old_output, &was);
+        counter!("forge_conference_video_ladder_moves_total", "room_id" => self.id.clone())
+            .increment(1);
+        debug!(
+            room = %self.id,
+            subscriber = %id,
+            from = %was,
+            to = %flavor,
+            remb_kbps = sub.remb_kbps(),
+            "video subscriber moved between ladder rungs"
+        );
+    }
+
     /// Decide, for this tick, which subscribers ride the passthrough
     /// fast path, and return the outputs that still have to be composed
     /// (§5.6).
@@ -1603,9 +1699,9 @@ impl VideoRoom {
             let sole = settings
                 .passthrough
                 .allows(layout)
-                .then(|| self.sole_source(&sub.output, order, with_frames))
+                .then(|| self.sole_source(&sub.output(), order, with_frames))
                 .flatten()
-                .filter(|source| self.forwardable(source, &sub.flavor));
+                .filter(|source| self.forwardable(source, &sub.flavor()));
             match sole {
                 Some(source) => {
                     let ssrc = self
@@ -1617,7 +1713,7 @@ impl VideoRoom {
                     // SSRC to follow yet.
                     if ssrc == 0 {
                         sub.stop_forwarding();
-                        composing.insert(sub.output.clone());
+                        composing.insert(sub.output());
                         continue;
                     }
                     if sub.start_forwarding(&source, ssrc) {
@@ -1629,7 +1725,7 @@ impl VideoRoom {
                 }
                 None => {
                     sub.stop_forwarding();
-                    composing.insert(sub.output.clone());
+                    composing.insert(sub.output());
                 }
             }
         }

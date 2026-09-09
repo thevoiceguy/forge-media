@@ -919,3 +919,133 @@ async fn a_single_source_is_forwarded_and_a_second_one_brings_the_composite_back
     feeder.abort();
     bob_feeder.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_poor_link_moves_down_the_ladder_instead_of_dragging_everyone_with_it() {
+    // The encoder of a flavor targets the lowest rate any of its
+    // subscribers can take, so without the ladder one caller on a poor
+    // link drags every other subscriber of that flavor down (§7). Moving
+    // them to a lower rung leaves the rest where they were.
+    let audio = audio_room("ladder");
+    for id in ["alice", "bob", "carol"] {
+        audio.add_participant(id, id == "alice").unwrap();
+    }
+    let video = audio.enable_video(
+        VideoRoomSettings {
+            // Short windows: the rule is what is under test, not the
+            // wait, which is the same code either way.
+            ladder_down_after: Duration::from_millis(150),
+            ladder_up_after: Duration::from_millis(300),
+            ..settings(1280, 720, 15)
+        },
+        &VideoBackend::raw(),
+    );
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
+    let _bob = video
+        .subscribe("bob", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    let _carol = video
+        .subscribe("carol", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+
+    // Both start on the room's top rung, sharing one encoder.
+    let rung_of = |id: &str| {
+        video
+            .participant(id)
+            .and_then(|p| p.subscription)
+            .map(|s| s.flavor.resolution)
+    };
+    assert_eq!(rung_of("bob"), Some(Resolution::new(1280, 720)));
+    assert_eq!(rung_of("carol"), Some(Resolution::new(1280, 720)));
+    assert_eq!(video.status().encoders, 1, "one flavor between them");
+
+    // Feed the room so its clock is ticking.
+    let mut alice = Camera::new(0xA11CE, 640, 360);
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            loop {
+                for p in alice.frame(200) {
+                    video.push_rtp("alice", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+
+    // Carol's link says it can carry 400 kb/s: far below 720p's 1200,
+    // enough for 360p's 500 at the 70% the policy allows.
+    video.handle_feedback(
+        "carol",
+        &RtcpPacket::PayloadFeedback(PsFeedback {
+            sender_ssrc: 1,
+            media_ssrc: 2,
+            kind: forge_rtp::rtcp::PayloadFeedback::Remb {
+                bitrate_bps: 400_000,
+                ssrcs: vec![],
+            },
+        }),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while rung_of("carol") == Some(Resolution::new(1280, 720))
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        rung_of("carol"),
+        Some(Resolution::new(640, 360)),
+        "carol went to a rung her link can carry"
+    );
+    assert_eq!(
+        rung_of("bob"),
+        Some(Resolution::new(1280, 720)),
+        "and bob kept the picture he can afford"
+    );
+    assert_eq!(
+        video.status().encoders,
+        2,
+        "a rung of her own, rather than everyone on hers"
+    );
+    // Her SSRC never changed: signaling heard nothing.
+    assert_eq!(
+        video
+            .participant("carol")
+            .unwrap()
+            .subscription
+            .unwrap()
+            .ssrc,
+        _carol.ssrc
+    );
+
+    // Her link recovers well past 720p's rate: she climbs back.
+    video.handle_feedback(
+        "carol",
+        &RtcpPacket::PayloadFeedback(PsFeedback {
+            sender_ssrc: 1,
+            media_ssrc: 2,
+            kind: forge_rtp::rtcp::PayloadFeedback::Remb {
+                bitrate_bps: 3_000_000,
+                ssrcs: vec![],
+            },
+        }),
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while rung_of("carol") != Some(Resolution::new(1280, 720))
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(rung_of("carol"), Some(Resolution::new(1280, 720)));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while video.status().encoders > 1 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        video.status().encoders,
+        1,
+        "the rung she left went with her"
+    );
+
+    feeder.abort();
+}

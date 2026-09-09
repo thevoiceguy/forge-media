@@ -1,24 +1,41 @@
 name: CI
 
+# Pull requests, plus a weekly sweep. The push-to-main trigger is gone: main is
+# the squash of a pull request that just passed this same workflow, so running
+# all of it again on the merge doubled the bill for no new signal.
+#
+# The expensive jobs that do not change a merge decision -- the beta toolchain,
+# the release build and coverage -- run on the schedule instead of on every
+# pull request. They are still one `workflow_dispatch` away when a change wants
+# them, and `if: github.event_name != 'pull_request'` is what keeps them off a
+# PR rather than a separate workflow file.
+#
+# Before this, one merged pull request cost about 150 billed job-minutes across
+# twelve jobs run twice.
 on:
-  push:
-    branches: [ main, develop ]
   pull_request:
     branches: [ main, develop ]
+  schedule:
+    # Monday 07:00 UTC, before the FCP repository's own weekly sweep.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+# A new push to a pull request makes the run in progress obsolete; cancel it
+# rather than paying for both. Scheduled and manual runs share no ref with a
+# pull request, so they are never cancelled by one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+
   test:
-    name: Test Suite
+    name: Test Suite (stable)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust:
-          - stable
-          - beta
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -26,11 +43,10 @@ jobs:
           submodules: recursive
 
       - name: Free runner disk space
-        # `--all-features` now includes `neural-vad` (tract-onnx + friends),
-        # and the full-workspace debug test build no longer fits alongside
-        # the runner's preinstalled toolchains: the beta job died with
-        # ENOSPC + an lld bus error while linking. Drop the big unused
-        # preinstalled trees (~25 GB) before building.
+        # `--all-features` includes `neural-vad` (tract-onnx + friends), and a
+        # full-workspace debug build no longer fits alongside the runner's
+        # preinstalled toolchains: a job dies with ENOSPC and a bus error in
+        # ld. Drop the big unused preinstalled trees (~25 GB) first.
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
             /opt/hostedtoolcache/CodeQL
@@ -40,7 +56,7 @@ jobs:
         # `--all-features` pulls in `bcg729-sys`, which link-libs against the
         # system `libbcg729`. The codec is packaged on ubuntu as
         # `libbcg729-dev`; also installing `jq` for the workspace-scoping
-        # helpers used by fmt/clippy/test/coverage.
+        # helpers the steps below use.
         run: |
           sudo apt-get update
           sudo apt-get install -y libbcg729-dev jq
@@ -51,40 +67,22 @@ jobs:
         uses: ./.github/actions/video-codecs
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v6
+      - name: Restore cargo cache
+        # Replaces three hand-rolled `actions/cache` steps (registry, git
+        # index, target). This one keys on the rustc version as well as the
+        # lockfile, prunes artifacts that no longer belong to the dependency
+        # graph, and only saves on success, so a failed run cannot poison the
+        # cache for the next one.
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache cargo index
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-index-
-
-      - name: Cache cargo build
-        uses: actions/cache@v6
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-target-${{ matrix.rust }}-
-            ${{ runner.os }}-cargo-build-target-
+          shared-key: test
 
       - name: Run tests
-        # `--workspace` with path-dep submodule compiles tests for the
-        # siphon-rs submodule's own test targets, which aren't governed here.
-        # Enumerate workspace-owned packages and test each (same pattern as
-        # the fmt/clippy jobs).
+        # `--workspace` with a path-dep submodule compiles the siphon-rs
+        # submodule's own test targets, which aren't governed here. Enumerate
+        # workspace-owned packages and test each.
         run: |
           set -eo pipefail
           members=$(cargo metadata --no-deps --format-version=1 \
@@ -107,19 +105,35 @@ jobs:
           cargo test --doc --all-features $PKGS
 
   check:
-    name: Check
+    name: Check, lint and docs
     runs-on: ubuntu-latest
+    # One job where there were five: `check`, `clippy`, the three-way
+    # `check-features` matrix, `fmt` and `docs`. Each of those paid its own
+    # ~2 minutes of apt, codec and toolchain setup and started from its own
+    # cache; sharing one target directory means a feature set already built
+    # for one step is not rebuilt for the next. Formatting runs first because
+    # it is seconds and its failure is the cheapest to act on.
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
           submodules: recursive
 
+      - name: Free runner disk space
+        # `--all-features` includes `neural-vad` (tract-onnx + friends), and a
+        # full-workspace debug build no longer fits alongside the runner's
+        # preinstalled toolchains: a job dies with ENOSPC and a bus error in
+        # ld. Drop the big unused preinstalled trees (~25 GB) first.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Install system dependencies
         # `--all-features` pulls in `bcg729-sys`, which link-libs against the
         # system `libbcg729`. The codec is packaged on ubuntu as
         # `libbcg729-dev`; also installing `jq` for the workspace-scoping
-        # helpers used by fmt/clippy/test/coverage.
+        # helpers the steps below use.
         run: |
           sudo apt-get update
           sudo apt-get install -y libbcg729-dev jq
@@ -131,89 +145,54 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          components: rustfmt, clippy
 
-      - name: Cache cargo index
-        uses: actions/cache@v6
+      - name: Restore cargo cache
+        # Replaces three hand-rolled `actions/cache` steps (registry, git
+        # index, target). This one keys on the rustc version as well as the
+        # lockfile, prunes artifacts that no longer belong to the dependency
+        # graph, and only saves on success, so a failed run cannot poison the
+        # cache for the next one.
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: check
 
-      - name: Cache cargo build
-        uses: actions/cache@v6
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-check-${{ hashFiles('**/Cargo.lock') }}
+      - name: Check formatting
+        # `cargo fmt --all` follows path dependencies into `external/siphon-rs`,
+        # which is governed separately, so iterate our own members instead.
+        run: |
+          set -eo pipefail
+          members=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.manifest_path | contains("external/") | not) | .name')
+          for pkg in $members; do
+            cargo fmt -p "$pkg" -- --check
+          done
+
+      - name: Check feature combinations
+        # Cheapest feature sets first, so the later `--all-features` steps
+        # build on top of what these already put in the target directory.
+        run: |
+          set -eo pipefail
+          cargo check --no-default-features --workspace
+          cargo check --no-default-features --features recording --workspace
+          cargo check --no-default-features --features full --workspace
 
       - name: Check workspace
-        run: cargo check --workspace
-
-      - name: Check all features
-        run: cargo check --all-features --workspace
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: Install system dependencies
-        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
-        # system `libbcg729`. The codec is packaged on ubuntu as
-        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
-        # helpers used by fmt/clippy/test/coverage.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libbcg729-dev jq
-
-      - name: Install native video codec libraries
-        # `--all-features` turns on every forge-video-codecs binding
-        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
-        uses: ./.github/actions/video-codecs
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v6
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-clippy-${{ hashFiles('**/Cargo.lock') }}
+          set -eo pipefail
+          cargo check --workspace
+          cargo check --all-features --workspace
 
       - name: Run clippy
-        # `cargo clippy --workspace` lints path-dependencies, which for this
-        # repo means descending into the `external/siphon-rs` submodule. The
-        # submodule is governed separately, so iterate our workspace-owned
-        # packages and pass `--no-deps` so each package is linted in
-        # isolation. Same approach as the fmt step.
+        # `cargo clippy --workspace` lints path dependencies, which here means
+        # descending into `external/siphon-rs`. Iterate our own packages and
+        # pass `--no-deps` so each is linted in isolation.
         #
-        # The `-A` allow list covers pre-existing stylistic warnings across
-        # the workspace that would require broad mechanical rewrites to
-        # resolve. We keep the core correctness lints active (as errors via
-        # `-D warnings`) but opt out of the purely-cosmetic ones until a
-        # dedicated cleanup pass lands.
+        # The `-A` allow list covers pre-existing stylistic warnings across the
+        # workspace that would need broad mechanical rewrites to resolve. The
+        # correctness lints stay on as errors via `-D warnings`; only the
+        # cosmetic ones are opted out of, until a dedicated cleanup pass lands.
         run: |
           set -eo pipefail
           members=$(cargo metadata --no-deps --format-version=1 \
@@ -284,265 +263,6 @@ jobs:
             cargo clippy --no-deps --all-features -p "$pkg" -- -D warnings "${ALLOWS[@]}"
           done
 
-  fmt:
-    name: Rustfmt
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: Install system dependencies
-        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
-        # system `libbcg729`. The codec is packaged on ubuntu as
-        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
-        # helpers used by fmt/clippy/test/coverage.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbcg729-dev jq
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-
-      - name: Check formatting
-        # `cargo fmt --all` and `cargo fmt` both follow path-dependencies, which
-        # in this workspace means recursing into the `external/siphon-rs`
-        # submodule. We only own our workspace members, so iterate them
-        # explicitly and skip any crate living under external/.
-        run: |
-          set -eo pipefail
-          members=$(cargo metadata --no-deps --format-version=1 \
-            | jq -r '.packages[] | select(.manifest_path | contains("external/") | not) | .name')
-          for pkg in $members; do
-            cargo fmt -p "$pkg" -- --check
-          done
-
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: Install system dependencies
-        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
-        # system `libbcg729`. The codec is packaged on ubuntu as
-        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
-        # helpers used by fmt/clippy/test/coverage.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbcg729-dev jq
-
-      - name: Install native video codec libraries
-        # `--all-features` turns on every forge-video-codecs binding
-        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
-        uses: ./.github/actions/video-codecs
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v6
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build workspace
-        run: cargo build --release --all-features --workspace
-
-      - name: Build binary
-        run: cargo build --release --bin forge-media
-
-  coverage:
-    name: Code Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: Install system dependencies
-        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
-        # system `libbcg729`. The codec is packaged on ubuntu as
-        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
-        # helpers used by fmt/clippy/test/coverage.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbcg729-dev jq
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Generate coverage
-        # Scope to workspace-owned packages; siphon-rs submodule has its own
-        # test infrastructure and is not covered by this repo's coverage run.
-        run: |
-          set -eo pipefail
-          members=$(cargo metadata --no-deps --format-version=1 \
-            | jq -r '.packages[] | select(.manifest_path | contains("external/") | not) | .name')
-          PKGS=""
-          for pkg in $members; do
-            PKGS="$PKGS --packages $pkg"
-          done
-          cargo tarpaulin $PKGS --timeout 300 --out xml
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v7
-        with:
-          files: ./cobertura.xml
-          fail_ci_if_error: false
-
-  security-audit:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: Install system dependencies
-        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
-        # system `libbcg729`. The codec is packaged on ubuntu as
-        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
-        # helpers used by fmt/clippy/test/coverage.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbcg729-dev jq
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-
-      - name: Run security audit
-        run: cargo audit
-
-  check-features:
-    name: Check Feature Combinations
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        features:
-          - ""
-          - "recording"
-          - "full"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: Install system dependencies
-        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
-        # system `libbcg729`. The codec is packaged on ubuntu as
-        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
-        # helpers used by fmt/clippy/test/coverage.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbcg729-dev jq
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Check features
-        run: |
-          if [ -z "${{ matrix.features }}" ]; then
-            cargo check --no-default-features --workspace
-          else
-            cargo check --no-default-features --features "${{ matrix.features }}" --workspace
-          fi
-
-  docs:
-    name: Documentation
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-        with:
-          submodules: recursive
-
-      - name: Install system dependencies
-        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
-        # system `libbcg729`. The codec is packaged on ubuntu as
-        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
-        # helpers used by fmt/clippy/test/coverage.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libbcg729-dev jq
-
-      - name: Install native video codec libraries
-        # `--all-features` turns on every forge-video-codecs binding
-        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
-        uses: ./.github/actions/video-codecs
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v6
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
       - name: Build documentation (broken intra-doc links are errors)
         # Two things used to be wrong here, and they hid each other.
         #
@@ -570,3 +290,214 @@ jobs:
           done
           RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" \
             cargo doc --all-features --no-deps $PKGS
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        # A prebuilt binary. `cargo install` compiled cargo-audit from source
+        # on every run -- almost all of this job's three minutes, to run a
+        # five-second check.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
+
+  test-beta:
+    name: Test Suite (beta)
+    # Weekly, not per pull request. It is an early warning about a Rust release
+    # that has not happened yet; hearing it up to six days later is no worse,
+    # and stable still runs on every pull request.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Free runner disk space
+        # `--all-features` includes `neural-vad` (tract-onnx + friends), and a
+        # full-workspace debug build no longer fits alongside the runner's
+        # preinstalled toolchains: a job dies with ENOSPC and a bus error in
+        # ld. Drop the big unused preinstalled trees (~25 GB) first.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install system dependencies
+        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
+        # system `libbcg729`. The codec is packaged on ubuntu as
+        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
+        # helpers the steps below use.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbcg729-dev jq
+
+      - name: Install native video codec libraries
+        # `--all-features` turns on every forge-video-codecs binding
+        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
+        uses: ./.github/actions/video-codecs
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@beta
+
+      - name: Restore cargo cache
+        # Replaces three hand-rolled `actions/cache` steps (registry, git
+        # index, target). This one keys on the rustc version as well as the
+        # lockfile, prunes artifacts that no longer belong to the dependency
+        # graph, and only saves on success, so a failed run cannot poison the
+        # cache for the next one.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-beta
+
+      - name: Run tests
+        run: |
+          set -eo pipefail
+          members=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.manifest_path | contains("external/") | not) | .name')
+          PKGS=""
+          for pkg in $members; do
+            PKGS="$PKGS -p $pkg"
+          done
+          cargo test --all-features $PKGS
+
+  build:
+    name: Build (release)
+    # Weekly. It compiles what the test job already compiles, only in release,
+    # so per pull request it was paying fourteen minutes to re-answer a
+    # question the tests had answered. What it does catch -- breakage that only
+    # shows under the release profile -- is rare enough for a weekly cadence.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Free runner disk space
+        # `--all-features` includes `neural-vad` (tract-onnx + friends), and a
+        # full-workspace debug build no longer fits alongside the runner's
+        # preinstalled toolchains: a job dies with ENOSPC and a bus error in
+        # ld. Drop the big unused preinstalled trees (~25 GB) first.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install system dependencies
+        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
+        # system `libbcg729`. The codec is packaged on ubuntu as
+        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
+        # helpers the steps below use.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbcg729-dev jq
+
+      - name: Install native video codec libraries
+        # `--all-features` turns on every forge-video-codecs binding
+        # (libvpx, OpenH264 from source, dav1d, SVT-AV1); see the action.
+        uses: ./.github/actions/video-codecs
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cargo cache
+        # Replaces three hand-rolled `actions/cache` steps (registry, git
+        # index, target). This one keys on the rustc version as well as the
+        # lockfile, prunes artifacts that no longer belong to the dependency
+        # graph, and only saves on success, so a failed run cannot poison the
+        # cache for the next one.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build
+
+      - name: Build workspace
+        run: cargo build --release --all-features --workspace
+
+      - name: Build binary
+        run: cargo build --release --bin forge-media
+
+  coverage:
+    name: Code Coverage
+    # Weekly. Coverage is a trend, not a merge gate, and this was the single
+    # most expensive job in the workflow.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Free runner disk space
+        # `--all-features` includes `neural-vad` (tract-onnx + friends), and a
+        # full-workspace debug build no longer fits alongside the runner's
+        # preinstalled toolchains: a job dies with ENOSPC and a bus error in
+        # ld. Drop the big unused preinstalled trees (~25 GB) first.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install system dependencies
+        # `--all-features` pulls in `bcg729-sys`, which link-libs against the
+        # system `libbcg729`. The codec is packaged on ubuntu as
+        # `libbcg729-dev`; also installing `jq` for the workspace-scoping
+        # helpers the steps below use.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbcg729-dev jq
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-tarpaulin
+        # A prebuilt binary; `cargo install cargo-tarpaulin` built it from
+        # source on every run, which was most of this job.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+
+      - name: Restore cargo cache
+        # Replaces three hand-rolled `actions/cache` steps (registry, git
+        # index, target). This one keys on the rustc version as well as the
+        # lockfile, prunes artifacts that no longer belong to the dependency
+        # graph, and only saves on success, so a failed run cannot poison the
+        # cache for the next one.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+
+      - name: Generate coverage
+        # Scoped to workspace-owned packages; the siphon-rs submodule has its
+        # own test infrastructure and is not covered by this repo's run.
+        run: |
+          set -eo pipefail
+          members=$(cargo metadata --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.manifest_path | contains("external/") | not) | .name')
+          PKGS=""
+          for pkg in $members; do
+            PKGS="$PKGS --packages $pkg"
+          done
+          cargo tarpaulin $PKGS --timeout 300 --out xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: ./cobertura.xml
+          fail_ci_if_error: false

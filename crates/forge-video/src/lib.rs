@@ -36,7 +36,7 @@ pub mod raw;
 pub mod scale;
 
 pub use bench::{BenchSettings, CodecCost};
-pub use clock::{ClockEvent, VideoClock};
+pub use clock::{ClockEvent, LoadShedder, RateOnly, VideoClock};
 pub use codec::{
     CodecError, CodecRegistry, DecoderFactory, EncoderFactory, EncoderSettings, VideoDecoder,
     VideoEncoder,

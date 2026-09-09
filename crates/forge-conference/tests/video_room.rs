@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use forge_conference::video::{
-    OutputScope, RemoteSpeaker, SubscribeRequest, VideoBackend, VideoRoomEvent, VideoRoomSettings,
-    VideoState,
+    OutputScope, PassthroughMode, RemoteSpeaker, SubscribeRequest, VideoBackend, VideoRoomEvent,
+    VideoRoomSettings, VideoState,
 };
 use forge_conference::{AudioFormat, ConferenceRoom};
 use forge_core::VideoCodec;
@@ -168,8 +168,8 @@ async fn two_cameras_are_composited_into_a_grid_for_a_subscriber() {
     video.set_display_name("alice", "Alice");
     let mut events = video.events();
 
-    video.add_source("alice", VideoCodec::VP8).unwrap();
-    video.add_source("bob", VideoCodec::VP8).unwrap();
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
+    video.add_source("bob", VideoCodec::VP8, "").unwrap();
     let mut sub = video
         .subscribe("bob", subscribe(VideoCodec::VP8, None))
         .unwrap();
@@ -319,8 +319,8 @@ async fn subscribers_with_the_same_needs_share_an_encoder_and_exclude_self_split
         },
         &VideoBackend::raw(),
     );
-    video.add_source("a", VideoCodec::VP8).unwrap();
-    video.add_source("b", VideoCodec::VP8).unwrap();
+    video.add_source("a", VideoCodec::VP8, "").unwrap();
+    video.add_source("b", VideoCodec::VP8, "").unwrap();
     let mut sub_a = video
         .subscribe("a", subscribe(VideoCodec::VP8, None))
         .unwrap();
@@ -371,11 +371,11 @@ async fn loss_raises_a_nack_then_a_pli_and_subscriber_feedback_is_answered() {
     audio.add_participant("a", false).unwrap();
     audio.add_participant("b", false).unwrap();
     let video = audio.enable_video(settings(256, 72, 30), &VideoBackend::raw());
-    video.add_source("a", VideoCodec::VP8).unwrap();
+    video.add_source("a", VideoCodec::VP8, "").unwrap();
     let mut sub = video
         .subscribe("b", subscribe(VideoCodec::VP8, None))
         .unwrap();
-    video.add_source("b", VideoCodec::VP8).unwrap();
+    video.add_source("b", VideoCodec::VP8, "").unwrap();
 
     let mut cam = Camera::new(7, 256, 144);
     // A frame this size spans many packets; drop one in the middle.
@@ -502,7 +502,7 @@ async fn oversize_frames_are_dropped_and_layout_controls_are_reported() {
         },
         &VideoBackend::raw(),
     );
-    video.add_source("a", VideoCodec::VP8).unwrap();
+    video.add_source("a", VideoCodec::VP8, "").unwrap();
     let _sub = video
         .subscribe("b", subscribe(VideoCodec::VP8, None))
         .unwrap();
@@ -597,9 +597,9 @@ async fn a_remote_tile_is_drawn_for_callers_and_left_out_of_a_trunk_s_own_compos
     audio.add_virtual_participant("__trunk__node-b").unwrap();
     let video = audio.enable_video(settings(256, 72, 30), &VideoBackend::raw());
 
-    video.add_source("alice", VideoCodec::VP8).unwrap();
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
     video
-        .add_remote("__trunk__node-b", VideoCodec::VP8)
+        .add_remote("__trunk__node-b", VideoCodec::VP8, "")
         .unwrap();
     assert!(video.is_remote("__trunk__node-b"));
     assert!(!video.is_remote("alice"));
@@ -704,9 +704,9 @@ async fn a_peer_s_claim_decides_who_is_speaking_behind_its_tile() {
     audio.add_virtual_participant("__trunk__node-b").unwrap();
     let video = audio.enable_video(settings(256, 72, 30), &VideoBackend::raw());
     video.set_local_node("node-a");
-    video.add_source("alice", VideoCodec::VP8).unwrap();
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
     video
-        .add_remote("__trunk__node-b", VideoCodec::VP8)
+        .add_remote("__trunk__node-b", VideoCodec::VP8, "")
         .unwrap();
     let mut events = video.events();
 
@@ -797,4 +797,125 @@ async fn a_peer_s_claim_decides_who_is_speaking_behind_its_tile() {
         "__trunk__node-b",
         "the tile goes back to naming its node"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_single_source_is_forwarded_and_a_second_one_brings_the_composite_back() {
+    // The passthrough fast path (§5.6): while a subscriber's view is one
+    // source it can already decode, it is sent that source's own packets
+    // — no compositor, no encoder — and the moment a second tile has a
+    // picture it goes back to the composite.
+    let audio = audio_room("passthrough");
+    audio.add_participant("alice", true).unwrap();
+    audio.add_participant("bob", false).unwrap();
+    let video = audio.enable_video(
+        VideoRoomSettings {
+            // `On` rather than `Auto`: this room is a grid, and the
+            // point here is the mechanism, not the layout rule.
+            passthrough: PassthroughMode::On,
+            ..settings(320, 180, 30)
+        },
+        &VideoBackend::raw(),
+    );
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
+    let mut sub = video
+        .subscribe("bob", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+
+    let mut alice = Camera::new(0xA11CE, 320, 180);
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            loop {
+                for p in alice.frame(200) {
+                    video.push_rtp("alice", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+
+    // Bob's picture is Alice's own stream, at her size, under his SSRC.
+    let mut screen = Screen::new();
+    let frame = wait_for_composite(&mut sub.packets, &mut screen, |f| f.luma(160, 90) == 200).await;
+    assert_eq!(
+        frame.resolution(),
+        Resolution::new(320, 180),
+        "Alice's own frame, not a canvas she was drawn onto"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while video
+        .participant("bob")
+        .and_then(|p| p.subscription)
+        .and_then(|s| s.forwarding)
+        .is_none()
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let sub_info = video.participant("bob").unwrap().subscription.unwrap();
+    assert_eq!(sub_info.forwarding.as_deref(), Some("alice"));
+    assert_eq!(sub_info.ssrc, sub.ssrc, "his own SSRC throughout");
+    // Nothing is being encoded for him.
+    assert_eq!(
+        video.status().encoders,
+        1,
+        "the flavor exists but composes nothing"
+    );
+
+    // Bob turns his own camera on: two tiles, so the composite is back.
+    video.add_source("bob", VideoCodec::VP8, "").unwrap();
+    let mut bob_cam = Camera::new(0xB0B, 160, 90);
+    let bob_feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            loop {
+                for p in bob_cam.frame(60) {
+                    video.push_rtp("bob", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+    // Wait for his camera to actually be decoded before expecting the
+    // room to have noticed a second picture: on a loaded machine the
+    // first decode can take a moment, and that is not what is under test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while video
+        .participant("bob")
+        .and_then(|p| p.source)
+        .map(|s| s.frames_decoded == 0)
+        .unwrap_or(true)
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    while video
+        .participant("bob")
+        .and_then(|p| p.subscription)
+        .and_then(|s| s.forwarding)
+        .is_some()
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        video
+            .participant("bob")
+            .unwrap()
+            .subscription
+            .unwrap()
+            .forwarding
+            .is_none(),
+        "a second picture ends the fast path"
+    );
+    // And what he receives is a composite again: two tiles side by side.
+    let composed = wait_for_composite(&mut sub.packets, &mut screen, |f| {
+        f.resolution() == Resolution::new(320, 180) && f.luma(240, 90) == 60
+    })
+    .await;
+    assert_eq!(composed.luma(80, 90), 200, "Alice on the left");
+
+    feeder.abort();
+    bob_feeder.abort();
 }

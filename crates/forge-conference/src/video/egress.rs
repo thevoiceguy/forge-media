@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use forge_core::VideoCodec;
 use forge_rtp::video::payload::packetize;
-use forge_rtp::{KeyframeRequestGate, RtpPacket, RtxCache};
+use forge_rtp::{KeyframeRequestGate, RtpPacket, RtxCache, StreamRewriter};
 use forge_video::codec::{EncoderSettings, VideoEncoder};
 use forge_video::flavor::Flavor;
 use forge_video::frame::{Resolution, VideoFrame};
@@ -96,7 +96,19 @@ pub struct SubscriberStats {
 
 struct Sequence {
     seq: u16,
+    /// The last timestamp written, so forwarding can pick up where the
+    /// composite left off and the other way round.
+    ts: u32,
     cache: RtxCache,
+}
+
+/// What a subscriber is being served while its view is a single source
+/// it can decode as it stands (§5.6): that source's own packets, under
+/// this subscriber's SSRC, sequence and timestamps.
+struct Forwarding {
+    /// The participant whose packets are going out.
+    source: String,
+    rewriter: StreamRewriter,
 }
 
 /// One receiver of a flavor.
@@ -113,6 +125,8 @@ pub struct Subscriber {
     pub wants_keyframe: Arc<AtomicBool>,
     pub stats: Arc<SubscriberStats>,
     max_payload: usize,
+    /// Set while this subscriber is on the passthrough fast path.
+    forwarding: Mutex<Option<Forwarding>>,
 }
 
 impl Subscriber {
@@ -136,12 +150,14 @@ impl Subscriber {
             ts_offset: rand::random(),
             seq: Mutex::new(Sequence {
                 seq: rand::random(),
+                ts: rand::random(),
                 cache: RtxCache::new(cache_packets),
             }),
             tx,
             wants_keyframe,
             stats: Arc::new(SubscriberStats::default()),
             max_payload: max_payload.max(64),
+            forwarding: Mutex::new(None),
         });
         (sub, rx)
     }
@@ -158,6 +174,7 @@ impl Subscriber {
         let n = payloads.len();
         let ts = pts.wrapping_add(self.ts_offset);
         let mut s = self.seq.lock();
+        s.ts = ts;
         for (i, p) in payloads.into_iter().enumerate() {
             let seq = s.seq;
             let packet = RtpPacket::build(self.payload_type, seq, ts, self.ssrc, p, i + 1 == n);
@@ -169,6 +186,87 @@ impl Subscriber {
         self.stats.frames_sent.fetch_add(1, Ordering::Relaxed);
         if frame.keyframe {
             self.stats.keyframes_sent.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // ---- passthrough (§5.6) -------------------------------------------
+
+    /// Start forwarding `source`'s packets instead of a composite. The
+    /// outgoing stream carries on from where it is — same SSRC, the next
+    /// sequence number, timestamps advanced past the last frame sent —
+    /// so a receiver sees one continuous stream and never learns that
+    /// the picture stopped being composed for it.
+    ///
+    /// Returns whether the source must be asked for a keyframe: the
+    /// switch only takes effect on one, so that the receiver never
+    /// decodes a frame whose references it has not seen.
+    pub fn start_forwarding(&self, source: &str, source_ssrc: u32) -> bool {
+        let mut f = self.forwarding.lock();
+        if let Some(current) = f.as_mut() {
+            if current.source == source {
+                return current.rewriter.select(source_ssrc);
+            }
+        }
+        let s = self.seq.lock();
+        let mut rewriter = StreamRewriter::new(self.flavor.codec, self.ssrc, s.seq, s.ts);
+        drop(s);
+        let wants_keyframe = rewriter.select(source_ssrc);
+        *f = Some(Forwarding {
+            source: source.to_string(),
+            rewriter,
+        });
+        wants_keyframe
+    }
+
+    /// Go back to the composite. The encoder is asked for a keyframe,
+    /// since the receiver's last frame came from somewhere else.
+    pub fn stop_forwarding(&self) {
+        if self.forwarding.lock().take().is_some() {
+            self.wants_keyframe.store(true, Ordering::Release);
+        }
+    }
+
+    /// The source being forwarded, if any.
+    pub fn forwarded_source(&self) -> Option<String> {
+        self.forwarding.lock().as_ref().map(|f| f.source.clone())
+    }
+
+    /// Whether packets from this participant should be offered here.
+    pub fn forwards_from(&self, source: &str) -> bool {
+        self.forwarding
+            .lock()
+            .as_ref()
+            .is_some_and(|f| f.source == source)
+    }
+
+    /// Offer one of the source's packets. It goes out rewritten into
+    /// this subscriber's stream, or is dropped while a switch waits for
+    /// its keyframe. The cache holds what was sent, so a NACK is
+    /// answered exactly as it is on the composed path.
+    pub fn send_forwarded(&self, packet: &RtpPacket) {
+        let mut f = self.forwarding.lock();
+        let Some(fwd) = f.as_mut() else { return };
+        let Some(mut out) = fwd.rewriter.feed(packet) else {
+            return;
+        };
+        // The payload type is ours, not the sender's: each leg
+        // negotiated its own.
+        out.header.set_payload_type(self.payload_type);
+        let seq = out.header.sequence_number;
+        let ts = out.header.timestamp;
+        let marker = out.header.marker();
+        drop(f);
+
+        let bytes = out.to_bytes().freeze();
+        let mut s = self.seq.lock();
+        s.cache.push(seq, bytes.clone());
+        s.seq = seq.wrapping_add(1);
+        s.ts = ts;
+        drop(s);
+        self.deliver(bytes);
+        // One frame per marker, as the composed path counts them.
+        if marker {
+            self.stats.frames_sent.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -373,6 +471,37 @@ impl std::fmt::Debug for FlavorEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passthrough_auto_forwards_only_where_a_label_is_least_missed() {
+        use crate::video::PassthroughMode;
+        use forge_video::layout::Layout;
+
+        // A forwarded frame carries no name banner: `Auto` takes that
+        // trade only for a presenter at full canvas.
+        assert!(PassthroughMode::Auto.allows(Layout::Spotlight));
+        for layout in [
+            Layout::Grid,
+            Layout::ActiveSpeaker,
+            Layout::PictureInPicture,
+        ] {
+            assert!(!PassthroughMode::Auto.allows(layout), "{layout:?}");
+            assert!(PassthroughMode::On.allows(layout));
+            assert!(!PassthroughMode::Off.allows(layout));
+        }
+        assert!(!PassthroughMode::Off.allows(Layout::Spotlight));
+
+        for mode in [
+            PassthroughMode::Off,
+            PassthroughMode::Auto,
+            PassthroughMode::On,
+        ] {
+            assert_eq!(PassthroughMode::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(PassthroughMode::parse("AUTO"), Some(PassthroughMode::Auto));
+        assert_eq!(PassthroughMode::parse("maybe"), None);
+        assert_eq!(PassthroughMode::default(), PassthroughMode::Auto);
+    }
 
     #[test]
     fn a_scope_decides_which_tiles_a_composite_is_drawn_from() {

@@ -14,7 +14,7 @@
 //! frames rather than packets, because a muxer wants frames and
 //! packetizing one only to take it apart again is waste.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -75,6 +75,53 @@ impl std::fmt::Debug for VideoBackend {
     }
 }
 
+/// When the passthrough fast path (§5.6) applies.
+///
+/// A forwarded frame is the sender's own picture, so it carries no name
+/// banner, no speaking border and no avatar — nothing composited it.
+/// That is right for a presenter at full canvas and wrong for a grid
+/// where the labels are how you tell people apart, which is why `Auto`
+/// is the default rather than `On`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PassthroughMode {
+    /// Always compose. Every subscriber gets labels and borders.
+    Off,
+    /// Forward only while the room is showing one participant full
+    /// canvas (`spotlight`), where a label is least missed.
+    #[default]
+    Auto,
+    /// Forward wherever a single source allows it, labels or not.
+    On,
+}
+
+impl PassthroughMode {
+    /// Whether forwarding may be considered with this layout.
+    pub fn allows(&self, layout: Layout) -> bool {
+        match self {
+            PassthroughMode::Off => false,
+            PassthroughMode::Auto => layout == Layout::Spotlight,
+            PassthroughMode::On => true,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PassthroughMode::Off => "off",
+            PassthroughMode::Auto => "auto",
+            PassthroughMode::On => "on",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "off" => Some(PassthroughMode::Off),
+            "auto" => Some(PassthroughMode::Auto),
+            "on" => Some(PassthroughMode::On),
+            _ => None,
+        }
+    }
+}
+
 /// A room's video settings (the meeting's `video_*` fields plus tunables).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoRoomSettings {
@@ -100,6 +147,10 @@ pub struct VideoRoomSettings {
     pub egress_queue_packets: usize,
     /// Largest RTP payload we emit.
     pub max_payload: usize,
+    /// When a subscriber whose view is a single source it can already
+    /// decode is served that source's own packets rather than a
+    /// composite (§5.6).
+    pub passthrough: PassthroughMode,
     pub limits: SourceLimits,
 }
 
@@ -118,6 +169,7 @@ impl Default for VideoRoomSettings {
             rtx_cache_packets: 256,
             egress_queue_packets: 256,
             max_payload: 1200,
+            passthrough: PassthroughMode::Off,
             limits: SourceLimits::default(),
         }
     }
@@ -370,6 +422,10 @@ pub struct VideoSourceInfo {
 pub struct VideoSubscriberInfo {
     pub flavor: Flavor,
     pub ssrc: u32,
+    /// The participant whose own packets this subscriber is being sent,
+    /// when its view is a single source it can already decode (§5.6);
+    /// `None` when it is watching a composite.
+    pub forwarding: Option<String>,
     pub packets_sent: u64,
     pub packets_dropped: u64,
     pub frames_sent: u64,
@@ -434,6 +490,9 @@ pub struct VideoRoom {
     speaker: Mutex<ActiveSpeaker>,
     /// What each peer says is speaking behind its remote tile, by tile id.
     remote_speakers: DashMap<String, RemoteSpeaker>,
+    /// Subscribers on the passthrough path, so ingress can skip the scan
+    /// entirely in the ordinary case where nobody is.
+    forwarders: AtomicU32,
     /// This node's name, which settles a tie against a peer's claim.
     local_node: Mutex<String>,
     control: Mutex<Control>,
@@ -475,6 +534,7 @@ impl VideoRoom {
             outputs: Mutex::new(HashMap::new()),
             speaker: Mutex::new(ActiveSpeaker::default()),
             remote_speakers: DashMap::new(),
+            forwarders: AtomicU32::new(0),
             local_node: Mutex::new(String::new()),
             control: Mutex::new(Control::default()),
             fps: AtomicU32::new(fps),
@@ -608,7 +668,7 @@ impl VideoRoom {
     /// must leave it out ([`OutputScope::LocalOnly`]). It is not in the
     /// audio room either, so it is never the active speaker on its own
     /// energy; the peer says who is speaking behind it.
-    pub fn add_remote(&self, id: &str, codec: VideoCodec) -> Result<()> {
+    pub fn add_remote(&self, id: &str, codec: VideoCodec, profile: &str) -> Result<()> {
         self.participants
             .entry(id.to_string())
             .or_insert_with(|| Participant {
@@ -619,7 +679,7 @@ impl VideoRoom {
                 remote: true,
             })
             .remote = true;
-        let out = self.add_source(id, codec);
+        let out = self.add_source(id, codec, profile);
         if out.is_err() {
             self.participants.remove(id);
         } else {
@@ -669,8 +729,11 @@ impl VideoRoom {
         self.remote_speakers.get(remote_id).map(|s| s.clone())
     }
 
-    /// The participant sends `codec`; start decoding it.
-    pub fn add_source(&self, id: &str, codec: VideoCodec) -> Result<()> {
+    /// The participant sends `codec` with `profile` (its `a=fmtp`, `""`
+    /// when the codec has none); start decoding it. The profile is what
+    /// decides whether the stream can be forwarded to someone else
+    /// untouched (§5.6).
+    pub fn add_source(&self, id: &str, codec: VideoCodec, profile: &str) -> Result<()> {
         if !self.participants.contains_key(id) {
             return Err(ConferenceError::Internal(format!(
                 "participant {id} is not in room {}",
@@ -693,6 +756,7 @@ impl VideoRoom {
             id,
             &self.id,
             codec,
+            profile,
             decoder,
             limits,
             rand::random(),
@@ -718,6 +782,16 @@ impl VideoRoom {
     /// Feed one RTP packet from a source. Returns the RTCP feedback (NACK,
     /// PLI) to send back to the sender.
     pub fn push_rtp(&self, id: &str, packet: RtpPacket) -> Vec<RtcpPacket> {
+        // Anyone on the passthrough fast path is served here, before the
+        // decoder and off the compose clock: forwarding a packet is the
+        // whole point, and a tick of latency would undo it (§5.6).
+        if self.forwarders.load(Ordering::Relaxed) > 0 {
+            for sub in self.subscribers.iter() {
+                if sub.forwards_from(id) {
+                    sub.send_forwarded(&packet);
+                }
+            }
+        }
         match self.sources.get(id) {
             Some(s) => s.push(packet, &self.backend.pool, Instant::now()),
             None => Vec::new(),
@@ -971,7 +1045,17 @@ impl VideoRoom {
                 PayloadFeedback::Pli | PayloadFeedback::Fir(_) => {
                     counter!("forge_conference_video_plis_received_total", "room_id" => self.id.clone())
                         .increment(1);
-                    sub.request_keyframe();
+                    // On the fast path there is no encoder of ours to
+                    // re-key: the keyframe has to come from the sender
+                    // whose packets this receiver is watching (§5.6).
+                    match sub.forwarded_source() {
+                        Some(source) => {
+                            if let Some(s) = self.sources.get(&source) {
+                                s.request_keyframe();
+                            }
+                        }
+                        None => sub.request_keyframe(),
+                    }
                 }
                 PayloadFeedback::Remb { bitrate_bps, .. } => sub.set_remb(*bitrate_bps),
                 PayloadFeedback::Other { .. } => {}
@@ -1141,6 +1225,7 @@ impl VideoRoom {
             VideoSubscriberInfo {
                 flavor: s.flavor.clone(),
                 ssrc: s.ssrc,
+                forwarding: s.forwarded_source(),
                 packets_sent: st.packets_sent.load(Ordering::Relaxed),
                 packets_dropped: st.packets_dropped.load(Ordering::Relaxed),
                 frames_sent: st.frames_sent.load(Ordering::Relaxed),
@@ -1398,6 +1483,17 @@ impl VideoRoom {
             settings.max_tiles.clamp(1, 16),
         );
 
+        // The passthrough fast path (§5.6): a subscriber whose view is a
+        // single source it can already decode is served that source's
+        // own packets, and an output nobody composes is not rendered or
+        // encoded at all — which is where the saving is.
+        let with_frames: HashSet<String> = tiles
+            .iter()
+            .filter(|(_, t)| t.frame.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
+        let composing = self.decide_forwarding(&settings, layout, &order, &with_frames);
+
         // Render each output and encode each flavor.
         let pts = (now.duration_since(self.started).as_secs_f64() * 90_000.0) as u32;
         let room_fps = self.fps();
@@ -1407,6 +1503,12 @@ impl VideoRoom {
         let mut gone: Vec<String> = Vec::new();
         for (key, out) in outputs.iter_mut() {
             if out.encoders.is_empty() {
+                continue;
+            }
+            // Nobody left to compose for: every subscriber of this
+            // output is being forwarded, and a recording would have kept
+            // it in `composing`.
+            if !composing.contains(key) {
                 continue;
             }
             let sources: Vec<TileSource<'_>> = order
@@ -1476,6 +1578,122 @@ impl VideoRoom {
         }
         histogram!("forge_conference_video_compose_duration_seconds", "room_id" => self.id.clone())
             .record(started.elapsed().as_secs_f64());
+    }
+
+    /// Decide, for this tick, which subscribers ride the passthrough
+    /// fast path, and return the outputs that still have to be composed
+    /// (§5.6).
+    ///
+    /// A subscriber can be forwarded when its output's tiles come to
+    /// exactly one source with a live frame and that source's stream is
+    /// something the subscriber can already decode: same codec, a
+    /// profile forwardable to its own, and a picture no larger than it
+    /// asked for. Anything else — two tiles, a codec mismatch, a room
+    /// with `passthrough` off — is composed as before.
+    fn decide_forwarding(
+        &self,
+        settings: &VideoRoomSettings,
+        layout: Layout,
+        order: &[String],
+        with_frames: &HashSet<String>,
+    ) -> HashSet<OutputKey> {
+        let mut composing: HashSet<OutputKey> = HashSet::new();
+        let mut forwarding = 0u32;
+        for sub in self.subscribers.iter() {
+            let sole = settings
+                .passthrough
+                .allows(layout)
+                .then(|| self.sole_source(&sub.output, order, with_frames))
+                .flatten()
+                .filter(|source| self.forwardable(source, &sub.flavor));
+            match sole {
+                Some(source) => {
+                    let ssrc = self
+                        .sources
+                        .get(&source)
+                        .map(|s| s.remote_ssrc())
+                        .unwrap_or(0);
+                    // A source we have never had a packet from has no
+                    // SSRC to follow yet.
+                    if ssrc == 0 {
+                        sub.stop_forwarding();
+                        composing.insert(sub.output.clone());
+                        continue;
+                    }
+                    if sub.start_forwarding(&source, ssrc) {
+                        if let Some(s) = self.sources.get(&source) {
+                            s.request_keyframe();
+                        }
+                    }
+                    forwarding += 1;
+                }
+                None => {
+                    sub.stop_forwarding();
+                    composing.insert(sub.output.clone());
+                }
+            }
+        }
+        // A recording takes the composite whatever the subscribers do.
+        for r in self.recorders.iter() {
+            composing.insert(r.output.clone());
+        }
+        self.forwarders.store(forwarding, Ordering::Relaxed);
+        composing
+    }
+
+    /// The one source an output's composite would show, when there is
+    /// exactly one tile with a live frame in it.
+    fn sole_source(
+        &self,
+        output: &OutputKey,
+        order: &[String],
+        with_frames: &HashSet<String>,
+    ) -> Option<String> {
+        let mut only = None;
+        for id in order {
+            if !with_frames.contains(id) {
+                continue;
+            }
+            let remote = self.participants.get(id).is_some_and(|p| p.remote);
+            if !output.scope.admits(id, remote) {
+                continue;
+            }
+            if only.is_some() {
+                return None;
+            }
+            only = Some(id.clone());
+        }
+        only
+    }
+
+    /// Whether a source's own stream is something a subscriber of this
+    /// flavor can decode as it stands.
+    fn forwardable(&self, source: &str, flavor: &Flavor) -> bool {
+        let Some(s) = self.sources.get(source) else {
+            return false;
+        };
+        if s.codec() != flavor.codec || s.failed() {
+            return false;
+        }
+        // The picture must fit what the subscriber asked for; scaling is
+        // exactly what forwarding skips.
+        let res = s.measured_resolution();
+        if res.width == 0
+            || res.width > flavor.resolution.width
+            || res.height > flavor.resolution.height
+        {
+            return false;
+        }
+        // H.264 is the only codec here whose profile can make an
+        // otherwise identical stream undecodable.
+        if flavor.codec == VideoCodec::H264 {
+            let from = forge_sdp::video::H264Fmtp::parse(s.profile());
+            let to = forge_sdp::video::H264Fmtp::parse(&flavor.profile);
+            if !from.forwardable_to(&to) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Once a second, turn each source's decoded-frame count into an fps.

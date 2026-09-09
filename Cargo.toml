@@ -35,6 +35,9 @@ members = [
 # See crates/forge-kernel/build.rs for instructions.
 exclude = [
     "crates/forge-kernel-ebpf",
+    # cargo-fuzz builds these with a nightly toolchain and sanitizer flags;
+    # `fuzz/Cargo.toml` is its own workspace root. See fuzz/README.md.
+    "fuzz",
 ]
 
 [workspace.package]

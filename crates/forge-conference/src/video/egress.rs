@@ -22,6 +22,7 @@ use forge_rtp::{KeyframeRequestGate, RtpPacket, RtxCache, StreamRewriter};
 use forge_video::codec::{EncoderSettings, VideoEncoder};
 use forge_video::flavor::Flavor;
 use forge_video::frame::{Resolution, VideoFrame};
+use forge_video::ladder::{Ladder, LadderPolicy, Move, Rung};
 use metrics::counter;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -111,11 +112,19 @@ struct Forwarding {
     rewriter: StreamRewriter,
 }
 
+/// What a subscriber is watching: which composite, at which flavor. Both
+/// change when the ladder moves it between rungs (§7), so they live
+/// behind a lock rather than being fixed at subscribe time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Watching {
+    flavor: Flavor,
+    output: OutputKey,
+}
+
 /// One receiver of a flavor.
 pub struct Subscriber {
     pub id: String,
-    pub flavor: Flavor,
-    pub output: OutputKey,
+    watching: Mutex<Watching>,
     pub payload_type: u8,
     pub ssrc: u32,
     ts_offset: u32,
@@ -127,6 +136,9 @@ pub struct Subscriber {
     max_payload: usize,
     /// Set while this subscriber is on the passthrough fast path.
     forwarding: Mutex<Option<Forwarding>>,
+    /// How long the link has been asking to be moved, and which way
+    /// (§7). A move only happens once it has been asking for a while.
+    ladder: Mutex<Option<(Move, Instant)>>,
 }
 
 impl Subscriber {
@@ -143,8 +155,7 @@ impl Subscriber {
         let (tx, rx) = mpsc::channel(channel_packets.max(8));
         let sub = Arc::new(Self {
             id: id.to_string(),
-            flavor,
-            output,
+            watching: Mutex::new(Watching { flavor, output }),
             payload_type,
             ssrc: rand::random(),
             ts_offset: rand::random(),
@@ -158,6 +169,7 @@ impl Subscriber {
             stats: Arc::new(SubscriberStats::default()),
             max_payload: max_payload.max(64),
             forwarding: Mutex::new(None),
+            ladder: Mutex::new(None),
         });
         (sub, rx)
     }
@@ -189,6 +201,83 @@ impl Subscriber {
         }
     }
 
+    /// What the ladder wants for this subscriber, once its link has been
+    /// saying so for long enough (§7).
+    ///
+    /// A single tick below a rung is a burst of traffic, not a link that
+    /// cannot carry it; a move that followed one would flap the picture
+    /// every few seconds. So a wanted move has to hold — briefly to go
+    /// down, since a picture nobody can decode is worse than a small
+    /// one, and longer to go up, since climbing and falling back is the
+    /// worst of both.
+    pub fn ladder_move(
+        &self,
+        ladder: &Ladder,
+        policy: LadderPolicy,
+        down_after: Duration,
+        up_after: Duration,
+        now: Instant,
+    ) -> Option<Rung> {
+        let rung = ladder.rung_for(self.watching.lock().flavor.resolution);
+        let wanted = ladder.wants(rung, self.remb_kbps(), policy);
+        let mut state = self.ladder.lock();
+        match wanted {
+            Move::Stay => {
+                *state = None;
+                None
+            }
+            _ => {
+                let since = match *state {
+                    Some((held, since)) if held == wanted => since,
+                    _ => {
+                        *state = Some((wanted, now));
+                        now
+                    }
+                };
+                let held_for = now.saturating_duration_since(since);
+                let (target, needs) = match wanted {
+                    Move::Down(r) => (r, down_after),
+                    Move::Up(r) => (r, up_after),
+                    Move::Stay => unreachable!(),
+                };
+                if held_for >= needs {
+                    *state = None;
+                    Some(target)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// The flavor this subscriber is being encoded at right now.
+    pub fn flavor(&self) -> Flavor {
+        self.watching.lock().flavor.clone()
+    }
+
+    /// The composite it is watching.
+    pub fn output(&self) -> OutputKey {
+        self.watching.lock().output.clone()
+    }
+
+    /// Whether it takes this output at this flavor — the question the
+    /// compose tick asks of every subscriber, for every encoder.
+    pub fn watches(&self, output: &OutputKey, flavor: &Flavor) -> bool {
+        let w = self.watching.lock();
+        &w.output == output && &w.flavor == flavor
+    }
+
+    /// Move it to another rung of the ladder (§7): a different flavor,
+    /// and the output that goes with it. Same SSRC, same payload type,
+    /// same sequence — the receiver sees a resolution change and nothing
+    /// else, so signaling never hears about it.
+    pub fn move_to(&self, flavor: Flavor, output: OutputKey) {
+        // The new flavor's encoder starts on a keyframe: the receiver's
+        // last frame came from a different one, at a different size.
+        self.wants_keyframe.store(true, Ordering::Release);
+        *self.watching.lock() = Watching { flavor, output };
+    }
+
     // ---- passthrough (§5.6) -------------------------------------------
 
     /// Start forwarding `source`'s packets instead of a composite. The
@@ -208,7 +297,8 @@ impl Subscriber {
             }
         }
         let s = self.seq.lock();
-        let mut rewriter = StreamRewriter::new(self.flavor.codec, self.ssrc, s.seq, s.ts);
+        let codec = self.watching.lock().flavor.codec;
+        let mut rewriter = StreamRewriter::new(codec, self.ssrc, s.seq, s.ts);
         drop(s);
         let wants_keyframe = rewriter.select(source_ssrc);
         *f = Some(Forwarding {

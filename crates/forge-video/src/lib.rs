@@ -29,6 +29,7 @@ pub mod compose;
 pub mod flavor;
 pub mod font;
 pub mod frame;
+pub mod ladder;
 pub mod layout;
 pub mod metrics;
 pub mod raw;

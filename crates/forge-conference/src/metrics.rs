@@ -51,6 +51,7 @@ pub const M_VIDEO_COMPOSE_DURATION: &str = "forge_conference_video_compose_durat
 pub const M_VIDEO_RECORDINGS: &str = "forge_conference_video_recordings";
 pub const M_VIDEO_RECORDING_FRAMES_DROPPED: &str =
     "forge_conference_video_recording_frames_dropped_total";
+pub const M_VIDEO_LADDER_MOVES: &str = "forge_conference_video_ladder_moves_total";
 
 /// Every counter family forge-conference emits.
 pub const ALL_COUNTERS: &[&str] = &[
@@ -76,6 +77,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     M_VIDEO_NACKS_SENT,
     M_VIDEO_NACKS_RECEIVED,
     M_VIDEO_RECORDING_FRAMES_DROPPED,
+    M_VIDEO_LADDER_MOVES,
 ];
 
 /// Every gauge family forge-conference emits.
@@ -168,6 +170,10 @@ pub fn describe_metrics() {
     describe_counter!(
         M_VIDEO_RECORDING_FRAMES_DROPPED,
         "Composite frames a recording could not take, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_LADDER_MOVES,
+        "Subscribers moved between bitrate-ladder rungs, by room_id."
     );
     describe_gauge!(
         M_VIDEO_FPS,

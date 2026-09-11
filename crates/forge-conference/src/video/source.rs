@@ -26,10 +26,12 @@ use forge_rtp::rtcp::{PsFeedback, RtcpPacket, RtpFeedback};
 use forge_rtp::{AssemblerEvent, CodedFrame, FrameAssembler, KeyframeRequestGate, RtpPacket};
 use forge_video::codec::VideoDecoder;
 use forge_video::frame::{Resolution, VideoFrame};
+use forge_video::scale::{fit_within, resize_with, ScaleMode};
 use metrics::counter;
 use parking_lot::Mutex;
 use tracing::{debug, warn};
 
+use super::content::StreamKind;
 use super::pool::CodecPool;
 
 /// What a source may cost us before we stop believing it.
@@ -130,6 +132,9 @@ struct DecoderState {
 pub struct VideoSource {
     id: String,
     room_id: String,
+    /// A camera, or a shared screen. A screen larger than the cap is
+    /// shrunk to it rather than dropped, since text is what it carries.
+    kind: StreamKind,
     codec: VideoCodec,
     /// The sender's negotiated `a=fmtp`, for forwarding decisions.
     profile: String,
@@ -160,6 +165,7 @@ impl VideoSource {
     pub fn new(
         id: &str,
         room_id: &str,
+        kind: StreamKind,
         codec: VideoCodec,
         profile: &str,
         decoder: Box<dyn VideoDecoder>,
@@ -170,6 +176,7 @@ impl VideoSource {
         Self {
             id: id.to_string(),
             room_id: room_id.to_string(),
+            kind,
             codec,
             profile: profile.to_string(),
             assembler: Mutex::new(FrameAssembler::with_limits(
@@ -207,6 +214,10 @@ impl VideoSource {
 
     pub fn codec(&self) -> VideoCodec {
         self.codec
+    }
+
+    pub fn kind(&self) -> StreamKind {
+        self.kind
     }
 
     /// The `a=fmtp` this sender negotiated, `""` when its codec has
@@ -410,6 +421,7 @@ impl VideoSource {
         let pli_pending = Arc::clone(&self.pli_pending);
         let stats = Arc::clone(&self.stats);
         let limits = self.limits.clone();
+        let kind = self.kind;
         let id = self.id.clone();
         let room_id = self.room_id.clone();
         let submitted = pool.submit(move || {
@@ -431,18 +443,38 @@ impl VideoSource {
             };
             let outcome = dec.decode(&frame);
             match outcome {
-                Ok(Some(decoded)) => {
+                Ok(Some(mut decoded)) => {
                     state.consecutive_errors = 0;
-                    let res = decoded.resolution();
+                    let mut res = decoded.resolution();
                     if res.width > limits.max_resolution.width
                         || res.height > limits.max_resolution.height
                     {
-                        warn!(participant = %id, %res, cap = %limits.max_resolution,
-                              "decoded video frame over the resolution cap; dropped");
-                        stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
-                        counter!("forge_conference_video_frames_dropped_total", "room_id" => room_id.clone())
-                            .increment(1);
-                        return;
+                        // A camera over the cap is a camera misbehaving.
+                        // A screen over it is a big monitor: shrink it,
+                        // with the filter that keeps its text readable.
+                        let shrunk = match (kind, decoded.as_host()) {
+                            (StreamKind::Content, Some(host)) => {
+                                let to = fit_within(res, limits.max_resolution);
+                                Some(resize_with(host, to.width, to.height, ScaleMode::Box))
+                            }
+                            _ => None,
+                        };
+                        match shrunk {
+                            Some(frame) => {
+                                debug!(participant = %id, from = %res, to = %frame.resolution(),
+                                       "shared screen over the resolution cap; shrunk");
+                                decoded = VideoFrame::Host(frame);
+                                res = decoded.resolution();
+                            }
+                            None => {
+                                warn!(participant = %id, %res, cap = %limits.max_resolution,
+                                      "decoded video frame over the resolution cap; dropped");
+                                stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                                counter!("forge_conference_video_frames_dropped_total", "room_id" => room_id.clone())
+                                    .increment(1);
+                                return;
+                            }
+                        }
                     }
                     stats.width.store(res.width, Ordering::Relaxed);
                     stats.height.store(res.height, Ordering::Relaxed);

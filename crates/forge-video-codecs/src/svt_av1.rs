@@ -127,6 +127,9 @@ impl Inner {
             cfg.look_ahead_distance = 0;
             cfg.enable_tpl_la = 0;
             cfg.level_of_parallelism = 1;
+            // Palette and intra block copy for a shared screen.
+            cfg.screen_content_mode =
+                (settings.content == forge_video::codec::ContentHint::Screen) as u32;
             let r = svt_av1_enc_set_parameter(handle, &mut cfg);
             if r != EB_ErrorNone {
                 svt_av1_enc_deinit_handle(handle);

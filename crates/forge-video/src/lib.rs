@@ -5,8 +5,9 @@
 //!   on a device) and the [`MediaDevice`] it lives on.
 //! - [`scale`]: I420 scaling, letterboxing and blitting, and the
 //!   [`Scaler`] trait a device backend implements.
-//! - [`layout`]: grid, active-speaker, spotlight and picture-in-picture
-//!   tile geometry.
+//! - [`layout`]: grid, active-speaker, spotlight, picture-in-picture and
+//!   presentation (a shared screen with a strip of cameras) tile
+//!   geometry.
 //! - [`compose`]: the [`Compositor`] trait and the [`HostCompositor`]
 //!   that draws a layout of sources onto a canvas, with name labels,
 //!   speaking indicators and avatars.
@@ -38,12 +39,12 @@ pub mod scale;
 pub use bench::{BenchSettings, CodecCost};
 pub use clock::{ClockEvent, LoadShedder, RateOnly, VideoClock};
 pub use codec::{
-    CodecError, CodecRegistry, DecoderFactory, EncoderFactory, EncoderSettings, VideoDecoder,
-    VideoEncoder,
+    CodecError, CodecRegistry, ContentHint, DecoderFactory, EncoderFactory, EncoderSettings,
+    VideoDecoder, VideoEncoder,
 };
-pub use compose::{Compositor, HostCompositor, Theme, TileSource};
+pub use compose::{Compositor, HostCompositor, Theme, TileKind, TileSource};
 pub use flavor::{Flavor, FlavorTable};
 pub use frame::{DeviceFrame, HostFrame, MediaDevice, Resolution, VideoFrame};
 pub use layout::{Layout, Rect};
 pub use raw::{RawDecoder, RawEncoder};
-pub use scale::{HostScaler, Scaler};
+pub use scale::{HostScaler, ScaleMode, Scaler};

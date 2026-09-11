@@ -15,6 +15,7 @@ pub fn settings(codec: forge_core::VideoCodec, w: u32, h: u32) -> EncoderSetting
         bitrate_kbps: 600,
         keyframe_interval: 60,
         profile: String::new(),
+        content: Default::default(),
     }
 }
 

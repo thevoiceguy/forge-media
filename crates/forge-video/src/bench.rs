@@ -168,6 +168,7 @@ pub fn measure_codec(
         bitrate_kbps: settings.bitrate_kbps.max(1),
         keyframe_interval: settings.fps.max(1) * 2,
         profile: String::new(),
+        content: Default::default(),
     };
     let mut enc = registry.encoder(&enc_settings, device)?;
     let mut dec = registry.decoder(codec, device)?;
@@ -268,6 +269,7 @@ pub fn measure_compose(resolution: Resolution, tiles: usize, frames: u32) -> f64
                 frame: Some(&pair[n as usize % 2]),
                 speaking: i == n as usize % tiles,
                 muted: false,
+                kind: Default::default(),
             })
             .collect();
         let t = Instant::now();

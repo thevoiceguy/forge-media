@@ -6,12 +6,17 @@
 //! subscriber's packets from its [`VideoSubscription`] — and codec work
 //! runs on the shared [`CodecPool`], never on tokio workers.
 
+pub mod content;
 pub mod egress;
 pub mod pool;
 pub mod room;
 pub mod source;
 pub mod speaker;
 
+pub use content::{
+    ContentEvent, ContentFloor, ContentGate, ContentInfo, ContentLayout, ContentRefusal,
+    ContentStop, SourceKey, StreamKind, View,
+};
 pub use egress::{default_kbps, OutputKey, OutputScope, SubscriberStats, VideoSubscription};
 pub use pool::CodecPool;
 pub use room::{

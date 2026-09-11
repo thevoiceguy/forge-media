@@ -28,6 +28,8 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use super::content::{SourceKey, StreamKind, View};
+
 /// Whose tiles a composite is drawn from.
 ///
 /// Three answers, and a composite is shared by everyone who wants the
@@ -49,8 +51,8 @@ pub enum OutputScope {
 }
 
 impl OutputScope {
-    /// Whether a tile belongs in this composite. `remote` marks a peer
-    /// node's tile rather than a caller on this one.
+    /// Whether a camera tile belongs in this composite. `remote` marks a
+    /// peer node's tile rather than a caller on this one.
     pub fn admits(&self, id: &str, remote: bool) -> bool {
         match self {
             OutputScope::All => true,
@@ -58,15 +60,28 @@ impl OutputScope {
             OutputScope::LocalOnly => !remote,
         }
     }
+
+    /// Whether the shared screen belongs in this composite. `exclude_self`
+    /// is about a participant's own camera: a presenter still sees what
+    /// they are sharing. A trunk's local-only composite leaves out
+    /// content that came from a peer, as it does the peer's tile.
+    pub fn admits_content(&self, remote: bool) -> bool {
+        match self {
+            OutputScope::All | OutputScope::Excluding(_) => true,
+            OutputScope::LocalOnly => !remote,
+        }
+    }
 }
 
-/// Which composite a subscriber watches: the shared one, a private one
-/// that leaves the subscriber's own tile out (`exclude_self`), or the
-/// local-only one a trunk carries.
+/// Which composite a subscriber watches: whose tiles (the shared one, a
+/// private one that leaves the subscriber's own tile out, or the
+/// local-only one a trunk carries), at what size, showing what
+/// ([`View`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct OutputKey {
     pub scope: OutputScope,
     pub resolution: Resolution,
+    pub view: View,
 }
 
 /// The bitrate ladder's default cap per resolution (§7).
@@ -107,8 +122,8 @@ struct Sequence {
 /// it can decode as it stands (§5.6): that source's own packets, under
 /// this subscriber's SSRC, sequence and timestamps.
 struct Forwarding {
-    /// The participant whose packets are going out.
-    source: String,
+    /// The stream whose packets are going out.
+    source: SourceKey,
     rewriter: StreamRewriter,
 }
 
@@ -124,6 +139,9 @@ struct Watching {
 /// One receiver of a flavor.
 pub struct Subscriber {
     pub id: String,
+    /// Which of the participant's channels this is: their main video
+    /// section, or a content section of their own.
+    pub kind: StreamKind,
     watching: Mutex<Watching>,
     pub payload_type: u8,
     pub ssrc: u32,
@@ -139,11 +157,16 @@ pub struct Subscriber {
     /// How long the link has been asking to be moved, and which way
     /// (§7). A move only happens once it has been asking for a while.
     ladder: Mutex<Option<(Move, Instant)>>,
+    /// The same, for a content channel, which moves in frame rate
+    /// rather than resolution: `true` is down.
+    fps_ladder: Mutex<Option<(bool, Instant)>>,
 }
 
 impl Subscriber {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: &str,
+        kind: StreamKind,
         flavor: Flavor,
         output: OutputKey,
         payload_type: u8,
@@ -155,6 +178,7 @@ impl Subscriber {
         let (tx, rx) = mpsc::channel(channel_packets.max(8));
         let sub = Arc::new(Self {
             id: id.to_string(),
+            kind,
             watching: Mutex::new(Watching { flavor, output }),
             payload_type,
             ssrc: rand::random(),
@@ -170,8 +194,14 @@ impl Subscriber {
             max_payload: max_payload.max(64),
             forwarding: Mutex::new(None),
             ladder: Mutex::new(None),
+            fps_ladder: Mutex::new(None),
         });
         (sub, rx)
+    }
+
+    /// The channel this subscriber is: participant and kind.
+    pub fn key(&self) -> SourceKey {
+        SourceKey::new(&self.id, self.kind)
     }
 
     /// Packetize one coded frame into this subscriber's stream and send.
@@ -250,6 +280,56 @@ impl Subscriber {
         }
     }
 
+    /// What the ladder wants for a content channel, which is not moved
+    /// in resolution — text at 360p is useless — but in frame rate
+    /// (§15.6): halve it when the link has been below `policy.down_at`
+    /// of the flavor's rate for `down_after`, double it back towards
+    /// `room_fps` when it has been above `policy.up_at` of that rate for
+    /// `up_after`. Returns the frame rate to move to.
+    pub fn fps_move(
+        &self,
+        room_fps: u32,
+        policy: LadderPolicy,
+        down_after: Duration,
+        up_after: Duration,
+        now: Instant,
+    ) -> Option<u32> {
+        let flavor = self.watching.lock().flavor.clone();
+        let remb = self.remb_kbps();
+        let rate = flavor.max_kbps as f32;
+        let wanted = if remb == 0 {
+            None
+        } else if (remb as f32) < rate * policy.down_at && flavor.fps > 2 {
+            Some(true)
+        } else if (remb as f32) > rate * policy.up_at && flavor.fps < room_fps {
+            Some(false)
+        } else {
+            None
+        };
+        let mut state = self.fps_ladder.lock();
+        let Some(down) = wanted else {
+            *state = None;
+            return None;
+        };
+        let since = match *state {
+            Some((held, since)) if held == down => since,
+            _ => {
+                *state = Some((down, now));
+                now
+            }
+        };
+        let needs = if down { down_after } else { up_after };
+        if now.saturating_duration_since(since) < needs {
+            return None;
+        }
+        *state = None;
+        Some(if down {
+            (flavor.fps / 2).max(2)
+        } else {
+            (flavor.fps * 2).min(room_fps)
+        })
+    }
+
     /// The flavor this subscriber is being encoded at right now.
     pub fn flavor(&self) -> Flavor {
         self.watching.lock().flavor.clone()
@@ -289,10 +369,10 @@ impl Subscriber {
     /// Returns whether the source must be asked for a keyframe: the
     /// switch only takes effect on one, so that the receiver never
     /// decodes a frame whose references it has not seen.
-    pub fn start_forwarding(&self, source: &str, source_ssrc: u32) -> bool {
+    pub fn start_forwarding(&self, source: &SourceKey, source_ssrc: u32) -> bool {
         let mut f = self.forwarding.lock();
         if let Some(current) = f.as_mut() {
-            if current.source == source {
+            if &current.source == source {
                 return current.rewriter.select(source_ssrc);
             }
         }
@@ -302,7 +382,7 @@ impl Subscriber {
         drop(s);
         let wants_keyframe = rewriter.select(source_ssrc);
         *f = Some(Forwarding {
-            source: source.to_string(),
+            source: source.clone(),
             rewriter,
         });
         wants_keyframe
@@ -317,16 +397,16 @@ impl Subscriber {
     }
 
     /// The source being forwarded, if any.
-    pub fn forwarded_source(&self) -> Option<String> {
+    pub fn forwarded_source(&self) -> Option<SourceKey> {
         self.forwarding.lock().as_ref().map(|f| f.source.clone())
     }
 
-    /// Whether packets from this participant should be offered here.
-    pub fn forwards_from(&self, source: &str) -> bool {
+    /// Whether packets from this stream should be offered here.
+    pub fn forwards_from(&self, source: &SourceKey) -> bool {
         self.forwarding
             .lock()
             .as_ref()
-            .is_some_and(|f| f.source == source)
+            .is_some_and(|f| &f.source == source)
     }
 
     /// Offer one of the source's packets. It goes out rewritten into
@@ -594,6 +674,71 @@ mod tests {
     }
 
     #[test]
+    fn a_content_channel_moves_in_frame_rate_not_resolution() {
+        let flavor = Flavor::new(VideoCodec::VP8, "", Resolution::new(1280, 720), 15, 1200);
+        let key = OutputKey {
+            scope: OutputScope::All,
+            resolution: Resolution::new(1280, 720),
+            view: View::Content,
+        };
+        let (sub, _rx) = Subscriber::new(
+            "alice",
+            StreamKind::Content,
+            flavor,
+            key,
+            97,
+            Arc::new(AtomicBool::new(false)),
+            8,
+            8,
+            1200,
+        );
+        assert_eq!(sub.key(), SourceKey::content("alice"));
+        let policy = LadderPolicy::default();
+        let (down, up) = (Duration::from_millis(100), Duration::from_millis(200));
+        let t0 = Instant::now();
+        // Nothing said: nothing moves.
+        assert_eq!(sub.fps_move(15, policy, down, up, t0), None);
+        // A link at a third of the rate asks to go down; the move waits
+        // out the window, then halves.
+        sub.set_remb(400_000);
+        assert_eq!(sub.fps_move(15, policy, down, up, t0), None);
+        assert_eq!(
+            sub.fps_move(15, policy, down, up, t0 + Duration::from_millis(150)),
+            Some(7)
+        );
+        // At 7 fps and 1.2× the rate it climbs back, never past the room.
+        sub.move_to(
+            Flavor::new(VideoCodec::VP8, "", Resolution::new(1280, 720), 7, 1200),
+            sub.output(),
+        );
+        sub.set_remb(2_000_000);
+        assert_eq!(sub.fps_move(15, policy, down, up, t0), None);
+        assert_eq!(
+            sub.fps_move(15, policy, down, up, t0 + Duration::from_millis(250)),
+            Some(14)
+        );
+        // Already at the room's rate: a generous link changes nothing.
+        sub.move_to(
+            Flavor::new(VideoCodec::VP8, "", Resolution::new(1280, 720), 15, 1200),
+            sub.output(),
+        );
+        assert_eq!(
+            sub.fps_move(15, policy, down, up, t0 + Duration::from_secs(9)),
+            None
+        );
+        // And 2 fps is the floor.
+        sub.move_to(
+            Flavor::new(VideoCodec::VP8, "", Resolution::new(1280, 720), 2, 1200),
+            sub.output(),
+        );
+        sub.set_remb(10_000);
+        assert_eq!(
+            sub.fps_move(15, policy, down, up, t0 + Duration::from_secs(9)),
+            None
+        );
+    }
+
+    #[test]
     fn a_scope_decides_which_tiles_a_composite_is_drawn_from() {
         // The shared composite: everyone, a peer node's tile included.
         let all = OutputScope::All;
@@ -614,5 +759,12 @@ mod tests {
         assert!(trunk.admits("alice", false));
         assert!(!trunk.admits("__trunk__node-b", true));
         assert!(!trunk.admits("__trunk__node-c", true));
+
+        // The shared screen: a presenter's private composite still shows
+        // it, a trunk's does not carry a peer's back.
+        assert!(all.admits_content(false) && all.admits_content(true));
+        assert!(mine.admits_content(false) && mine.admits_content(true));
+        assert!(trunk.admits_content(false));
+        assert!(!trunk.admits_content(true));
     }
 }

@@ -53,6 +53,12 @@ pub const M_VIDEO_RECORDING_FRAMES_DROPPED: &str =
     "forge_conference_video_recording_frames_dropped_total";
 pub const M_VIDEO_LADDER_MOVES: &str = "forge_conference_video_ladder_moves_total";
 pub const M_VIDEO_SHED: &str = "forge_conference_video_shed_total";
+pub const M_VIDEO_CONTENT_ROOMS: &str = "forge_conference_video_content_rooms";
+pub const M_VIDEO_CONTENT_STARTED: &str = "forge_conference_video_content_started_total";
+pub const M_VIDEO_CONTENT_STOPPED: &str = "forge_conference_video_content_stopped_total";
+pub const M_VIDEO_CONTENT_REFUSED: &str = "forge_conference_video_content_refused_total";
+pub const M_VIDEO_CONTENT_PACKETS_REFUSED: &str =
+    "forge_conference_video_content_packets_refused_total";
 
 /// Every counter family forge-conference emits.
 pub const ALL_COUNTERS: &[&str] = &[
@@ -80,6 +86,10 @@ pub const ALL_COUNTERS: &[&str] = &[
     M_VIDEO_RECORDING_FRAMES_DROPPED,
     M_VIDEO_LADDER_MOVES,
     M_VIDEO_SHED,
+    M_VIDEO_CONTENT_STARTED,
+    M_VIDEO_CONTENT_STOPPED,
+    M_VIDEO_CONTENT_REFUSED,
+    M_VIDEO_CONTENT_PACKETS_REFUSED,
 ];
 
 /// Every gauge family forge-conference emits.
@@ -92,6 +102,7 @@ pub const ALL_GAUGES: &[&str] = &[
     M_VIDEO_ENCODERS,
     M_VIDEO_FPS,
     M_VIDEO_RECORDINGS,
+    M_VIDEO_CONTENT_ROOMS,
 ];
 
 /// Every histogram family forge-conference emits.
@@ -180,6 +191,23 @@ pub fn describe_metrics() {
     describe_counter!(
         M_VIDEO_SHED,
         "Times an output was dropped a rung because the room was overrunning, by room_id."
+    );
+    describe_gauge!(M_VIDEO_CONTENT_ROOMS, "Rooms with a screen being shared.");
+    describe_counter!(
+        M_VIDEO_CONTENT_STARTED,
+        "Screen shares that took the floor, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_CONTENT_STOPPED,
+        "Screen shares that gave up the floor, by room_id and reason."
+    );
+    describe_counter!(
+        M_VIDEO_CONTENT_REFUSED,
+        "Screen shares refused the floor, by room_id and reason (once per participant per floor)."
+    );
+    describe_counter!(
+        M_VIDEO_CONTENT_PACKETS_REFUSED,
+        "Content packets dropped because their sender does not hold the floor, by room_id."
     );
     describe_gauge!(
         M_VIDEO_FPS,

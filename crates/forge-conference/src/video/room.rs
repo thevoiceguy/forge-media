@@ -13,8 +13,14 @@
 //! a participant: it draws no tile, sees the room whole, and takes coded
 //! frames rather than packets, because a muxer wants frames and
 //! packetizing one only to take it apart again is waste.
+//!
+//! A **shared screen** (design §15.6) is a second kind of source, keyed
+//! beside the camera by [`SourceKey`]; one participant at a time holds
+//! the *floor*, and every output names the [`View`] it shows — the
+//! composite (with the presentation arrangement while a screen is
+//! shared), the cameras alone, or the content alone.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -24,7 +30,7 @@ use forge_core::VideoCodec;
 use forge_rtp::rtcp::{PayloadFeedback, RtcpPacket, TransportFeedback};
 use forge_rtp::{CodedFrame, RtpPacket};
 use forge_video::codec::{CodecRegistry, EncoderSettings};
-use forge_video::compose::{Compositor, HostCompositor, TileSource};
+use forge_video::compose::{Compositor, HostCompositor, TileKind, TileSource};
 use forge_video::flavor::Flavor;
 use forge_video::frame::{MediaDevice, Resolution, VideoFrame};
 use forge_video::ladder::{Ladder, LadderPolicy, Rung};
@@ -35,6 +41,10 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
+use super::content::{
+    ContentEvent, ContentFloor, ContentGate, ContentInfo, ContentLayout, ContentRefusal,
+    ContentStop, SourceKey, StreamKind, View,
+};
 use super::egress::{
     default_kbps, FlavorEncoder, OutputKey, OutputScope, Subscriber, VideoSubscription,
 };
@@ -164,6 +174,18 @@ pub struct VideoRoomSettings {
     pub ladder_down_after: Duration,
     pub ladder_up_after: Duration,
     pub limits: SourceLimits,
+    /// Whether anyone may share a screen (§15.6). Off, every content
+    /// packet is refused.
+    pub content: bool,
+    /// How the composite shows a shared screen.
+    pub content_layout: ContentLayout,
+    /// A presenter that has sent nothing for this long gives up the
+    /// floor. Judged on packets, not frames: a still slide is not idle.
+    pub content_idle: Duration,
+    /// The most a shared screen is decoded and sent at, whatever the
+    /// meeting's canvas: a bigger capture is shrunk to this, and the
+    /// content channel is capped here rather than at `resolution`.
+    pub content_max_resolution: Resolution,
 }
 
 impl Default for VideoRoomSettings {
@@ -187,6 +209,10 @@ impl Default for VideoRoomSettings {
             ladder_down_after: Duration::from_secs(5),
             ladder_up_after: Duration::from_secs(15),
             limits: SourceLimits::default(),
+            content: true,
+            content_layout: ContentLayout::Presentation,
+            content_idle: Duration::from_secs(30),
+            content_max_resolution: Resolution::new(1920, 1080),
         }
     }
 }
@@ -253,37 +279,58 @@ fn clamp_to_cap(wants: Rung, at: Resolution, cap: Rung) -> Option<Rung> {
     (at.height < cap.resolution.height).then_some(cap)
 }
 
-/// Which output gives up a rung next, given what each live scope is held
-/// at today: the largest, and the scope's own order to settle a tie so
-/// that two runs of the same room shed the same way. `None` when every
-/// output is already at the bottom of the ladder.
+/// What a shed ceiling is keyed by: the part of an [`OutputKey`] an output
+/// keeps across a shed. Dropping a rung changes its resolution and so its
+/// key; its scope and view are what stay.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ShedKey {
+    scope: OutputScope,
+    view: View,
+}
+
+impl ShedKey {
+    fn of(output: &OutputKey) -> Self {
+        Self {
+            scope: output.scope.clone(),
+            view: output.view,
+        }
+    }
+}
+
+/// Which output gives up a rung next, given each live output, the rung it
+/// is held at today and the one below it on its own ladder: the largest,
+/// and the key's own order to settle a tie so that two runs of the same
+/// room shed the same way. The content channel goes last (§15.6): only
+/// when nothing else can give up a rung is a shared screen made smaller.
+/// `None` when every output is already at the bottom.
 ///
 /// Pure, because the rule is the interesting part and a `VideoRoom` needs
 /// a codec pool and an audio room to exist.
-fn next_to_shed(
-    held: &[(OutputScope, Rung)],
-    ladder: &Ladder,
-) -> Option<(OutputScope, Rung, Rung)> {
-    held.iter()
-        .filter_map(|(scope, at)| ladder.below(*at).map(|to| (scope.clone(), *at, to)))
-        .max_by(|(a_scope, a_at, _), (b_scope, b_at, _)| {
-            (a_at.resolution.height, a_scope).cmp(&(b_at.resolution.height, b_scope))
-        })
+fn next_to_shed(held: &[(ShedKey, Rung, Option<Rung>)]) -> Option<(ShedKey, Rung, Rung)> {
+    let pick = |content: bool| {
+        held.iter()
+            .filter(|(key, _, _)| (key.view == View::Content) == content)
+            .filter_map(|(key, at, below)| below.map(|to| (key.clone(), *at, to)))
+            .max_by(|(a_key, a_at, _), (b_key, b_at, _)| {
+                (a_at.resolution.height, a_key).cmp(&(b_at.resolution.height, b_key))
+            })
+    };
+    pick(false).or_else(|| pick(true))
 }
 
-/// Which output gets a rung back next: the one furthest below the top,
-/// since it has the most to gain. `None` when nothing is shed. A cap that
-/// is already at the top rung is stale and is reported as such by the
-/// returned rungs being equal, so the caller can drop it.
+/// Which output gets a rung back next, given each cap and the rung above
+/// it: the one furthest below the top, since it has the most to gain.
+/// `None` when nothing is shed. A cap that is already at the top rung is
+/// stale and is reported as such by the rung above being `None`, so the
+/// caller can drop it.
 fn next_to_restore(
-    caps: &[(OutputScope, Rung)],
-    ladder: &Ladder,
-) -> Option<(OutputScope, Rung, Option<Rung>)> {
+    caps: &[(ShedKey, Rung, Option<Rung>)],
+) -> Option<(ShedKey, Rung, Option<Rung>)> {
     caps.iter()
-        .min_by(|(a_scope, a_at), (b_scope, b_at)| {
-            (a_at.resolution.height, a_scope).cmp(&(b_at.resolution.height, b_scope))
+        .min_by(|(a_key, a_at, _), (b_key, b_at, _)| {
+            (a_at.resolution.height, a_key).cmp(&(b_at.resolution.height, b_key))
         })
-        .map(|(scope, at)| (scope.clone(), *at, ladder.above(*at)))
+        .cloned()
 }
 
 /// Name a scope for an event or a log line: `all`, `excluding:<id>` or
@@ -297,15 +344,31 @@ fn scope_label(scope: &OutputScope) -> String {
     }
 }
 
+/// Name a shed output: the scope, and the view after a colon when it is
+/// not the composite — `all`, `all:cameras`, `local-only:content`.
+fn shed_label(key: &ShedKey) -> String {
+    match key.view {
+        View::Composite => scope_label(&key.scope),
+        view => format!("{}:{}", scope_label(&key.scope), view.name()),
+    }
+}
+
 /// What the room tells the server about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoRoomEvent {
     /// The clock changed rate; `overload` when it was halved.
     FpsChanged { from: u32, to: u32, overload: bool },
-    /// A participant's video state changed.
+    /// A participant's video state changed, for their camera or their
+    /// shared screen.
     ParticipantState {
         participant_id: String,
+        kind: StreamKind,
         state: VideoState,
+    },
+    /// A share started, stopped or was refused (§15.6).
+    Content {
+        participant_id: String,
+        event: ContentEvent,
     },
     /// The active speaker changed (`None` when the speaker left).
     ActiveSpeaker {
@@ -320,25 +383,31 @@ pub enum VideoRoomEvent {
     /// event says a picture got smaller while everyone's motion was left
     /// alone; `FpsChanged { overload: true }` says shedding ran out.
     Shed {
-        /// Which composite: `all`, `excluding:<id>` or `local-only`.
+        /// Which output: `all`, `excluding:<id>` or `local-only`, with
+        /// `:cameras` or `:content` after it for a view other than the
+        /// composite.
         output: String,
         from: Resolution,
         to: Resolution,
     },
-    /// Layout, pin or spotlight changed.
+    /// Layout, pin, spotlight or content layout changed.
     LayoutChanged {
         layout: Layout,
         pinned: Option<String>,
         spotlight: Option<String>,
+        content_layout: ContentLayout,
     },
 }
 
 #[derive(Debug, Clone)]
 struct Participant {
     name: String,
-    /// Host control (§8): `false` hides the participant's video.
+    /// Host control (§8): `false` hides the participant's camera.
     enabled: bool,
+    /// Host control (§15.6): `false` keeps the participant off the floor.
+    content_enabled: bool,
     state: VideoState,
+    content_state: VideoState,
     joined: u64,
     /// A peer node's tile rather than a caller on this one: it draws a
     /// tile and decodes like any source, but it is not in the audio
@@ -376,6 +445,9 @@ pub struct SubscribeRequest {
     /// subscriber's own tile left out when `exclude_self` is set, every
     /// tile otherwise. A trunk asks for [`OutputScope::LocalOnly`].
     pub scope: Option<OutputScope>,
+    /// What to show. `None` is the channel's own default: the composite
+    /// on a main section, the content alone on a content section.
+    pub view: Option<View>,
 }
 
 /// What a recording asks the room for (§11). Unlike a subscription this
@@ -393,6 +465,9 @@ pub struct RecordRequest {
     /// Frames buffered before the recorder is taken to be too slow and
     /// frames are dropped.
     pub queue: usize,
+    /// What to record: the composite, which follows a share into the
+    /// presentation arrangement and back, unless told otherwise.
+    pub view: View,
 }
 
 impl RecordRequest {
@@ -404,6 +479,7 @@ impl RecordRequest {
             fps: None,
             max_kbps: None,
             queue: 120,
+            view: View::Composite,
         }
     }
 }
@@ -496,16 +572,28 @@ pub struct VideoRecordingInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoParticipantInfo {
     pub participant_id: String,
+    /// The camera.
     pub state: VideoState,
+    /// The shared screen (`Off` when the participant has no content
+    /// section).
+    pub content_state: VideoState,
     pub display_name: String,
     pub speaking: bool,
+    /// Whether this participant holds the floor.
+    pub presenting: bool,
     /// A peer node's tile, standing for the callers on that node,
     /// rather than a caller on this one.
     pub remote: bool,
-    /// The ingress side, when the participant sends video.
+    /// The camera's ingress side, when the participant sends video.
     pub source: Option<VideoSourceInfo>,
-    /// The egress side, when the participant receives video.
+    /// The shared screen's ingress side, when the participant has a
+    /// content section.
+    pub content: Option<VideoSourceInfo>,
+    /// The main section's egress side, when the participant receives
+    /// video.
     pub subscription: Option<VideoSubscriberInfo>,
+    /// The content section's egress side, when the participant has one.
+    pub content_subscription: Option<VideoSubscriberInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,11 +614,13 @@ pub struct VideoSourceInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoSubscriberInfo {
     pub flavor: Flavor,
+    /// What the channel shows.
+    pub view: View,
     pub ssrc: u32,
-    /// The participant whose own packets this subscriber is being sent,
-    /// when its view is a single source it can already decode (§5.6);
-    /// `None` when it is watching a composite.
-    pub forwarding: Option<String>,
+    /// The stream whose own packets this subscriber is being sent, when
+    /// its view is a single source it can already decode (§5.6); `None`
+    /// when it is watching a composite.
+    pub forwarding: Option<SourceKey>,
     pub packets_sent: u64,
     pub packets_dropped: u64,
     pub frames_sent: u64,
@@ -554,6 +644,8 @@ pub struct VideoFlavorInfo {
 pub struct VideoOutputInfo {
     /// Whose tiles this composite is drawn from.
     pub scope: OutputScope,
+    /// What it shows.
+    pub view: View,
     pub resolution: Resolution,
     pub flavors: Vec<VideoFlavorInfo>,
 }
@@ -562,6 +654,8 @@ pub struct VideoOutputInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoRoomStatus {
     pub layout: Layout,
+    /// How the composite shows a shared screen.
+    pub content_layout: ContentLayout,
     pub fps: u32,
     pub target_fps: u32,
     pub resolution: Resolution,
@@ -571,6 +665,9 @@ pub struct VideoRoomStatus {
     /// The remote tile the speaker is behind, when they are on a peer
     /// node rather than here.
     pub active_speaker_via: Option<String>,
+    /// The share under way, if any.
+    pub content: Option<ContentInfo>,
+    /// Sources decoding, cameras and shared screens both.
     pub sources: usize,
     pub encoders: usize,
     pub ticks: u64,
@@ -587,8 +684,17 @@ pub struct VideoRoom {
     audio: Weak<ConferenceRoom>,
     participants: DashMap<String, Participant>,
     join_seq: AtomicU64,
-    sources: DashMap<String, Arc<VideoSource>>,
-    subscribers: DashMap<String, Arc<Subscriber>>,
+    /// Every stream being decoded, cameras and shared screens both.
+    sources: DashMap<SourceKey, Arc<VideoSource>>,
+    /// Every channel being sent: a participant's main section, and their
+    /// content section when they have one.
+    subscribers: DashMap<SourceKey, Arc<Subscriber>>,
+    /// Who is sharing a screen (§15.6).
+    floor: Mutex<Option<ContentFloor>>,
+    /// Participants told their share was refused, so they are told once.
+    refused_told: Mutex<HashSet<String>>,
+    /// Whether the node can afford another share.
+    content_gate: RwLock<Option<Arc<dyn ContentGate>>>,
     /// Recordings: consumers of a flavor that are not participants.
     recorders: DashMap<String, Arc<RecorderTap>>,
     outputs: Mutex<HashMap<OutputKey, Output>>,
@@ -601,12 +707,12 @@ pub struct VideoRoom {
     /// This node's name, which settles a tie against a peer's claim.
     local_node: Mutex<String>,
     control: Mutex<Control>,
-    /// While the room is overrunning, the rung an output's scope may not
-    /// go above. Absent means the ladder's top, which is to say nothing is
-    /// shed. Keyed by scope rather than by `OutputKey`, because dropping a
-    /// rung changes an output's resolution and so its key: the scope is
-    /// what an output keeps across a shed.
-    shed_caps: DashMap<OutputScope, Rung>,
+    /// While the room is overrunning, the rung an output may not go
+    /// above. Absent means the ladder's top, which is to say nothing is
+    /// shed. Keyed by scope and view rather than by `OutputKey`, because
+    /// dropping a rung changes an output's resolution and so its key:
+    /// those two are what an output keeps across a shed.
+    shed_caps: DashMap<ShedKey, Rung>,
     /// Current and wanted clock rate; the clock task applies changes.
     fps: AtomicU32,
     target_fps: AtomicU32,
@@ -616,7 +722,7 @@ pub struct VideoRoom {
     ticks: AtomicU64,
     overruns: AtomicU64,
     /// Per-source decoded-frame counts at the last fps sample.
-    fps_samples: Mutex<(Instant, HashMap<String, u64>)>,
+    fps_samples: Mutex<(Instant, HashMap<SourceKey, u64>)>,
     stopped: AtomicBool,
 }
 
@@ -641,6 +747,9 @@ impl VideoRoom {
             join_seq: AtomicU64::new(0),
             sources: DashMap::new(),
             subscribers: DashMap::new(),
+            floor: Mutex::new(None),
+            refused_told: Mutex::new(HashSet::new()),
+            content_gate: RwLock::new(None),
             recorders: DashMap::new(),
             outputs: Mutex::new(HashMap::new()),
             shed_caps: DashMap::new(),
@@ -705,6 +814,9 @@ impl VideoRoom {
         self.subscribers.clear();
         self.recorders.clear();
         self.outputs.lock().clear();
+        if self.floor.lock().take().is_some() {
+            gauge!("forge_conference_video_content_rooms").decrement(1.0);
+        }
         gauge!("forge_conference_video_rooms").decrement(1.0);
         info!(room = %self.id, "video room stopped");
     }
@@ -719,17 +831,26 @@ impl VideoRoom {
             .or_insert_with(|| Participant {
                 name: id.to_string(),
                 enabled: true,
+                content_enabled: true,
                 state: VideoState::Off,
+                content_state: VideoState::Off,
                 joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
                 remote: false,
             });
     }
 
-    /// The participant left: source, subscription and tile go with them.
+    /// The participant left: sources, subscriptions, tile and the floor
+    /// go with them.
     pub fn participant_left(&self, id: &str) {
         self.participants.remove(id);
-        self.remove_source(id);
-        self.unsubscribe(id);
+        if self.holder_is(id) {
+            self.release_floor(ContentStop::Left);
+        }
+        self.remove_source_kind(id, StreamKind::Camera);
+        self.remove_source_kind(id, StreamKind::Content);
+        self.unsubscribe_kind(id, StreamKind::Camera);
+        self.unsubscribe_kind(id, StreamKind::Content);
+        self.refused_told.lock().remove(id);
         self.speaker.lock().remove(id);
         let mut c = self.control.lock();
         let mut changed = false;
@@ -746,6 +867,7 @@ impl VideoRoom {
                 layout: c.layout.unwrap_or(self.settings.read().layout),
                 pinned: c.pinned.clone(),
                 spotlight: c.spotlight.clone(),
+                content_layout: self.settings.read().content_layout,
             };
             drop(c);
             let _ = self.events.send(ev);
@@ -758,15 +880,30 @@ impl VideoRoom {
         }
     }
 
-    /// Host control: hide or show a participant's video.
+    /// Host control: hide or show a participant's camera.
     pub fn set_participant_video_enabled(&self, id: &str, enabled: bool) {
         if let Some(mut p) = self.participants.get_mut(id) {
             p.enabled = enabled;
         }
         if enabled {
-            if let Some(s) = self.sources.get(id) {
+            if let Some(s) = self.sources.get(&SourceKey::camera(id)) {
                 s.request_keyframe();
             }
+        }
+    }
+
+    /// Host control over a share: `false` ends the participant's share
+    /// if they hold the floor and keeps them from taking it again — a
+    /// browser that keeps sending would otherwise have it straight back
+    /// — until `true` lets them.
+    pub fn set_participant_content_enabled(&self, id: &str, enabled: bool) {
+        if let Some(mut p) = self.participants.get_mut(id) {
+            p.content_enabled = enabled;
+        }
+        if enabled {
+            self.refused_told.lock().remove(id);
+        } else if self.holder_is(id) {
+            self.release_floor(ContentStop::Host);
         }
     }
 
@@ -781,32 +918,65 @@ impl VideoRoom {
     /// audio room either, so it is never the active speaker on its own
     /// energy; the peer says who is speaking behind it.
     pub fn add_remote(&self, id: &str, codec: VideoCodec, profile: &str) -> Result<()> {
+        self.add_remote_kind(id, StreamKind::Camera, codec, profile)
+    }
+
+    /// A peer node's shared screen arriving over a trunk (§15.6, 7d): a
+    /// content source under the remote tile's id, which takes the floor
+    /// here as a caller's would. A composite sent back down a trunk
+    /// leaves it out, as it does the tile.
+    pub fn add_remote_content(&self, id: &str, codec: VideoCodec, profile: &str) -> Result<()> {
+        self.add_remote_kind(id, StreamKind::Content, codec, profile)
+    }
+
+    fn add_remote_kind(
+        &self,
+        id: &str,
+        kind: StreamKind,
+        codec: VideoCodec,
+        profile: &str,
+    ) -> Result<()> {
         self.participants
             .entry(id.to_string())
             .or_insert_with(|| Participant {
                 name: id.to_string(),
                 enabled: true,
+                content_enabled: true,
                 state: VideoState::Off,
+                content_state: VideoState::Off,
                 joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
                 remote: true,
             })
             .remote = true;
-        let out = self.add_source(id, codec, profile);
-        if out.is_err() {
-            self.participants.remove(id);
-        } else {
-            debug!(room = %self.id, remote = %id, %codec, "remote video tile added");
+        let out = self.add_source_kind(id, kind, codec, profile);
+        match &out {
+            Err(_) => {
+                // A tile with nothing behind it is not a tile.
+                if !self.has_source(id) && !self.has_source_kind(id, StreamKind::Content) {
+                    self.participants.remove(id);
+                }
+            }
+            Ok(()) => {
+                debug!(room = %self.id, remote = %id, %kind, %codec, "remote video source added")
+            }
         }
         out
     }
 
-    /// The trunk went: the tile, its decoder and the peer's claim about
+    /// The trunk went: the tile, its decoders and the peer's claim about
     /// who is speaking behind it go with it.
     pub fn remove_remote(&self, id: &str) {
         if self.participants.get(id).is_some_and(|p| p.remote) {
             self.remote_speakers.remove(id);
             self.participant_left(id);
             debug!(room = %self.id, remote = %id, "remote video tile removed");
+        }
+    }
+
+    /// The peer stopped carrying content; its tile stays.
+    pub fn remove_remote_content(&self, id: &str) {
+        if self.participants.get(id).is_some_and(|p| p.remote) {
+            self.remove_source_kind(id, StreamKind::Content);
         }
     }
 
@@ -842,10 +1012,26 @@ impl VideoRoom {
     }
 
     /// The participant sends `codec` with `profile` (its `a=fmtp`, `""`
-    /// when the codec has none); start decoding it. The profile is what
-    /// decides whether the stream can be forwarded to someone else
-    /// untouched (§5.6).
+    /// when the codec has none) from their camera; start decoding it.
+    /// The profile is what decides whether the stream can be forwarded
+    /// to someone else untouched (§5.6).
     pub fn add_source(&self, id: &str, codec: VideoCodec, profile: &str) -> Result<()> {
+        self.add_source_kind(id, StreamKind::Camera, codec, profile)
+    }
+
+    /// [`add_source`](Self::add_source) for either of a participant's
+    /// streams. A content source is decoded but not shown until its
+    /// packets take the floor (§15.6); its cap is the room's
+    /// `content_max_resolution`, and a larger screen is shrunk rather
+    /// than dropped. Adding a kind the participant already sends
+    /// replaces that decoder.
+    pub fn add_source_kind(
+        &self,
+        id: &str,
+        kind: StreamKind,
+        codec: VideoCodec,
+        profile: &str,
+    ) -> Result<()> {
         if !self.participants.contains_key(id) {
             return Err(ConferenceError::Internal(format!(
                 "participant {id} is not in room {}",
@@ -859,70 +1045,345 @@ impl VideoRoom {
             .decoder(codec, &self.backend.device)
             .map_err(|e| ConferenceError::Internal(format!("no video decoder: {e}")))?;
         let mut limits = settings.limits.clone();
-        // The room's canvas is the most a source can usefully send.
-        limits.max_resolution = Resolution::new(
-            limits.max_resolution.width.max(settings.resolution.width),
-            limits.max_resolution.height.max(settings.resolution.height),
-        );
+        match kind {
+            // The room's canvas is the most a camera can usefully send.
+            StreamKind::Camera => {
+                limits.max_resolution = Resolution::new(
+                    limits.max_resolution.width.max(settings.resolution.width),
+                    limits.max_resolution.height.max(settings.resolution.height),
+                );
+            }
+            // A screen is capped on its own terms, not the meeting's.
+            StreamKind::Content => limits.max_resolution = settings.content_max_resolution,
+        }
         let source = Arc::new(VideoSource::new(
             id,
             &self.id,
+            kind,
             codec,
             profile,
             decoder,
             limits,
             rand::random(),
         ));
-        self.sources.insert(id.to_string(), source);
-        gauge!("forge_conference_video_sources").increment(1.0);
-        debug!(room = %self.id, participant = %id, %codec, "video source added");
+        if self
+            .sources
+            .insert(SourceKey::new(id, kind), source)
+            .is_none()
+        {
+            gauge!("forge_conference_video_sources").increment(1.0);
+        }
+        debug!(room = %self.id, participant = %id, %kind, %codec, "video source added");
         Ok(())
     }
 
-    /// The participant stopped sending video (re-INVITE with port 0).
+    /// The participant stopped sending from their camera (re-INVITE
+    /// with port 0).
     pub fn remove_source(&self, id: &str) {
-        if self.sources.remove(id).is_some() {
+        self.remove_source_kind(id, StreamKind::Camera)
+    }
+
+    /// The participant stopped sending one of their streams. Taking the
+    /// content source away ends a share it was carrying and clears a
+    /// host's stop, so a fresh share starts clean.
+    pub fn remove_source_kind(&self, id: &str, kind: StreamKind) {
+        if self.sources.remove(&SourceKey::new(id, kind)).is_some() {
             gauge!("forge_conference_video_sources").decrement(1.0);
-            self.set_state(id, VideoState::Off);
+            if kind == StreamKind::Content {
+                if self.holder_is(id) {
+                    self.release_floor(ContentStop::Ended);
+                }
+                if let Some(mut p) = self.participants.get_mut(id) {
+                    p.content_enabled = true;
+                }
+                self.refused_told.lock().remove(id);
+            }
+            self.set_state_kind(id, kind, VideoState::Off);
         }
     }
 
     pub fn has_source(&self, id: &str) -> bool {
-        self.sources.contains_key(id)
+        self.has_source_kind(id, StreamKind::Camera)
     }
 
-    /// Feed one RTP packet from a source. Returns the RTCP feedback (NACK,
-    /// PLI) to send back to the sender.
+    pub fn has_source_kind(&self, id: &str, kind: StreamKind) -> bool {
+        self.sources.contains_key(&SourceKey::new(id, kind))
+    }
+
+    /// Feed one RTP packet from a participant's camera. Returns the RTCP
+    /// feedback (NACK, PLI) to send back to the sender.
     pub fn push_rtp(&self, id: &str, packet: RtpPacket) -> Vec<RtcpPacket> {
+        self.push_rtp_kind(id, StreamKind::Camera, packet)
+    }
+
+    /// Feed one RTP packet from either of a participant's streams. A
+    /// content packet is the participant asking for the floor: the first
+    /// one takes it when it is free (§15.6), and while someone else
+    /// holds it the packets are dropped and the sender told once.
+    pub fn push_rtp_kind(&self, id: &str, kind: StreamKind, packet: RtpPacket) -> Vec<RtcpPacket> {
+        let key = SourceKey::new(id, kind);
+        if kind == StreamKind::Content && !self.content_admits(id) {
+            counter!("forge_conference_video_content_packets_refused_total", "room_id" => self.id.clone())
+                .increment(1);
+            return Vec::new();
+        }
         // Anyone on the passthrough fast path is served here, before the
         // decoder and off the compose clock: forwarding a packet is the
         // whole point, and a tick of latency would undo it (§5.6).
         if self.forwarders.load(Ordering::Relaxed) > 0 {
             for sub in self.subscribers.iter() {
-                if sub.forwards_from(id) {
+                if sub.forwards_from(&key) {
                     sub.send_forwarded(&packet);
                 }
             }
         }
-        match self.sources.get(id) {
+        match self.sources.get(&key) {
             Some(s) => s.push(packet, &self.backend.pool, Instant::now()),
             None => Vec::new(),
         }
     }
 
-    /// The source's decoder needs a keyframe (a new subscriber, a host
+    /// The camera's decoder needs a keyframe (a new subscriber, a host
     /// re-enabled it); the next packet carries the request.
     pub fn request_source_keyframe(&self, id: &str) {
-        if let Some(s) = self.sources.get(id) {
+        self.request_source_keyframe_kind(id, StreamKind::Camera)
+    }
+
+    pub fn request_source_keyframe_kind(&self, id: &str, kind: StreamKind) {
+        if let Some(s) = self.sources.get(&SourceKey::new(id, kind)) {
             s.request_keyframe();
         }
     }
 
+    // ---- the floor (§15.6) -------------------------------------------------
+
+    /// Who is sharing, if anyone.
+    pub fn content_holder(&self) -> Option<String> {
+        self.floor.lock().as_ref().map(|f| f.participant_id.clone())
+    }
+
+    fn holder_is(&self, id: &str) -> bool {
+        self.floor
+            .lock()
+            .as_ref()
+            .is_some_and(|f| f.participant_id == id)
+    }
+
+    /// Whether the node can afford a share; asked before every grant.
+    pub fn set_content_gate(&self, gate: Option<Arc<dyn ContentGate>>) {
+        *self.content_gate.write() = gate;
+    }
+
+    /// Ask for the floor on a participant's behalf — what a BFCP floor
+    /// request comes to (7e), and what a content packet does on its own.
+    /// Holding it already is not an error.
+    pub fn request_content(&self, id: &str) -> std::result::Result<(), ContentRefusal> {
+        self.take_floor(id)
+    }
+
+    fn take_floor(&self, id: &str) -> std::result::Result<(), ContentRefusal> {
+        if !self.settings.read().content {
+            return Err(ContentRefusal::Disabled);
+        }
+        let (enabled, remote) = match self.participants.get(id) {
+            Some(p) => (p.content_enabled, p.remote),
+            None => return Err(ContentRefusal::NoSource),
+        };
+        if !enabled {
+            return Err(ContentRefusal::ParticipantDisabled);
+        }
+        if !self.sources.contains_key(&SourceKey::content(id)) {
+            return Err(ContentRefusal::NoSource);
+        }
+        {
+            let mut floor = self.floor.lock();
+            if let Some(f) = floor.as_ref() {
+                if f.participant_id == id {
+                    return Ok(());
+                }
+                return Err(ContentRefusal::Held(f.participant_id.clone()));
+            }
+            // Under the lock, so two first packets cannot both be granted.
+            let gate = self.content_gate.read().clone();
+            if let Some(g) = gate {
+                if !g.admit(&self.id, id) {
+                    return Err(ContentRefusal::Budget);
+                }
+            }
+            *floor = Some(ContentFloor {
+                participant_id: id.to_string(),
+                since: Instant::now(),
+                remote,
+            });
+        }
+        self.refused_told.lock().clear();
+        counter!("forge_conference_video_content_started_total", "room_id" => self.id.clone())
+            .increment(1);
+        gauge!("forge_conference_video_content_rooms").increment(1.0);
+        info!(room = %self.id, presenter = %id, remote, "screen share started");
+        // Every composite changes shape: start the next one on a keyframe.
+        self.request_keyframes_for_content_change();
+        let _ = self.events.send(VideoRoomEvent::Content {
+            participant_id: id.to_string(),
+            event: ContentEvent::Started,
+        });
+        Ok(())
+    }
+
+    /// Give the floor up, whoever holds it. Returns who did.
+    fn release_floor(&self, reason: ContentStop) -> Option<String> {
+        let f = self.floor.lock().take()?;
+        self.refused_told.lock().clear();
+        counter!("forge_conference_video_content_stopped_total", "room_id" => self.id.clone(), "reason" => reason.name())
+            .increment(1);
+        gauge!("forge_conference_video_content_rooms").decrement(1.0);
+        info!(room = %self.id, presenter = %f.participant_id, %reason, "screen share stopped");
+        self.request_keyframes_for_content_change();
+        let _ = self.events.send(VideoRoomEvent::Content {
+            participant_id: f.participant_id.clone(),
+            event: ContentEvent::Stopped(reason),
+        });
+        Some(f.participant_id)
+    }
+
+    /// The participant stops sharing (a BFCP release, a track that
+    /// ended). `false` when they did not hold the floor.
+    pub fn release_content(&self, id: &str) -> bool {
+        self.holder_is(id) && self.release_floor(ContentStop::Ended).is_some()
+    }
+
+    /// A host ends the share. The presenter cannot take the floor back
+    /// by just sending until [`set_participant_content_enabled`] lets
+    /// them, or their content source is renegotiated. Returns who was
+    /// stopped.
+    ///
+    /// [`set_participant_content_enabled`]: Self::set_participant_content_enabled
+    pub fn stop_content(&self) -> Option<String> {
+        let holder = self.content_holder()?;
+        if let Some(mut p) = self.participants.get_mut(&holder) {
+            p.content_enabled = false;
+        }
+        self.release_floor(ContentStop::Host)
+    }
+
+    /// Whether a content packet from `id` goes in: they hold the floor,
+    /// or it is free and they take it. A refusal is reported once per
+    /// participant per floor, not per packet.
+    fn content_admits(&self, id: &str) -> bool {
+        if self.holder_is(id) {
+            return true;
+        }
+        match self.take_floor(id) {
+            Ok(()) => true,
+            Err(reason) => {
+                if self.refused_told.lock().insert(id.to_string()) {
+                    counter!("forge_conference_video_content_refused_total", "room_id" => self.id.clone(), "reason" => reason.name())
+                        .increment(1);
+                    debug!(room = %self.id, participant = %id, %reason, "screen share refused");
+                    let _ = self.events.send(VideoRoomEvent::Content {
+                        participant_id: id.to_string(),
+                        event: ContentEvent::Refused(reason),
+                    });
+                }
+                false
+            }
+        }
+    }
+
+    /// Once a tick: a holder whose source is gone, has failed, or has
+    /// sent nothing for the idle timeout loses the floor. Idle is judged
+    /// on packets, not frames — a slide that has not changed is still
+    /// being shared, and a sender that has stopped sending is not.
+    fn expire_content(&self, now: Instant, settings: &VideoRoomSettings) {
+        let Some(holder) = self.content_holder() else {
+            return;
+        };
+        let reason = match self.sources.get(&SourceKey::content(&holder)) {
+            None => Some(ContentStop::Ended),
+            Some(s) if s.failed() => Some(ContentStop::Failed),
+            Some(s) => match s.last_packet_age(now) {
+                Some(age) if age > settings.content_idle => Some(ContentStop::Idle),
+                _ => None,
+            },
+        };
+        if let Some(reason) = reason {
+            self.release_floor(reason);
+        }
+    }
+
+    /// Ask every encoder that shows the content — or showed it a moment
+    /// ago — for a keyframe: the picture just changed shape.
+    fn request_keyframes_for_content_change(&self) {
+        for (key, out) in self.outputs.lock().iter() {
+            if key.view == View::Cameras {
+                continue;
+            }
+            for enc in out.encoders.values() {
+                enc.wants_keyframe.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    /// The share under way, for the API.
+    pub fn content(&self) -> Option<ContentInfo> {
+        let f = self.floor.lock().clone()?;
+        let source = self.sources.get(&SourceKey::content(&f.participant_id));
+        let (codec, resolution, fps, live) = match source.as_deref() {
+            Some(s) => (
+                s.codec(),
+                s.measured_resolution(),
+                s.stats.fps.load(Ordering::Relaxed),
+                s.has_frame(),
+            ),
+            None => (VideoCodec::H264, Resolution::new(0, 0), 0, false),
+        };
+        let display_name = self
+            .participants
+            .get(&f.participant_id)
+            .map(|p| self.tile_name(&f.participant_id, &p))
+            .unwrap_or_else(|| f.participant_id.clone());
+        Some(ContentInfo {
+            participant_id: f.participant_id,
+            display_name,
+            remote: f.remote,
+            held_for: f.since.elapsed(),
+            codec,
+            resolution,
+            fps,
+            live,
+        })
+    }
+
+    pub fn content_layout(&self) -> ContentLayout {
+        self.settings.read().content_layout
+    }
+
+    /// How the composite shows a share, changeable while one is on.
+    pub fn set_content_layout(&self, layout: ContentLayout) {
+        self.settings.write().content_layout = layout;
+        self.request_keyframes_for_content_change();
+        self.emit_layout();
+    }
+
     // ---- egress -----------------------------------------------------------
 
-    /// The participant receives the composite in the given flavor.
-    /// Replaces any existing subscription.
+    /// The participant receives the room on their main video section,
+    /// in the given flavor. Replaces any existing main subscription.
     pub fn subscribe(&self, id: &str, req: SubscribeRequest) -> Result<VideoSubscription> {
+        self.subscribe_kind(id, StreamKind::Camera, req)
+    }
+
+    /// [`subscribe`](Self::subscribe) for either of a participant's
+    /// channels. A content channel (`StreamKind::Content`) shows
+    /// [`View::Content`] unless the request says otherwise, is capped at
+    /// the room's `content_max_resolution` rather than its canvas, and
+    /// is never given its owner's own share back.
+    pub fn subscribe_kind(
+        &self,
+        id: &str,
+        kind: StreamKind,
+        req: SubscribeRequest,
+    ) -> Result<VideoSubscription> {
         if !self.participants.contains_key(id) {
             return Err(ConferenceError::Internal(format!(
                 "participant {id} is not in room {}",
@@ -930,7 +1391,15 @@ impl VideoRoom {
             )));
         }
         let settings = self.settings.read().clone();
-        let cap = settings.resolution;
+        let view = req.view.unwrap_or(match kind {
+            StreamKind::Camera => View::Composite,
+            StreamKind::Content => View::Content,
+        });
+        let cap = if view == View::Content {
+            settings.content_max_resolution
+        } else {
+            settings.resolution
+        };
         let res = req
             .resolution
             .map(|r| Resolution::new(r.width.min(cap.width), r.height.min(cap.height)))
@@ -942,7 +1411,9 @@ impl VideoRoom {
         let kbps = req.max_kbps.unwrap_or_else(|| default_kbps(res)).max(1);
         let flavor = Flavor::new(req.codec, &req.profile, res, fps, kbps);
         let scope = req.scope.clone().unwrap_or_else(|| {
-            if settings.exclude_self {
+            // `exclude_self` is about the participant's own tile; a
+            // content channel has none in it.
+            if settings.exclude_self && view != View::Content {
                 OutputScope::Excluding(id.to_string())
             } else {
                 OutputScope::All
@@ -951,14 +1422,16 @@ impl VideoRoom {
         let output = OutputKey {
             scope,
             resolution: res,
+            view,
         };
 
-        self.unsubscribe(id);
+        self.unsubscribe_kind(id, kind);
 
         let wants_keyframe = self.ensure_encoder(&output, &flavor, &settings)?;
 
         let (sub, rx) = Subscriber::new(
             id,
+            kind,
             flavor.clone(),
             output,
             req.payload_type,
@@ -968,8 +1441,8 @@ impl VideoRoom {
             settings.max_payload,
         );
         let ssrc = sub.ssrc;
-        self.subscribers.insert(id.to_string(), sub);
-        debug!(room = %self.id, participant = %id, %flavor, "video subscriber added");
+        self.subscribers.insert(SourceKey::new(id, kind), sub);
+        debug!(room = %self.id, participant = %id, %kind, %view, %flavor, "video subscriber added");
         Ok(VideoSubscription {
             ssrc,
             payload_type: req.payload_type,
@@ -978,14 +1451,18 @@ impl VideoRoom {
         })
     }
 
-    /// Stop sending the composite to the participant. Drops the encoder
-    /// when it was the last subscriber of its flavor.
+    /// Stop sending the room to the participant's main section. Drops
+    /// the encoder when it was the last subscriber of its flavor.
     pub fn unsubscribe(&self, id: &str) {
-        let Some((_, sub)) = self.subscribers.remove(id) else {
+        self.unsubscribe_kind(id, StreamKind::Camera)
+    }
+
+    pub fn unsubscribe_kind(&self, id: &str, kind: StreamKind) {
+        let Some((_, sub)) = self.subscribers.remove(&SourceKey::new(id, kind)) else {
             return;
         };
         self.release_flavor(&sub.output(), &sub.flavor());
-        debug!(room = %self.id, participant = %id, "video subscriber removed");
+        debug!(room = %self.id, participant = %id, %kind, "video subscriber removed");
     }
 
     /// The encoder for a flavor on an output, created when it is new.
@@ -1011,10 +1488,15 @@ impl VideoRoom {
             enc.wants_keyframe.store(true, Ordering::Release);
             return Ok(Arc::clone(&enc.wants_keyframe));
         }
-        let es = EncoderSettings::for_flavor(
+        let mut es = EncoderSettings::for_flavor(
             flavor,
             (settings.keyframe_interval.as_secs_f64() * flavor.fps as f64).round() as u32,
         );
+        // The content channel is a document: tune the encoder for one.
+        // The composite with a document in it is mostly still faces.
+        if output.view == View::Content {
+            es = es.for_screen();
+        }
         let encoder = self
             .backend
             .registry
@@ -1060,10 +1542,16 @@ impl VideoRoom {
     /// recording is not a participant: it draws no tile, and its
     /// composite holds everyone whatever `exclude_self` says. A flavor a
     /// subscriber already watches is shared, so recording at the room's
-    /// own resolution and codec costs no extra encode.
+    /// own resolution and codec costs no extra encode. Its view is
+    /// [`View::Composite`] unless the request says otherwise, so a share
+    /// is recorded as the room's single-picture participants saw it.
     pub fn record(&self, id: &str, req: RecordRequest) -> Result<RecordingSink> {
         let settings = self.settings.read().clone();
-        let cap = settings.resolution;
+        let cap = if req.view == View::Content {
+            settings.content_max_resolution
+        } else {
+            settings.resolution
+        };
         let res = req
             .resolution
             .map(|r| Resolution::new(r.width.min(cap.width), r.height.min(cap.height)))
@@ -1077,6 +1565,7 @@ impl VideoRoom {
         let output = OutputKey {
             scope: OutputScope::All,
             resolution: res,
+            view: req.view,
         };
 
         self.stop_record(id);
@@ -1094,7 +1583,7 @@ impl VideoRoom {
             }),
         );
         gauge!("forge_conference_video_recordings").increment(1.0);
-        info!(room = %self.id, recording = %id, %flavor, "video recording started");
+        info!(room = %self.id, recording = %id, %flavor, view = %req.view, "video recording started");
         Ok(RecordingSink {
             id: id.to_string(),
             flavor,
@@ -1140,13 +1629,23 @@ impl VideoRoom {
     }
 
     pub fn has_subscriber(&self, id: &str) -> bool {
-        self.subscribers.contains_key(id)
+        self.has_subscriber_kind(id, StreamKind::Camera)
     }
 
-    /// RTCP feedback from a receiver of the composite: PLI/FIR re-key its
-    /// encoder, a NACK is answered from its cache, REMB caps its rate.
+    pub fn has_subscriber_kind(&self, id: &str, kind: StreamKind) -> bool {
+        self.subscribers.contains_key(&SourceKey::new(id, kind))
+    }
+
+    /// RTCP feedback from a receiver on their main section: PLI/FIR
+    /// re-key its encoder, a NACK is answered from its cache, REMB caps
+    /// its rate.
     pub fn handle_feedback(&self, id: &str, packet: &RtcpPacket) {
-        let Some(sub) = self.subscribers.get(id) else {
+        self.handle_feedback_kind(id, StreamKind::Camera, packet)
+    }
+
+    /// [`handle_feedback`](Self::handle_feedback) for either channel.
+    pub fn handle_feedback_kind(&self, id: &str, kind: StreamKind, packet: &RtcpPacket) {
+        let Some(sub) = self.subscribers.get(&SourceKey::new(id, kind)) else {
             return;
         };
         match packet {
@@ -1192,14 +1691,11 @@ impl VideoRoom {
             .unwrap_or_else(|| self.settings.read().layout)
     }
 
+    /// The layout the cameras are arranged in. The compose tick hands
+    /// each output the arrangement it needs, so nothing is set on the
+    /// compositors here.
     pub fn set_layout(&self, layout: Layout) {
-        {
-            let mut c = self.control.lock();
-            c.layout = Some(layout);
-        }
-        for out in self.outputs.lock().values_mut() {
-            out.compositor.set_layout(layout);
-        }
+        self.control.lock().layout = Some(layout);
         self.emit_layout();
     }
 
@@ -1220,10 +1716,6 @@ impl VideoRoom {
                 c.layout = Some(Layout::Spotlight);
             }
         }
-        let layout = self.layout();
-        for out in self.outputs.lock().values_mut() {
-            out.compositor.set_layout(layout);
-        }
         self.emit_layout();
     }
 
@@ -1233,6 +1725,7 @@ impl VideoRoom {
             layout: c.layout.unwrap_or_else(|| self.settings.read().layout),
             pinned: c.pinned.clone(),
             spotlight: c.spotlight.clone(),
+            content_layout: self.settings.read().content_layout,
         };
         drop(c);
         let _ = self.events.send(ev);
@@ -1309,50 +1802,73 @@ impl VideoRoom {
         v.into_iter().map(|(_, i)| i).collect()
     }
 
+    fn source_info(s: &VideoSource) -> VideoSourceInfo {
+        let st = &s.stats;
+        VideoSourceInfo {
+            codec: s.codec(),
+            resolution: Resolution::new(
+                st.width.load(Ordering::Relaxed),
+                st.height.load(Ordering::Relaxed),
+            ),
+            fps: st.fps.load(Ordering::Relaxed),
+            bitrate_kbps: st.bitrate_kbps.load(Ordering::Relaxed),
+            packets_received: st.packets_received.load(Ordering::Relaxed),
+            frames_decoded: st.frames_decoded.load(Ordering::Relaxed),
+            frames_lost: st.frames_lost.load(Ordering::Relaxed),
+            frames_dropped: st.frames_dropped.load(Ordering::Relaxed),
+            decode_errors: st.decode_errors.load(Ordering::Relaxed),
+            nacks_sent: st.nacks_sent.load(Ordering::Relaxed),
+            plis_sent: st.plis_sent.load(Ordering::Relaxed),
+        }
+    }
+
+    fn subscriber_info(s: &Subscriber) -> VideoSubscriberInfo {
+        let st = &s.stats;
+        VideoSubscriberInfo {
+            flavor: s.flavor(),
+            view: s.output().view,
+            ssrc: s.ssrc,
+            forwarding: s.forwarded_source(),
+            packets_sent: st.packets_sent.load(Ordering::Relaxed),
+            packets_dropped: st.packets_dropped.load(Ordering::Relaxed),
+            frames_sent: st.frames_sent.load(Ordering::Relaxed),
+            keyframes_sent: st.keyframes_sent.load(Ordering::Relaxed),
+            nacks_received: st.nacks_received.load(Ordering::Relaxed),
+            packets_retransmitted: st.packets_retransmitted.load(Ordering::Relaxed),
+            plis_received: st.plis_received.load(Ordering::Relaxed),
+            remb_kbps: st.remb_kbps.load(Ordering::Relaxed),
+        }
+    }
+
     fn participant_info(&self, id: &str, p: &Participant) -> VideoParticipantInfo {
-        let source = self.sources.get(id).map(|s| {
-            let st = &s.stats;
-            VideoSourceInfo {
-                codec: s.codec(),
-                resolution: Resolution::new(
-                    st.width.load(Ordering::Relaxed),
-                    st.height.load(Ordering::Relaxed),
-                ),
-                fps: st.fps.load(Ordering::Relaxed),
-                bitrate_kbps: st.bitrate_kbps.load(Ordering::Relaxed),
-                packets_received: st.packets_received.load(Ordering::Relaxed),
-                frames_decoded: st.frames_decoded.load(Ordering::Relaxed),
-                frames_lost: st.frames_lost.load(Ordering::Relaxed),
-                frames_dropped: st.frames_dropped.load(Ordering::Relaxed),
-                decode_errors: st.decode_errors.load(Ordering::Relaxed),
-                nacks_sent: st.nacks_sent.load(Ordering::Relaxed),
-                plis_sent: st.plis_sent.load(Ordering::Relaxed),
-            }
-        });
-        let subscription = self.subscribers.get(id).map(|s| {
-            let st = &s.stats;
-            VideoSubscriberInfo {
-                flavor: s.flavor(),
-                ssrc: s.ssrc,
-                forwarding: s.forwarded_source(),
-                packets_sent: st.packets_sent.load(Ordering::Relaxed),
-                packets_dropped: st.packets_dropped.load(Ordering::Relaxed),
-                frames_sent: st.frames_sent.load(Ordering::Relaxed),
-                keyframes_sent: st.keyframes_sent.load(Ordering::Relaxed),
-                nacks_received: st.nacks_received.load(Ordering::Relaxed),
-                packets_retransmitted: st.packets_retransmitted.load(Ordering::Relaxed),
-                plis_received: st.plis_received.load(Ordering::Relaxed),
-                remb_kbps: st.remb_kbps.load(Ordering::Relaxed),
-            }
-        });
+        let source = self
+            .sources
+            .get(&SourceKey::camera(id))
+            .map(|s| Self::source_info(&s));
+        let content = self
+            .sources
+            .get(&SourceKey::content(id))
+            .map(|s| Self::source_info(&s));
+        let subscription = self
+            .subscribers
+            .get(&SourceKey::camera(id))
+            .map(|s| Self::subscriber_info(&s));
+        let content_subscription = self
+            .subscribers
+            .get(&SourceKey::content(id))
+            .map(|s| Self::subscriber_info(&s));
         VideoParticipantInfo {
             participant_id: id.to_string(),
             state: p.state,
+            content_state: p.content_state,
             display_name: self.tile_name(id, p),
             speaking: self.speaker.lock().current() == Some(id),
+            presenting: self.holder_is(id),
             remote: p.remote,
             source,
+            content,
             subscription,
+            content_subscription,
         }
     }
 
@@ -1381,16 +1897,20 @@ impl VideoRoom {
                 flavors.sort_by(|a, b| a.flavor.cmp(&b.flavor));
                 VideoOutputInfo {
                     scope: k.scope.clone(),
+                    view: k.view,
                     resolution: k.resolution,
                     flavors,
                 }
             })
             .collect();
-        outs.sort_by(|a, b| (&a.scope, a.resolution).cmp(&(&b.scope, b.resolution)));
+        outs.sort_by(|a, b| {
+            (&a.scope, a.view, a.resolution).cmp(&(&b.scope, b.view, b.resolution))
+        });
         let encoders = outputs.values().map(|o| o.encoders.len()).sum();
         drop(outputs);
         VideoRoomStatus {
             layout: c.layout.unwrap_or(settings.layout),
+            content_layout: settings.content_layout,
             fps: self.fps(),
             target_fps: self.target_fps.load(Ordering::Relaxed),
             resolution: settings.resolution,
@@ -1398,6 +1918,7 @@ impl VideoRoom {
             spotlight: c.spotlight,
             active_speaker: self.active_speaker(),
             active_speaker_via: self.active_speaker_via(),
+            content: self.content(),
             sources: self.sources.len(),
             encoders,
             ticks: self.ticks.load(Ordering::Relaxed),
@@ -1534,6 +2055,7 @@ impl VideoRoom {
 
         // Participant states and the frames to draw.
         self.sample_fps(now);
+        self.expire_content(now, &settings);
         let mut ordered: Vec<(u64, String)> = self
             .participants
             .iter()
@@ -1543,7 +2065,7 @@ impl VideoRoom {
         let join_order: Vec<String> = ordered.into_iter().map(|(_, id)| id).collect();
 
         struct Tile {
-            id: String,
+            key: SourceKey,
             name: String,
             frame: Option<Arc<VideoFrame>>,
             speaking: bool,
@@ -1551,12 +2073,13 @@ impl VideoRoom {
             /// A peer node's tile: left out of a trunk's own composite.
             remote: bool,
         }
-        let mut tiles: HashMap<String, Tile> = HashMap::new();
+        let mut tiles: HashMap<SourceKey, Tile> = HashMap::new();
         for id in &join_order {
             let Some(p) = self.participants.get(id) else {
                 continue;
             };
-            let (frame, state) = match self.sources.get(id) {
+            let camera = SourceKey::camera(id);
+            let (frame, state) = match self.sources.get(&camera) {
                 Some(_) if !p.enabled => (None, VideoState::Disabled),
                 Some(s) if s.failed() => (None, VideoState::Failed),
                 Some(s) => match s.frame(now, settings.freeze_timeout) {
@@ -1565,49 +2088,129 @@ impl VideoRoom {
                 },
                 None => (None, VideoState::Off),
             };
+            // The shared screen has no freeze timeout: a slide that has
+            // not changed is still being shown, and the last frame is
+            // what it looks like.
+            let content = SourceKey::content(id);
+            let (content_frame, content_state) = match self.sources.get(&content) {
+                Some(_) if !p.content_enabled => (None, VideoState::Disabled),
+                Some(s) if s.failed() => (None, VideoState::Failed),
+                Some(s) => match s.frame(now, Duration::MAX) {
+                    Some(f) => (Some(f), VideoState::On),
+                    None => (None, VideoState::Lost),
+                },
+                None => (None, VideoState::Off),
+            };
             let name = self.tile_name(id, &p);
             let remote = p.remote;
             drop(p);
-            self.set_state(id, state);
+            self.set_state_kind(id, StreamKind::Camera, state);
+            self.set_state_kind(id, StreamKind::Content, content_state);
             tiles.insert(
-                id.clone(),
+                camera.clone(),
                 Tile {
-                    id: id.clone(),
-                    name,
+                    key: camera,
+                    name: name.clone(),
                     frame,
                     speaking: speaker.as_deref() == Some(id.as_str()),
                     muted: muted.get(id).copied().unwrap_or(false),
                     remote,
                 },
             );
+            if let Some(f) = content_frame {
+                tiles.insert(
+                    content.clone(),
+                    Tile {
+                        key: content,
+                        name,
+                        frame: Some(f),
+                        speaking: false,
+                        muted: false,
+                        remote,
+                    },
+                );
+            }
         }
+        // The share on show: the floor holder's screen, once a frame of
+        // it has been decoded. Before that the composites carry on as
+        // they were rather than draw an empty content tile.
+        let content: Option<(SourceKey, bool)> = self
+            .content_holder()
+            .map(|h| SourceKey::content(&h))
+            .and_then(|k| tiles.get(&k).map(|t| (k.clone(), t.remote)));
+        let holder: Option<String> = content.as_ref().map(|(k, _)| k.participant.clone());
 
         let layout = self.layout();
         let control = self.control.lock().clone();
-        let order = order_tiles(
+        let has_video = |id: &str| {
+            tiles
+                .get(&SourceKey::camera(id))
+                .map(|t| t.frame.is_some())
+                .unwrap_or(false)
+        };
+        let max_tiles = settings.max_tiles.clamp(1, 16);
+        let camera_order = order_tiles(
             layout,
             &join_order,
             &recent,
             speaker.as_deref(),
             control.pinned.as_deref(),
             control.spotlight.as_deref(),
-            |id| tiles.get(id).map(|t| t.frame.is_some()).unwrap_or(false),
-            settings.max_tiles.clamp(1, 16),
+            &has_video,
+            max_tiles,
         );
+        // The strip beside a shared screen: whoever spoke last.
+        let strip_order = if content.is_some() {
+            order_tiles(
+                Layout::Presentation,
+                &join_order,
+                &recent,
+                speaker.as_deref(),
+                control.pinned.as_deref(),
+                control.spotlight.as_deref(),
+                &has_video,
+                max_tiles,
+            )
+        } else {
+            Vec::new()
+        };
+
+        // What each output shows this tick.
+        let keys: BTreeSet<OutputKey> = self
+            .subscribers
+            .iter()
+            .map(|s| s.output())
+            .chain(self.recorders.iter().map(|r| r.output.clone()))
+            .collect();
+        let plans: HashMap<OutputKey, Plan> = keys
+            .into_iter()
+            .map(|key| {
+                let plan = plan_output(
+                    &key,
+                    layout,
+                    settings.content_layout,
+                    &camera_order,
+                    &strip_order,
+                    content.as_ref(),
+                    |k| tiles.get(k).map(|t| t.remote),
+                );
+                (key, plan)
+            })
+            .collect();
 
         // The passthrough fast path (§5.6): a subscriber whose view is a
         // single source it can already decode is served that source's
         // own packets, and an output nobody composes is not rendered or
         // encoded at all — which is where the saving is.
-        let with_frames: HashSet<String> = tiles
+        let with_frames: HashSet<SourceKey> = tiles
             .iter()
             .filter(|(_, t)| t.frame.is_some())
-            .map(|(id, _)| id.clone())
+            .map(|(k, _)| k.clone())
             .collect();
         if settings.ladder {
             self.walk_the_ladder(&settings, now);
         }
-        let composing = self.decide_forwarding(&settings, layout, &order, &with_frames);
+        let composing = self.decide_forwarding(&settings, &plans, &with_frames);
 
         // Render each output and encode each flavor.
         let pts = (now.duration_since(self.started).as_secs_f64() * 90_000.0) as u32;
@@ -1626,16 +2229,29 @@ impl VideoRoom {
             if !composing.contains(key) {
                 continue;
             }
-            let sources: Vec<TileSource<'_>> = order
+            let Some(plan) = plans.get(key) else {
+                continue;
+            };
+            // A content channel with nothing shared: nothing is sent.
+            if plan.tiles.is_empty() {
+                continue;
+            }
+            out.compositor.set_layout(plan.layout);
+            let sources: Vec<TileSource<'_>> = plan
+                .tiles
                 .iter()
-                .filter_map(|id| tiles.get(id))
-                .filter(|t| key.scope.admits(&t.id, t.remote))
+                .filter_map(|k| tiles.get(k))
                 .map(|t| TileSource {
-                    id: &t.id,
+                    id: &t.key.participant,
                     name: &t.name,
                     frame: t.frame.as_deref(),
                     speaking: t.speaking,
                     muted: t.muted,
+                    kind: if t.key.is_content() {
+                        TileKind::Content
+                    } else {
+                        TileKind::Camera
+                    },
                 })
                 .collect();
             if let Err(e) = out.compositor.render(&sources, pts) {
@@ -1651,6 +2267,9 @@ impl VideoRoom {
                     .subscribers
                     .iter()
                     .filter(|s| s.watches(key, &enc.flavor))
+                    // A presenter's own content channel gets nothing:
+                    // what they are sharing is already on their screen.
+                    .filter(|s| !(key.view == View::Content && Some(&s.id) == holder.as_ref()))
                     .map(|s| Arc::clone(s.value()))
                     .collect();
                 let recorders: Vec<(String, Arc<RecorderTap>)> = self
@@ -1707,15 +2326,38 @@ impl VideoRoom {
     /// A move is invisible to signaling: same SSRC, same payload type,
     /// the same sequence — the receiver sees a resolution change, which
     /// every decoder handles, and a keyframe to start it.
+    ///
+    /// A content channel is not on this ladder: text at 360p is useless.
+    /// It moves in frame rate instead (§15.6), and only in resolution
+    /// when the room sheds it, last of all.
     fn walk_the_ladder(&self, settings: &VideoRoomSettings, now: Instant) {
+        let fps_moves: Vec<(SourceKey, u32)> = self
+            .subscribers
+            .iter()
+            .filter(|s| s.output().view == View::Content && s.forwarded_source().is_none())
+            .filter_map(|s| {
+                let fps = s.fps_move(
+                    settings.fps,
+                    settings.ladder_policy,
+                    settings.ladder_down_after,
+                    settings.ladder_up_after,
+                    now,
+                )?;
+                Some((Subscriber::key(s.value()), fps))
+            })
+            .collect();
+        for (key, fps) in fps_moves {
+            self.move_to_fps(&key, fps, settings);
+        }
+
         let ladder = Ladder::for_room(settings.resolution);
         if ladder.rungs().len() < 2 {
             return;
         }
-        let moves: Vec<(String, Rung)> = self
+        let moves: Vec<(SourceKey, Rung)> = self
             .subscribers
             .iter()
-            .filter(|s| s.forwarded_source().is_none())
+            .filter(|s| s.output().view != View::Content && s.forwarded_source().is_none())
             .filter_map(|s| {
                 let rung = s.ladder_move(
                     &ladder,
@@ -1725,13 +2367,13 @@ impl VideoRoom {
                     now,
                 )?;
                 let output = s.output();
-                let cap = self.cap_for(&output.scope, &ladder);
+                let cap = self.cap_for(&ShedKey::of(&output), &ladder);
                 let rung = clamp_to_cap(rung, output.resolution, cap)?;
-                Some((s.id.clone(), rung))
+                Some((Subscriber::key(s.value()), rung))
             })
             .collect();
-        for (id, rung) in moves {
-            self.move_to_rung(&id, rung, settings);
+        for (key, rung) in moves {
+            self.move_to_rung(&key, rung, settings);
         }
     }
 
@@ -1742,6 +2384,8 @@ impl VideoRoom {
     /// expensive composite should degrade that composite: the largest
     /// output goes down a rung, then the next largest, and only when
     /// every output is at the bottom does the clock take the frame rate.
+    /// The content channel goes last of all (§15.6): a blurred slide is
+    /// worse than a slow one.
     ///
     /// The rung becomes a *ceiling* on the scope rather than a one-off
     /// move, or the ladder would put the subscribers straight back up on
@@ -1750,35 +2394,31 @@ impl VideoRoom {
     /// Returns whether anything was shed.
     fn shed_one(&self) -> bool {
         let settings = self.settings.read().clone();
-        let ladder = Ladder::for_room(settings.resolution);
-        if ladder.rungs().len() < 2 {
-            return false;
-        }
-
-        let held: Vec<(OutputScope, Rung)> = self
-            .live_scopes()
+        let held: Vec<(ShedKey, Rung, Option<Rung>)> = self
+            .live_shed_keys()
             .into_iter()
-            .map(|scope| {
-                let at = self.cap_for(&scope, &ladder);
-                (scope, at)
+            .map(|key| {
+                let ladder = self.ladder_for(&key, &settings);
+                let at = self.cap_for(&key, &ladder);
+                (key, at, ladder.below(at))
             })
             .collect();
-        let Some((scope, from, to)) = next_to_shed(&held, &ladder) else {
+        let Some((key, from, to)) = next_to_shed(&held) else {
             return false;
         };
 
-        self.shed_caps.insert(scope.clone(), to);
-        self.apply_cap(&scope, to, &settings);
+        self.shed_caps.insert(key.clone(), to);
+        self.apply_cap(&key, to, &settings);
         counter!("forge_conference_video_shed_total", "room_id" => self.id.clone()).increment(1);
         warn!(
             room = %self.id,
-            output = %scope_label(&scope),
+            output = %shed_label(&key),
             from = %from.resolution,
             to = %to.resolution,
             "video room is overrunning; dropped an output a rung"
         );
         let _ = self.events.send(VideoRoomEvent::Shed {
-            output: scope_label(&scope),
+            output: shed_label(&key),
             from: from.resolution,
             to: to.resolution,
         });
@@ -1795,106 +2435,149 @@ impl VideoRoom {
     /// Returns whether anything was given back.
     fn restore_one(&self) -> bool {
         let settings = self.settings.read().clone();
-        let ladder = Ladder::for_room(settings.resolution);
-
-        let caps: Vec<(OutputScope, Rung)> = self
+        let caps: Vec<(ShedKey, Rung, Option<Rung>)> = self
             .shed_caps
             .iter()
-            .map(|e| (e.key().clone(), *e.value()))
+            .map(|e| {
+                let ladder = self.ladder_for(e.key(), &settings);
+                (e.key().clone(), *e.value(), ladder.above(*e.value()))
+            })
             .collect();
-        let Some((scope, cap, above)) = next_to_restore(&caps, &ladder) else {
+        let Some((key, cap, above)) = next_to_restore(&caps) else {
             return false;
         };
         let Some(up) = above else {
             // Capped at the top already: nothing to give back, and the
             // entry is only noise.
-            self.shed_caps.remove(&scope);
+            self.shed_caps.remove(&key);
             return false;
         };
 
-        if up == ladder.top() {
-            self.shed_caps.remove(&scope);
+        if up == self.ladder_for(&key, &settings).top() {
+            self.shed_caps.remove(&key);
         } else {
-            self.shed_caps.insert(scope.clone(), up);
+            self.shed_caps.insert(key.clone(), up);
         }
         // With the ladder on, raising the ceiling is enough: `walk_the_ladder`
         // moves each subscriber up as its own link allows, and one whose link
         // cannot take the higher rung stays where it is. With the ladder off
-        // there is no per-link judgement to wait for, so move them now.
-        if !settings.ladder {
-            self.apply_cap(&scope, up, &settings);
+        // there is no per-link judgement to wait for, so move them now. A
+        // content channel is never walked in resolution, so it is moved now
+        // either way.
+        if !settings.ladder || key.view == View::Content {
+            self.apply_cap(&key, up, &settings);
         }
         info!(
             room = %self.id,
-            output = %scope_label(&scope),
+            output = %shed_label(&key),
             from = %cap.resolution,
             to = %up.resolution,
             "video room is keeping up again; gave an output a rung back"
         );
         let _ = self.events.send(VideoRoomEvent::Shed {
-            output: scope_label(&scope),
+            output: shed_label(&key),
             from: cap.resolution,
             to: up.resolution,
         });
         true
     }
 
-    /// Every scope some subscriber is watching.
-    fn live_scopes(&self) -> Vec<OutputScope> {
-        let mut scopes: Vec<OutputScope> = self
-            .subscribers
+    /// Every (scope, view) some subscriber is watching.
+    fn live_shed_keys(&self) -> Vec<ShedKey> {
+        self.subscribers
             .iter()
-            .map(|s| s.output().scope)
-            .collect::<std::collections::BTreeSet<_>>()
+            .map(|s| ShedKey::of(&s.output()))
+            .collect::<BTreeSet<_>>()
             .into_iter()
-            .collect();
-        scopes.sort();
-        scopes
+            .collect()
+    }
+
+    /// The ladder an output climbs: the room's, or the content cap's.
+    fn ladder_for(&self, key: &ShedKey, settings: &VideoRoomSettings) -> Ladder {
+        Ladder::for_room(if key.view == View::Content {
+            settings.content_max_resolution
+        } else {
+            settings.resolution
+        })
     }
 
     /// The rung a scope is currently held at: its cap, or the ladder's top.
-    fn cap_for(&self, scope: &OutputScope, ladder: &Ladder) -> Rung {
+    fn cap_for(&self, key: &ShedKey, ladder: &Ladder) -> Rung {
         self.shed_caps
-            .get(scope)
+            .get(key)
             .map(|c| *c)
             .unwrap_or_else(|| ladder.top())
     }
 
-    /// Move every subscriber of `scope` that is above `cap` down onto it.
-    fn apply_cap(&self, scope: &OutputScope, cap: Rung, settings: &VideoRoomSettings) {
-        let ids: Vec<String> = self
+    /// Move every subscriber of `key` that is above `cap` down onto it
+    /// (or, for a content channel being restored, up to it).
+    fn apply_cap(&self, key: &ShedKey, cap: Rung, settings: &VideoRoomSettings) {
+        let subs: Vec<SourceKey> = self
             .subscribers
             .iter()
-            .filter(|s| &s.output().scope == scope)
-            .filter(|s| s.output().resolution.height > cap.resolution.height)
-            .map(|s| s.id.clone())
+            .filter(|s| ShedKey::of(&s.output()) == *key)
+            .filter(|s| {
+                let h = s.output().resolution.height;
+                if key.view == View::Content {
+                    h != cap.resolution.height
+                } else {
+                    h > cap.resolution.height
+                }
+            })
+            .map(|s| Subscriber::key(s.value()))
             .collect();
-        for id in ids {
-            self.move_to_rung(&id, cap, settings);
+        for sub in subs {
+            self.move_to_rung(&sub, cap, settings);
         }
     }
 
     /// Put one subscriber on another rung: a flavor at that size and
     /// rate, the output that goes with it, an encoder for it, and the
     /// old flavor released if nobody is left on it.
-    fn move_to_rung(&self, id: &str, rung: Rung, settings: &VideoRoomSettings) {
-        let Some(sub) = self.subscribers.get(id).map(|s| Arc::clone(&s)) else {
+    fn move_to_rung(&self, key: &SourceKey, rung: Rung, settings: &VideoRoomSettings) {
+        let Some(sub) = self.subscribers.get(key).map(|s| Arc::clone(&s)) else {
             return;
         };
         let was = sub.flavor();
         let flavor = Flavor::new(was.codec, &was.profile, rung.resolution, was.fps, rung.kbps);
-        if flavor == was {
-            return;
-        }
         let old_output = sub.output();
         let output = OutputKey {
             scope: old_output.scope.clone(),
             resolution: rung.resolution,
+            view: old_output.view,
         };
+        self.move_to_flavor(&sub, flavor, output, settings, "ladder rungs");
+    }
+
+    /// Put a content channel on another frame rate (§15.6): the same
+    /// picture, fewer of them.
+    fn move_to_fps(&self, key: &SourceKey, fps: u32, settings: &VideoRoomSettings) {
+        let Some(sub) = self.subscribers.get(key).map(|s| Arc::clone(&s)) else {
+            return;
+        };
+        let was = sub.flavor();
+        let flavor = Flavor::new(was.codec, &was.profile, was.resolution, fps, was.max_kbps);
+        let output = sub.output();
+        self.move_to_flavor(&sub, flavor, output, settings, "frame rates");
+    }
+
+    fn move_to_flavor(
+        &self,
+        sub: &Arc<Subscriber>,
+        flavor: Flavor,
+        output: OutputKey,
+        settings: &VideoRoomSettings,
+        what: &str,
+    ) {
+        let was = sub.flavor();
+        if flavor == was {
+            return;
+        }
+        let old_output = sub.output();
         // The encoder has to exist before anyone is pointed at it, or a
         // tick could find a subscriber with nothing to send it.
         if let Err(e) = self.ensure_encoder(&output, &flavor, settings) {
-            warn!(room = %self.id, subscriber = %id, %flavor, error = %e, "could not open the encoder for the new rung");
+            warn!(room = %self.id, subscriber = %sub.key(), %flavor, error = %e, "could not open the encoder for the move");
             return;
         }
         sub.move_to(flavor.clone(), output);
@@ -1904,11 +2587,11 @@ impl VideoRoom {
             .increment(1);
         debug!(
             room = %self.id,
-            subscriber = %id,
+            subscriber = %sub.key(),
             from = %was,
             to = %flavor,
             remb_kbps = sub.remb_kbps(),
-            "video subscriber moved between ladder rungs"
+            "video subscriber moved between {what}"
         );
     }
 
@@ -1920,24 +2603,43 @@ impl VideoRoom {
     /// exactly one source with a live frame and that source's stream is
     /// something the subscriber can already decode: same codec, a
     /// profile forwardable to its own, and a picture no larger than it
-    /// asked for. Anything else — two tiles, a codec mismatch, a room
-    /// with `passthrough` off — is composed as before.
+    /// asked for. A lone camera is forwarded where the passthrough mode
+    /// allows it for the layout; a lone shared screen is forwarded under
+    /// any mode but `Off`, since there is no banner on it to lose
+    /// (§15.6). Anything else — two tiles, a codec mismatch — is
+    /// composed as before.
     fn decide_forwarding(
         &self,
         settings: &VideoRoomSettings,
-        layout: Layout,
-        order: &[String],
-        with_frames: &HashSet<String>,
+        plans: &HashMap<OutputKey, Plan>,
+        with_frames: &HashSet<SourceKey>,
     ) -> HashSet<OutputKey> {
         let mut composing: HashSet<OutputKey> = HashSet::new();
         let mut forwarding = 0u32;
         for sub in self.subscribers.iter() {
-            let sole = settings
-                .passthrough
-                .allows(layout)
-                .then(|| self.sole_source(&sub.output(), order, with_frames))
-                .flatten()
-                .filter(|source| self.forwardable(source, &sub.flavor()));
+            let key = sub.output();
+            let Some(plan) = plans.get(&key) else {
+                sub.stop_forwarding();
+                continue;
+            };
+            // A presenter's own content channel is sent nothing at all.
+            if key.view == View::Content
+                && plan
+                    .tiles
+                    .iter()
+                    .any(|t| t.is_content() && t.participant == sub.id)
+            {
+                sub.stop_forwarding();
+                continue;
+            }
+            let sole = sole_source(&plan.tiles, with_frames).filter(|source| {
+                let allowed = if source.is_content() {
+                    settings.passthrough != PassthroughMode::Off
+                } else {
+                    settings.passthrough.allows(plan.layout)
+                };
+                allowed && self.forwardable(source, &sub.flavor())
+            });
             match sole {
                 Some(source) => {
                     let ssrc = self
@@ -1949,7 +2651,7 @@ impl VideoRoom {
                     // SSRC to follow yet.
                     if ssrc == 0 {
                         sub.stop_forwarding();
-                        composing.insert(sub.output());
+                        composing.insert(key);
                         continue;
                     }
                     if sub.start_forwarding(&source, ssrc) {
@@ -1961,7 +2663,7 @@ impl VideoRoom {
                 }
                 None => {
                     sub.stop_forwarding();
-                    composing.insert(sub.output());
+                    composing.insert(key);
                 }
             }
         }
@@ -1973,34 +2675,9 @@ impl VideoRoom {
         composing
     }
 
-    /// The one source an output's composite would show, when there is
-    /// exactly one tile with a live frame in it.
-    fn sole_source(
-        &self,
-        output: &OutputKey,
-        order: &[String],
-        with_frames: &HashSet<String>,
-    ) -> Option<String> {
-        let mut only = None;
-        for id in order {
-            if !with_frames.contains(id) {
-                continue;
-            }
-            let remote = self.participants.get(id).is_some_and(|p| p.remote);
-            if !output.scope.admits(id, remote) {
-                continue;
-            }
-            if only.is_some() {
-                return None;
-            }
-            only = Some(id.clone());
-        }
-        only
-    }
-
     /// Whether a source's own stream is something a subscriber of this
     /// flavor can decode as it stands.
-    fn forwardable(&self, source: &str, flavor: &Flavor) -> bool {
+    fn forwardable(&self, source: &SourceKey, flavor: &Flavor) -> bool {
         let Some(s) = self.sources.get(source) else {
             return false;
         };
@@ -2046,22 +2723,102 @@ impl VideoRoom {
         *s = (now, next);
     }
 
-    fn set_state(&self, id: &str, state: VideoState) {
+    fn set_state_kind(&self, id: &str, kind: StreamKind, state: VideoState) {
         let changed = match self.participants.get_mut(id) {
-            Some(mut p) if p.state != state => {
-                p.state = state;
-                true
+            Some(mut p) => {
+                let slot = match kind {
+                    StreamKind::Camera => &mut p.state,
+                    StreamKind::Content => &mut p.content_state,
+                };
+                if *slot != state {
+                    *slot = state;
+                    true
+                } else {
+                    false
+                }
             }
-            _ => false,
+            None => false,
         };
         if changed {
-            debug!(room = %self.id, participant = %id, state = state.name(), "participant video state");
+            debug!(room = %self.id, participant = %id, %kind, state = state.name(), "participant video state");
             let _ = self.events.send(VideoRoomEvent::ParticipantState {
                 participant_id: id.to_string(),
+                kind,
                 state,
             });
         }
     }
+}
+
+/// What one output shows this tick: the arrangement and the tiles in it.
+struct Plan {
+    layout: Layout,
+    tiles: Vec<SourceKey>,
+}
+
+/// The tiles an output draws, given its view and whether a screen is
+/// being shared (§15.6). `remote_of` says whether a tile is a peer's, or
+/// `None` for one that does not exist.
+fn plan_output(
+    key: &OutputKey,
+    layout: Layout,
+    content_layout: ContentLayout,
+    camera_order: &[String],
+    strip_order: &[String],
+    content: Option<&(SourceKey, bool)>,
+    remote_of: impl Fn(&SourceKey) -> Option<bool>,
+) -> Plan {
+    let cameras = |order: &[String]| -> Vec<SourceKey> {
+        order
+            .iter()
+            .map(|id| SourceKey::camera(id))
+            .filter(|k| remote_of(k).is_some_and(|remote| key.scope.admits(&k.participant, remote)))
+            .collect()
+    };
+    let content = content
+        .filter(|(_, remote)| key.scope.admits_content(*remote))
+        .map(|(k, _)| k.clone());
+    match (key.view, content) {
+        (View::Cameras, _) | (View::Composite, None) => Plan {
+            layout,
+            tiles: cameras(camera_order),
+        },
+        (View::Content, None) => Plan {
+            layout: Layout::Spotlight,
+            tiles: Vec::new(),
+        },
+        (View::Content, Some(c)) => Plan {
+            layout: Layout::Spotlight,
+            tiles: vec![c],
+        },
+        (View::Composite, Some(c)) => match content_layout {
+            ContentLayout::ContentOnly => Plan {
+                layout: Layout::Spotlight,
+                tiles: vec![c],
+            },
+            ContentLayout::Presentation => {
+                let mut tiles = vec![c];
+                tiles.extend(cameras(strip_order));
+                Plan {
+                    layout: Layout::Presentation,
+                    tiles,
+                }
+            }
+        },
+    }
+}
+
+/// The one source an output's composite would show, when there is
+/// exactly one tile with a live frame in it.
+fn sole_source(tiles: &[SourceKey], with_frames: &HashSet<SourceKey>) -> Option<SourceKey> {
+    let mut only = None;
+    for k in tiles.iter().filter(|k| with_frames.contains(k)) {
+        if only.is_some() {
+            return None;
+        }
+        only = Some(k.clone());
+    }
+    only
 }
 
 impl Drop for VideoRoom {
@@ -2087,7 +2844,10 @@ impl std::fmt::Debug for VideoRoom {
 /// swapped in when it would fall off the end; active speaker first then
 /// the strip by recency of speech; spotlight and PiP built around the
 /// spotlit (or pinned, or speaking) participant. A pinned participant
-/// takes the first tile in every layout.
+/// takes the first tile in every layout. For a presentation the order
+/// is the strip beside the shared screen — the active-speaker order,
+/// one slot shorter, since the screen takes the first — and the caller
+/// puts the content in front of it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn order_tiles(
     layout: Layout,
@@ -2137,20 +2897,26 @@ pub(crate) fn order_tiles(
             }
             v
         }
-        Layout::ActiveSpeaker => {
+        Layout::ActiveSpeaker | Layout::Presentation => {
+            let slots = if layout == Layout::Presentation {
+                cap.saturating_sub(1)
+            } else {
+                cap
+            };
             let first = pinned.or(speaker).or(by_recency.first().copied());
             let mut v: Vec<&str> = Vec::new();
             if let Some(f) = first {
                 v.push(f);
             }
             for id in &by_recency {
-                if v.len() >= cap {
+                if v.len() >= slots {
                     break;
                 }
                 if !v.contains(id) {
                     v.push(id);
                 }
             }
+            v.truncate(slots);
             v
         }
         Layout::Spotlight => {
@@ -2197,53 +2963,124 @@ mod tests {
         ladder.rung_for(Resolution::new(height * 16 / 9, height))
     }
 
+    fn key(scope: OutputScope, view: View) -> ShedKey {
+        ShedKey { scope, view }
+    }
+
+    /// What `shed_one` hands `next_to_shed`: each live output, the rung
+    /// it is held at, and the one below it on its ladder.
+    fn held(l: &Ladder, v: &[(ShedKey, u32)]) -> Vec<(ShedKey, Rung, Option<Rung>)> {
+        v.iter()
+            .map(|(k, h)| (k.clone(), at(l, *h), l.below(at(l, *h))))
+            .collect()
+    }
+
+    /// What `restore_one` hands `next_to_restore`: each cap and the rung
+    /// above it.
+    fn caps(l: &Ladder, v: &[(ShedKey, u32)]) -> Vec<(ShedKey, Rung, Option<Rung>)> {
+        v.iter()
+            .map(|(k, h)| (k.clone(), at(l, *h), l.above(at(l, *h))))
+            .collect()
+    }
+
     #[test]
     fn shedding_takes_the_largest_output_first_then_the_next() {
         let l = ladder();
-        let held = vec![
-            (OutputScope::LocalOnly, at(&l, 360)),
-            (OutputScope::All, at(&l, 1080)),
-            (OutputScope::Excluding("a".into()), at(&l, 720)),
-        ];
+        let h = held(
+            &l,
+            &[
+                (key(OutputScope::LocalOnly, View::Composite), 360),
+                (key(OutputScope::All, View::Composite), 1080),
+                (
+                    key(OutputScope::Excluding("a".into()), View::Composite),
+                    720,
+                ),
+            ],
+        );
         // The 1080p one goes first, down one rung.
-        let (scope, from, to) = next_to_shed(&held, &l).expect("something to shed");
-        assert_eq!(scope, OutputScope::All);
+        let (k, from, to) = next_to_shed(&h).expect("something to shed");
+        assert_eq!(k.scope, OutputScope::All);
         assert_eq!(from.resolution.height, 1080);
         assert_eq!(to.resolution.height, 720);
 
         // With that one at 720 the next largest is picked, and the tie
         // between the two 720s is settled the same way every time.
-        let held = vec![
-            (OutputScope::LocalOnly, at(&l, 360)),
-            (OutputScope::All, at(&l, 720)),
-            (OutputScope::Excluding("a".into()), at(&l, 720)),
-        ];
-        let first = next_to_shed(&held, &l).expect("something to shed");
-        let again = next_to_shed(&held, &l).expect("something to shed");
+        let h = held(
+            &l,
+            &[
+                (key(OutputScope::LocalOnly, View::Composite), 360),
+                (key(OutputScope::All, View::Composite), 720),
+                (
+                    key(OutputScope::Excluding("a".into()), View::Composite),
+                    720,
+                ),
+            ],
+        );
+        let first = next_to_shed(&h).expect("something to shed");
+        let again = next_to_shed(&h).expect("something to shed");
         assert_eq!(first.0, again.0, "the choice is deterministic");
         assert_eq!(first.1.resolution.height, 720);
     }
 
     #[test]
+    fn the_content_channel_is_shed_last() {
+        let l = ladder();
+        // A 1080p content channel beside a 360p composite: the composite
+        // still goes first, though it is the smaller picture.
+        let h = held(
+            &l,
+            &[
+                (key(OutputScope::All, View::Content), 1080),
+                (key(OutputScope::All, View::Composite), 360),
+            ],
+        );
+        let (k, _, _) = next_to_shed(&h).expect("something to shed");
+        assert_eq!(k.view, View::Composite);
+        // Only once every other output is at the bottom does the content
+        // give up a rung.
+        let h = held(
+            &l,
+            &[
+                (key(OutputScope::All, View::Content), 1080),
+                (key(OutputScope::All, View::Composite), 180),
+            ],
+        );
+        let (k, from, to) = next_to_shed(&h).expect("the content, finally");
+        assert_eq!(k.view, View::Content);
+        assert_eq!((from.resolution.height, to.resolution.height), (1080, 720));
+    }
+
+    #[test]
     fn shedding_stops_when_every_output_is_at_the_bottom() {
         let l = ladder();
-        let held = vec![
-            (OutputScope::All, at(&l, 180)),
-            (OutputScope::LocalOnly, at(&l, 180)),
-        ];
-        assert_eq!(next_to_shed(&held, &l), None, "the clock takes over here");
-        assert_eq!(next_to_shed(&[], &l), None, "a room with no subscribers");
+        let h = held(
+            &l,
+            &[
+                (key(OutputScope::All, View::Composite), 180),
+                (key(OutputScope::LocalOnly, View::Composite), 180),
+                (key(OutputScope::All, View::Content), 180),
+            ],
+        );
+        assert_eq!(next_to_shed(&h), None, "the clock takes over here");
+        assert_eq!(next_to_shed(&[]), None, "a room with no subscribers");
     }
 
     #[test]
     fn restoring_takes_the_worst_off_output_first() {
         let l = ladder();
-        let caps = vec![
-            (OutputScope::All, at(&l, 720)),
-            (OutputScope::LocalOnly, at(&l, 180)),
-        ];
-        let (scope, from, up) = next_to_restore(&caps, &l).expect("something to restore");
-        assert_eq!(scope, OutputScope::LocalOnly, "the smallest picture first");
+        let c = caps(
+            &l,
+            &[
+                (key(OutputScope::All, View::Composite), 720),
+                (key(OutputScope::LocalOnly, View::Composite), 180),
+            ],
+        );
+        let (k, from, up) = next_to_restore(&c).expect("something to restore");
+        assert_eq!(
+            k.scope,
+            OutputScope::LocalOnly,
+            "the smallest picture first"
+        );
         assert_eq!(from.resolution.height, 180);
         assert_eq!(up.expect("a rung above").resolution.height, 360);
     }
@@ -2251,45 +3088,45 @@ mod tests {
     #[test]
     fn restoring_reports_a_cap_that_is_already_at_the_top() {
         let l = ladder();
-        assert_eq!(next_to_restore(&[], &l), None, "nothing shed");
-        let caps = vec![(OutputScope::All, at(&l, 1080))];
-        let (_, _, up) = next_to_restore(&caps, &l).expect("an entry");
+        assert_eq!(next_to_restore(&[]), None, "nothing shed");
+        let c = caps(&l, &[(key(OutputScope::All, View::Composite), 1080)]);
+        let (_, _, up) = next_to_restore(&c).expect("an entry");
         assert_eq!(up, None, "so the caller can drop the stale cap");
     }
 
     #[test]
     fn shedding_and_restoring_walk_the_same_path_in_reverse() {
         let l = ladder();
-        let mut caps = vec![
-            (OutputScope::All, at(&l, 1080)),
-            (OutputScope::LocalOnly, at(&l, 1080)),
+        let mut state = vec![
+            (key(OutputScope::All, View::Composite), 1080),
+            (key(OutputScope::LocalOnly, View::Composite), 1080),
         ];
         // Shed until there is nothing left, remembering the order.
         let mut down = Vec::new();
-        while let Some((scope, _, to)) = next_to_shed(&caps, &l) {
-            down.push((scope.clone(), to));
-            for entry in caps.iter_mut() {
-                if entry.0 == scope {
-                    entry.1 = to;
+        while let Some((k, _, to)) = next_to_shed(&held(&l, &state)) {
+            down.push((k.clone(), to));
+            for entry in state.iter_mut() {
+                if entry.0 == k {
+                    entry.1 = to.resolution.height;
                 }
             }
         }
         assert_eq!(down.len(), 6, "two outputs, three rungs each to give up");
-        assert!(caps.iter().all(|(_, r)| r.resolution.height == 180));
+        assert!(state.iter().all(|(_, h)| *h == 180));
 
         // Restore until everything is back at the top.
         let mut steps = 0;
-        while let Some((scope, _, Some(up))) = next_to_restore(&caps, &l) {
+        while let Some((k, _, Some(up))) = next_to_restore(&caps(&l, &state)) {
             steps += 1;
-            for entry in caps.iter_mut() {
-                if entry.0 == scope {
-                    entry.1 = up;
+            for entry in state.iter_mut() {
+                if entry.0 == k {
+                    entry.1 = up.resolution.height;
                 }
             }
             assert!(steps <= 6, "restoring must terminate");
         }
         assert_eq!(steps, 6, "everything given back, one rung at a time");
-        assert!(caps.iter().all(|(_, r)| r.resolution.height == 1080));
+        assert!(state.iter().all(|(_, h)| *h == 1080));
     }
 
     #[test]
@@ -2332,6 +3169,139 @@ mod tests {
         assert_eq!(
             scope_label(&OutputScope::Excluding("alice".into())),
             "excluding:alice"
+        );
+        assert_eq!(shed_label(&key(OutputScope::All, View::Composite)), "all");
+        assert_eq!(
+            shed_label(&key(OutputScope::All, View::Content)),
+            "all:content"
+        );
+        assert_eq!(
+            shed_label(&key(OutputScope::LocalOnly, View::Cameras)),
+            "local-only:cameras"
+        );
+    }
+
+    #[test]
+    fn a_presentation_orders_the_strip_beside_the_screen() {
+        let join = ids(&["a", "b", "c", "d", "e", "f", "g"]);
+        let recent = ids(&["c", "a"]);
+        // Five slots beside the screen, by recency then join order.
+        let got = order_tiles(
+            Layout::Presentation,
+            &join,
+            &recent,
+            Some("c"),
+            None,
+            None,
+            |_| true,
+            16,
+        );
+        assert_eq!(got, ids(&["c", "a", "b", "d", "e"]));
+        // A room capped at one tile shows the screen alone.
+        let got = order_tiles(
+            Layout::Presentation,
+            &join,
+            &recent,
+            Some("c"),
+            None,
+            None,
+            |_| true,
+            1,
+        );
+        assert!(got.is_empty());
+        // The plan puts the content first and honours the scope.
+        let content = (SourceKey::content("a"), false);
+        let key_all = OutputKey {
+            scope: OutputScope::All,
+            resolution: Resolution::new(640, 360),
+            view: View::Composite,
+        };
+        let plan = plan_output(
+            &key_all,
+            Layout::Grid,
+            ContentLayout::Presentation,
+            &join,
+            &got,
+            Some(&content),
+            |_| Some(false),
+        );
+        assert_eq!(plan.layout, Layout::Presentation);
+        assert_eq!(plan.tiles, vec![SourceKey::content("a")]);
+        let strip = ids(&["c", "a"]);
+        let plan = plan_output(
+            &OutputKey {
+                scope: OutputScope::Excluding("a".into()),
+                ..key_all.clone()
+            },
+            Layout::Grid,
+            ContentLayout::Presentation,
+            &join,
+            &strip,
+            Some(&content),
+            |_| Some(false),
+        );
+        assert_eq!(
+            plan.tiles,
+            vec![SourceKey::content("a"), SourceKey::camera("c")],
+            "a's own camera is left out of a's composite, a's screen is not"
+        );
+        // Content only, the cameras view, the content view, and a trunk's
+        // local-only composite with a peer's content.
+        let plan = plan_output(
+            &key_all,
+            Layout::Grid,
+            ContentLayout::ContentOnly,
+            &join,
+            &strip,
+            Some(&content),
+            |_| Some(false),
+        );
+        assert_eq!((plan.layout, plan.tiles.len()), (Layout::Spotlight, 1));
+        let plan = plan_output(
+            &OutputKey {
+                view: View::Cameras,
+                ..key_all.clone()
+            },
+            Layout::Grid,
+            ContentLayout::Presentation,
+            &join,
+            &strip,
+            Some(&content),
+            |_| Some(false),
+        );
+        assert_eq!(plan.layout, Layout::Grid);
+        assert!(plan.tiles.iter().all(|t| !t.is_content()));
+        assert_eq!(plan.tiles.len(), 7);
+        let plan = plan_output(
+            &OutputKey {
+                view: View::Content,
+                ..key_all.clone()
+            },
+            Layout::Grid,
+            ContentLayout::Presentation,
+            &join,
+            &strip,
+            None,
+            |_| Some(false),
+        );
+        assert!(plan.tiles.is_empty(), "nothing shared: nothing sent");
+        let remote_content = (SourceKey::content("__trunk__b"), true);
+        let plan = plan_output(
+            &OutputKey {
+                scope: OutputScope::LocalOnly,
+                ..key_all.clone()
+            },
+            Layout::Grid,
+            ContentLayout::Presentation,
+            &join,
+            &strip,
+            Some(&remote_content),
+            |_| Some(false),
+        );
+        assert_eq!(
+            plan.layout,
+            Layout::Grid,
+            "a peer's screen does not go back to the peer"
         );
     }
 

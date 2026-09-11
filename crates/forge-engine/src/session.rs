@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -904,6 +904,11 @@ pub struct MediaSession {
     pub(crate) recorder: Arc<RwLock<Option<forge_recorder::AudioRecorder>>>,
     /// Small mixer to combine both call legs before writing to the recorder
     pub(crate) recording_mixer: Arc<Mutex<RecordingMixer>>,
+    /// Correlation id for this session's HEP RTCP / RTP-QoS chunks, when
+    /// the embedder knows a better one than [`Self::call_id`] — see
+    /// [`Self::set_hep_correlation_id`]. Set-once, so the RTCP path reads
+    /// it with a single atomic load and no lock.
+    hep_correlation_id: OnceLock<String>,
 }
 
 impl MediaSession {
@@ -1020,6 +1025,7 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            hep_correlation_id: OnceLock::new(),
         };
 
         // Publish session created event
@@ -1185,6 +1191,7 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            hep_correlation_id: OnceLock::new(),
         };
 
         // Publish session created event
@@ -1392,6 +1399,7 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            hep_correlation_id: OnceLock::new(),
         };
 
         // Publish session created event
@@ -1408,6 +1416,32 @@ impl MediaSession {
     /// Get the call ID
     pub fn call_id(&self) -> &CallId {
         &self.call_id
+    }
+
+    /// Set the correlation id this session's HEP RTCP (`0x05`) and
+    /// RTP-QoS chunks carry, in place of [`Self::call_id`].
+    ///
+    /// Homer threads a call's chunks together by correlation id, and its
+    /// call view is keyed by the SIP `Call-ID` — which an embedder's own
+    /// session id usually isn't. Without this, media chunks land under a
+    /// different key from the SIP ladder and never appear beside it
+    /// (siphon-ai #603). Set it as soon as the SIP `Call-ID` is known —
+    /// for an offerer that is after the session exists, since the offer
+    /// is built before the INVITE that names the `Call-ID`. Chunks
+    /// emitted before then keep the session id.
+    ///
+    /// Set-once: returns `false`, leaving the first value, if already set.
+    pub fn set_hep_correlation_id(&self, id: impl Into<String>) -> bool {
+        self.hep_correlation_id.set(id.into()).is_ok()
+    }
+
+    /// The correlation id for this session's HEP chunks: the value given
+    /// to [`Self::set_hep_correlation_id`], else the session's call id.
+    pub fn hep_correlation_id(&self) -> &str {
+        self.hep_correlation_id
+            .get()
+            .map(String::as_str)
+            .unwrap_or(&self.call_id.0)
     }
 
     /// Get the current session state
@@ -3099,6 +3133,7 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            hep_correlation_id: OnceLock::new(),
             relay_rfc2833: AtomicBool::new(false),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
@@ -3756,6 +3791,36 @@ mod tests {
         assert_eq!(session.call_id(), &call_id);
         assert_eq!(session.state().await, SessionState::Initializing);
         assert!(session.uptime() < Duration::from_secs(1));
+    }
+
+    // siphon-ai #603: HEP media chunks must be able to carry the SIP
+    // Call-ID rather than the session id, set after the session exists.
+    #[tokio::test]
+    async fn hep_correlation_id_defaults_to_call_id_and_is_set_once() {
+        let port_pool = Arc::new(PortPool::new(PortPoolConfig::new(31100, 31200).unwrap()));
+        let call_id = CallId::new("siphon-abc");
+        let session = MediaSession::new(
+            call_id,
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            &port_pool,
+            MediaSessionConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session.hep_correlation_id(), "siphon-abc");
+        assert!(session.set_hep_correlation_id("1c42@pbx.example.com"));
+        assert_eq!(session.hep_correlation_id(), "1c42@pbx.example.com");
+        // A second set is refused and leaves the first — the RTCP path
+        // must never see the key change mid-call.
+        assert!(!session.set_hep_correlation_id("other@pbx.example.com"));
+        assert_eq!(session.hep_correlation_id(), "1c42@pbx.example.com");
+        assert_eq!(session.call_id().0, "siphon-abc");
     }
 
     #[tokio::test]

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **forge-engine**: `MediaSession::set_hep_correlation_id` / `hep_correlation_id`. The
+  HEP RTCP (`0x05`) and RTP-QoS chunks forge ships carried the session's own call id as
+  their correlation id, which is rarely the SIP `Call-ID` Homer keys its call view on —
+  so an embedder's media chunks landed under a different key from its SIP ladder and CDR
+  and never appeared beside them (siphon-ai #603). An embedder now sets the SIP
+  `Call-ID` once it is known, and every later RTCP / QoS chunk for the session carries
+  it. Set-once (a `OnceLock`), so the RTCP path reads it with one atomic load. Unset, the
+  chunks carry the session call id exactly as before.
+
 ## [2026-09-08.4] — workspace release
 
 **The bitrate ladder** (FCP video conferencing, phase 6b). A flavor's encoder

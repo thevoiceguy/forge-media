@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2037,7 +2037,7 @@ dependencies = [
 
 [[package]]
 name = "forge-webrtc"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "dashmap",

@@ -28,6 +28,12 @@ debug-assertions = true
 overflow-checks = true
 
 [[bin]]
+name = "rtp_extension"
+path = "fuzz_targets/rtp_extension.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "depacketize_h264"
 path = "fuzz_targets/depacketize_h264.rs"
 test = false

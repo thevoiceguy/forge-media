@@ -1,20 +1,24 @@
 name: Fuzz
 
-# Weekly, not on every pull request.
+# Nightly, not on every pull request.
 #
 # The design (§15.5) originally called for a 60-second smoke run per target on
 # each PR, on the reasoning that the Actions budget was too tight for anything
-# longer. Weekly is the better trade at either budget: eight targets on a PR
-# cost the ASan build plus eight minutes to rediscover, every time, what the
-# round-trip tests already cover — while a fuzzer's value is almost entirely in
-# how long it runs. The same spend once a week buys ten minutes a target
-# instead of one, and the corpus persists between runs, so each week starts
-# where the last one left off rather than from the seeds again.
+# longer. A fuzzer's value is almost entirely in how long it runs: eight
+# targets on a PR cost the ASan build plus eight minutes to rediscover, every
+# time, what the round-trip tests already cover. So the run is scheduled
+# instead, ten minutes a target, and the corpus persists between runs, so each
+# night starts where the last one left off rather than from the seeds again.
+#
+# Nightly rather than weekly because this repository is public. GitHub's
+# standard runners cost a public repository nothing, so the budget that argued
+# for a short run — FCP's, which is private — does not reach this workflow,
+# and seven runs a week find more than one.
 on:
   schedule:
-    # Monday 08:00 UTC, an hour after the CI workflow's own weekly sweep, so
-    # the two do not contend for runners.
-    - cron: '0 8 * * 1'
+    # 08:00 UTC, an hour after the CI workflow's own weekly sweep on Mondays,
+    # so the two do not contend for runners that day.
+    - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
       seconds:
@@ -66,9 +70,10 @@ jobs:
             .
             fuzz
 
-      # Last week's corpus, so a run starts from the inputs the last one found
-      # interesting rather than from the seeds. Restored by prefix: the key
-      # carries the run number so each week writes a new entry.
+      # The last run's corpus, so a run starts from the inputs the last one
+      # found interesting rather than from the seeds. Restored by prefix: the
+      # key carries the run number so each night writes a new entry, and
+      # entries older than a week are evicted by GitHub on its own schedule.
       - name: Restore fuzzing corpus
         uses: actions/cache@v4
         with:

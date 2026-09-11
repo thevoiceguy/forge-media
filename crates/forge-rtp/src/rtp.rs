@@ -214,7 +214,15 @@ impl RtpPacket {
                 + self.padding_len as usize,
         );
 
-        self.header.write(&mut buf);
+        // The X bit says whether an extension follows: a packet built with one
+        // carries it whatever the header said.
+        let mut header = self.header;
+        if self.extension.is_some() {
+            header.version_flags |= 0x10;
+        } else {
+            header.version_flags &= !0x10;
+        }
+        header.write(&mut buf);
 
         for csrc in &self.csrc_list {
             buf.put_u32(*csrc);
@@ -237,6 +245,13 @@ impl RtpPacket {
     }
 }
 
+/// The profile of an RFC 8285 one-byte header extension.
+pub const ONE_BYTE_EXTENSION_PROFILE: u16 = 0xBEDE;
+
+/// The profile of an RFC 8285 two-byte header extension (its low four
+/// bits are application bits and may be anything).
+pub const TWO_BYTE_EXTENSION_PROFILE: u16 = 0x1000;
+
 /// RTP header extension
 #[derive(Debug, Clone)]
 pub struct RtpExtension {
@@ -245,6 +260,96 @@ pub struct RtpExtension {
 }
 
 impl RtpExtension {
+    /// The RFC 8285 elements of the extension, `(id, data)` in order:
+    /// the one-byte form (profile `0xBEDE`, ids 1–14, 1–16 bytes each)
+    /// or the two-byte form (profile `0x100x`, ids 1–255, 0–255 bytes).
+    /// Padding bytes are skipped; a truncated element ends the list;
+    /// any other profile has no elements.
+    pub fn elements(&self) -> Vec<(u8, &[u8])> {
+        let d = &self.data[..];
+        let mut out = Vec::new();
+        let mut i = 0;
+        if self.profile == ONE_BYTE_EXTENSION_PROFILE {
+            while i < d.len() {
+                let b = d[i];
+                if b == 0 {
+                    i += 1;
+                    continue;
+                }
+                let id = b >> 4;
+                if id == 15 {
+                    break;
+                }
+                let len = (b & 0x0F) as usize + 1;
+                let start = i + 1;
+                let Some(end) = start.checked_add(len).filter(|e| *e <= d.len()) else {
+                    break;
+                };
+                out.push((id, &d[start..end]));
+                i = end;
+            }
+        } else if self.profile & 0xFFF0 == TWO_BYTE_EXTENSION_PROFILE {
+            while i < d.len() {
+                let id = d[i];
+                if id == 0 {
+                    i += 1;
+                    continue;
+                }
+                let Some(&len) = d.get(i + 1) else { break };
+                let start = i + 2;
+                let Some(end) = start.checked_add(len as usize).filter(|e| *e <= d.len()) else {
+                    break;
+                };
+                out.push((id, &d[start..end]));
+                i = end;
+            }
+        }
+        out
+    }
+
+    /// The data of the element with `id`, if present.
+    pub fn element(&self, id: u8) -> Option<&[u8]> {
+        self.elements()
+            .into_iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, data)| data)
+    }
+
+    /// A one-byte extension carrying `elements`; an element with an id
+    /// outside 1–14 or data outside 1–16 bytes is left out.
+    pub fn one_byte(elements: &[(u8, &[u8])]) -> Self {
+        let mut data = Vec::new();
+        for &(id, e) in elements {
+            if !(1..=14).contains(&id) || e.is_empty() || e.len() > 16 {
+                continue;
+            }
+            data.push((id << 4) | (e.len() as u8 - 1));
+            data.extend_from_slice(e);
+        }
+        Self {
+            profile: ONE_BYTE_EXTENSION_PROFILE,
+            data: Bytes::from(data),
+        }
+    }
+
+    /// A two-byte extension carrying `elements`; an element with id 0 or
+    /// data over 255 bytes is left out.
+    pub fn two_byte(elements: &[(u8, &[u8])]) -> Self {
+        let mut data = Vec::new();
+        for &(id, e) in elements {
+            if id == 0 || e.len() > 255 {
+                continue;
+            }
+            data.push(id);
+            data.push(e.len() as u8);
+            data.extend_from_slice(e);
+        }
+        Self {
+            profile: TWO_BYTE_EXTENSION_PROFILE,
+            data: Bytes::from(data),
+        }
+    }
+
     fn parse(data: &[u8]) -> Result<Self, ForgeError> {
         if data.len() < 4 {
             return Err(ForgeError::Rtp("Extension too short".into()));
@@ -327,6 +432,50 @@ mod tests {
         let bogus = [0x00, 0x00, 0x00, 0x01];
         let res = RtpExtension::parse(&bogus);
         assert!(res.is_err(), "truncated ext payload must be rejected");
+    }
+
+    #[test]
+    fn rfc_8285_elements_round_trip_in_both_forms() {
+        let ext =
+            RtpExtension::one_byte(&[(1, b"1"), (4, b"video-mid"), (15, b"x"), (2, &[0; 17])]);
+        assert_eq!(ext.profile, ONE_BYTE_EXTENSION_PROFILE);
+        let els = ext.elements();
+        assert_eq!(
+            els.len(),
+            2,
+            "ids over 14 and data over 16 bytes are left out"
+        );
+        assert_eq!(els[0], (1, &b"1"[..]));
+        assert_eq!(els[1], (4, &b"video-mid"[..]));
+        assert_eq!(ext.element(4), Some(&b"video-mid"[..]));
+        assert_eq!(ext.element(9), None);
+        // Through a packet, with the container padded to a word.
+        let mut packet =
+            RtpPacket::build(96, 7, 90_000, 0xABCD, Bytes::from_static(&[1, 2, 3]), true);
+        packet.extension = Some(ext);
+        let bytes = packet.to_bytes().freeze();
+        let back = RtpPacket::parse(bytes).unwrap();
+        assert_eq!(
+            back.extension.as_ref().unwrap().element(4),
+            Some(&b"video-mid"[..])
+        );
+        assert_eq!(&back.payload[..], &[1, 2, 3]);
+        // Padding bytes inside the body are skipped, and a truncated
+        // element ends the list rather than reaching past it.
+        let padded = RtpExtension {
+            profile: ONE_BYTE_EXTENSION_PROFILE,
+            data: Bytes::from_static(&[0x10, b'2', 0, 0, 0x32, b'a', b'b']),
+        };
+        assert_eq!(padded.elements(), vec![(1, &b"2"[..])]);
+        let two = RtpExtension::two_byte(&[(1, b""), (200, b"content"), (0, b"zero")]);
+        let els = two.elements();
+        assert_eq!(els, vec![(1, &b""[..]), (200, &b"content"[..])]);
+        assert_eq!(two.element(200), Some(&b"content"[..]));
+        let other = RtpExtension {
+            profile: 0x4242,
+            data: Bytes::from_static(&[1, 2, 3, 4]),
+        };
+        assert!(other.elements().is_empty());
     }
 
     #[test]

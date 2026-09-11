@@ -59,8 +59,10 @@ pub use peer::{
     AudioSender, ConnectionState, PeerConfig, PeerConnection, PeerEvent, SignalingState,
     VideoConfig, VideoSender,
 };
-pub use sdp::{Direction, NegotiatedVideo};
-pub use transport::{IceRole, MediaKind, PayloadMapping, TransportConfig, TransportEvent};
+pub use sdp::{Direction, NegotiatedVideo, MID_EXTENSION_URI};
+pub use transport::{
+    DemuxConfig, IceRole, MediaKind, PayloadMapping, TransportConfig, TransportEvent, VideoStream,
+};
 
 use thiserror::Error;
 

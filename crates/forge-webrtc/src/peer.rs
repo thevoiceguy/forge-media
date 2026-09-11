@@ -18,12 +18,17 @@
 //! ```
 //!
 //! Video is one section (`a=mid:1`, BUNDLE'd with the audio) carrying one
-//! negotiated codec. The peer connection does not encode or decode: it
-//! hands inbound video packets up as [`TransportEvent::VideoRtp`] and
-//! sends packets a producer (a conference room subscription, a forwarder)
-//! has already built, re-stamped with its own video SSRC. Feedback the
-//! remote negotiated (`nack`, `nack pli`, `ccm fir`, `goog-remb`) arrives
-//! parsed in [`TransportEvent::Rtcp`] and goes out through
+//! negotiated codec — and, with [`VideoConfig::content`], a second
+//! (`a=mid:2`, `a=content:slides`) for a shared screen. The peer connection
+//! does not encode or decode: it hands inbound video packets up as
+//! [`TransportEvent::VideoRtp`] or [`TransportEvent::ContentRtp`], sorted by
+//! the `sdes:mid` header extension it offers on every section (or the
+//! signalled SSRCs), and sends packets a producer (a conference room
+//! subscription, a forwarder) has already built, re-stamped with its own
+//! SSRC for the section ([`PeerConnection::video_sender`],
+//! [`PeerConnection::content_sender`]). Feedback the remote negotiated
+//! (`nack`, `nack pli`, `ccm fir`, `goog-remb`) arrives parsed in
+//! [`TransportEvent::Rtcp`] and goes out through
 //! [`PeerConnection::send_rtcp`]; SR/RR reports run on their own.
 //!
 //! ICE restart is unsupported by design (a remote description that changes
@@ -48,8 +53,13 @@ use crate::sdp::{
     RemoteDescription,
 };
 use crate::transport::{
-    IceRole, MediaKind, PayloadMapping, Transport, TransportConfig, TransportEvent,
+    DemuxConfig, IceRole, MediaKind, PayloadMapping, Transport, TransportConfig, TransportEvent,
+    VideoStream,
 };
+
+/// The id this endpoint offers the `sdes:mid` header extension under. An
+/// answer mirrors whatever the offer chose.
+const MID_EXTENSION_ID: u8 = 1;
 use crate::{Result, WebRtcError};
 
 /// WebRTC connection state.
@@ -99,6 +109,11 @@ pub struct VideoConfig {
     /// Bitrate cap advertised as `b=AS` on the section, in kb/s.
     /// Browsers treat it as the most they will send.
     pub max_kbps: Option<u32>,
+    /// Offer (or accept) a second video section for a shared screen
+    /// (`a=mid:2`, `a=content:slides`), with the same codecs and
+    /// direction. Its packets arrive as [`TransportEvent::ContentRtp`]
+    /// and leave through [`PeerConnection::content_sender`].
+    pub content: bool,
 }
 
 impl Default for VideoConfig {
@@ -116,6 +131,7 @@ impl Default for VideoConfig {
             direction: Direction::SendRecv,
             h264_profile_level_id: "42e01f".to_string(),
             max_kbps: None,
+            content: false,
         }
     }
 }
@@ -180,6 +196,7 @@ pub struct PeerConnection {
     session_version: u64,
     ssrc: u32,
     video_ssrc: u32,
+    content_ssrc: u32,
     cname: String,
     msid: String,
     /// The codec pinned by offer/answer (with the payload type the remote
@@ -188,6 +205,8 @@ pub struct PeerConnection {
     /// The video section pinned by offer/answer, once negotiation
     /// completed with both sides accepting one.
     negotiated_video: Option<NegotiatedVideo>,
+    /// The shared screen's section, pinned the same way.
+    negotiated_content: Option<NegotiatedVideo>,
     audio_ts: Arc<AtomicU32>,
     audio_started: Arc<AtomicBool>,
 }
@@ -212,8 +231,15 @@ impl PeerConnection {
         );
         let rnd = uuid::Uuid::new_v4().as_u128();
         let ssrc = (rnd as u32) | 1;
-        // The video SSRC is even, so it can never equal the odd audio one.
+        // The video SSRCs are even, so they can never equal the odd audio
+        // one, and differ from each other by construction.
         let video_ssrc = ((rnd >> 96) as u32 & !1).max(2);
+        let content_ssrc = ((rnd >> 64) as u32 & !3).wrapping_add(2).max(4);
+        let content_ssrc = if content_ssrc == video_ssrc {
+            content_ssrc.wrapping_add(4)
+        } else {
+            content_ssrc
+        };
         let session_id = ((rnd >> 64) as u64) & 0x7fff_ffff_ffff_ffff;
         Ok(Self {
             cname: format!("forge-{}", &connection_id[7..15]),
@@ -233,8 +259,10 @@ impl PeerConnection {
             session_version: 0,
             ssrc,
             video_ssrc,
+            content_ssrc,
             negotiated: None,
             negotiated_video: None,
+            negotiated_content: None,
             audio_ts: Arc::new(AtomicU32::new((rnd >> 32) as u32)),
             audio_started: Arc::new(AtomicBool::new(false)),
         })
@@ -251,6 +279,7 @@ impl PeerConnection {
             self.cert.clone(),
             self.ssrc,
             self.video_ssrc,
+            self.content_ssrc,
             self.cname.clone(),
             self.state.clone(),
         )
@@ -266,6 +295,7 @@ impl PeerConnection {
         creds: &'a (String, String),
         candidates: &'a [IceCandidate],
         setup: DtlsSetup,
+        mid_ext: Option<u8>,
     ) -> LocalParams<'a> {
         LocalParams {
             ufrag: &creds.0,
@@ -288,7 +318,23 @@ impl PeerConnection {
                 mid: "1",
                 h264_profile_level_id: &v.h264_profile_level_id,
                 max_kbps: v.max_kbps,
+                content: false,
             }),
+            content: self
+                .cfg
+                .video
+                .as_ref()
+                .filter(|v| v.content)
+                .map(|v| LocalVideo {
+                    ssrc: self.content_ssrc,
+                    codecs: &v.codecs,
+                    direction: v.direction,
+                    mid: "2",
+                    h264_profile_level_id: &v.h264_profile_level_id,
+                    max_kbps: v.max_kbps,
+                    content: true,
+                }),
+            mid_ext,
             session_id: self.session_id,
             session_version: self.session_version,
         }
@@ -315,7 +361,13 @@ impl PeerConnection {
         let creds = t.local_credentials();
         let candidates = t.local_candidates();
         self.session_version += 1;
-        let sdp = sdp::build_offer(&self.local_params(&t, &creds, &candidates, DtlsSetup::Actpass));
+        let sdp = sdp::build_offer(&self.local_params(
+            &t,
+            &creds,
+            &candidates,
+            DtlsSetup::Actpass,
+            Some(MID_EXTENSION_ID),
+        ));
         self.pending_local_sdp = Some(sdp.clone());
         self.signaling = SignalingState::HaveLocalOffer;
         if *self.state.lock() == ConnectionState::New {
@@ -393,12 +445,16 @@ impl PeerConnection {
         let creds = t.local_credentials();
         let candidates = t.local_candidates();
         self.session_version += 1;
-        let (answer, negotiated) =
-            sdp::build_answer(&self.local_params(&t, &creds, &candidates, setup), &remote)?;
+        // The extension id is the offer's to choose; an answer mirrors it.
+        let (answer, negotiated) = sdp::build_answer(
+            &self.local_params(&t, &creds, &candidates, setup, remote.mid_ext),
+            &remote,
+        )?;
         let selected = negotiated.audio;
         self.negotiated = Some(selected);
         self.negotiated_video = negotiated.video;
-        self.install_payload_map(&t);
+        self.negotiated_content = negotiated.content;
+        self.install_demux(&t, remote.mid_ext);
         self.local_sdp = Some(answer.clone());
         self.signaling = SignalingState::Stable;
         debug!(
@@ -451,6 +507,14 @@ impl PeerConnection {
             (Some(cfg), Some(rv)) => video_from_answer(&cfg.codecs, cfg.direction, rv),
             _ => None,
         };
+        let content = match (&self.cfg.video, remote.content.as_ref()) {
+            (Some(cfg), Some(rv)) if cfg.content => {
+                video_from_answer(&cfg.codecs, cfg.direction, rv)
+            }
+            _ => None,
+        };
+        // The extension is on only if the answer kept it.
+        let mid_ext = remote.mid_ext.filter(|id| *id == MID_EXTENSION_ID);
         t.set_remote(
             &remote.ufrag,
             &remote.pwd,
@@ -462,7 +526,8 @@ impl PeerConnection {
         self.remote = Some(remote);
         self.negotiated = Some(selected);
         self.negotiated_video = video;
-        self.install_payload_map(&t);
+        self.negotiated_content = content;
+        self.install_demux(&t, mid_ext);
         self.local_sdp = self.pending_local_sdp.take();
         self.signaling = SignalingState::Stable;
         Ok(())
@@ -470,9 +535,11 @@ impl PeerConnection {
 
     /// Tell the transport which payload types belong to which stream, so
     /// inbound packets are sorted and their jitter measured at the right
-    /// clock.
-    fn install_payload_map(&self, t: &Transport) {
-        let mut map = Vec::with_capacity(4);
+    /// clock — and how the two video sections, which share payload types,
+    /// are told apart: by the `sdes:mid` extension when `mid_ext` was
+    /// negotiated, else by the SSRCs the remote signalled.
+    fn install_demux(&self, t: &Transport, mid_ext: Option<u8>) {
+        let mut map = Vec::with_capacity(5);
         if let Some((codec, pt)) = self.negotiated {
             map.push(PayloadMapping {
                 payload_type: pt,
@@ -489,14 +556,23 @@ impl PeerConnection {
                 });
             }
         }
-        if let Some(v) = &self.negotiated_video {
-            map.push(PayloadMapping {
-                payload_type: v.payload_type,
-                kind: MediaKind::Video,
-                clock_rate: VideoCodec::CLOCK_RATE,
-            });
+        for v in self.negotiated_video.iter().chain(&self.negotiated_content) {
+            if !map.iter().any(|m| m.payload_type == v.payload_type) {
+                map.push(PayloadMapping {
+                    payload_type: v.payload_type,
+                    kind: MediaKind::Video,
+                    clock_rate: VideoCodec::CLOCK_RATE,
+                });
+            }
         }
-        t.set_payload_map(&map);
+        t.set_demux(&DemuxConfig {
+            payload_map: map,
+            mid_ext,
+            video_mid: self.negotiated_video.as_ref().and_then(|v| v.mid.clone()),
+            content_mid: self.negotiated_content.as_ref().and_then(|v| v.mid.clone()),
+            video_ssrc: self.negotiated_video.as_ref().and_then(|v| v.remote_ssrc),
+            content_ssrc: self.negotiated_content.as_ref().and_then(|v| v.remote_ssrc),
+        });
     }
 
     /// Discard an outstanding local offer (the peer rejected the
@@ -605,7 +681,28 @@ impl PeerConnection {
             .ok_or_else(|| WebRtcError::InvalidState("no video section negotiated".into()))?;
         Ok(VideoSender {
             transport: t,
+            stream: VideoStream::Camera,
             ssrc: self.video_ssrc,
+            codec: v.codec,
+            payload_type: v.payload_type,
+        })
+    }
+
+    /// A cloneable handle for sending a shared screen's packets on the
+    /// content section. Fails until one is negotiated.
+    pub fn content_sender(&self) -> Result<VideoSender> {
+        let t = self
+            .transport
+            .clone()
+            .ok_or_else(|| WebRtcError::InvalidState("no transport yet".into()))?;
+        let v = self
+            .negotiated_content
+            .as_ref()
+            .ok_or_else(|| WebRtcError::InvalidState("no content section negotiated".into()))?;
+        Ok(VideoSender {
+            transport: t,
+            stream: VideoStream::Content,
+            ssrc: self.content_ssrc,
             codec: v.codec,
             payload_type: v.payload_type,
         })
@@ -628,9 +725,20 @@ impl PeerConnection {
         self.negotiated_video.as_ref()
     }
 
-    /// Our video sending SSRC.
+    /// The shared screen's section pinned by offer/answer, once both
+    /// sides accepted one.
+    pub fn negotiated_content(&self) -> Option<&NegotiatedVideo> {
+        self.negotiated_content.as_ref()
+    }
+
+    /// Our video sending SSRC (the camera's section).
     pub fn video_ssrc(&self) -> u32 {
         self.video_ssrc
+    }
+
+    /// Our sending SSRC for the shared screen's section.
+    pub fn content_ssrc(&self) -> u32 {
+        self.content_ssrc
     }
 
     /// Reception statistics for every remote SSRC heard so far.
@@ -797,10 +905,12 @@ impl AudioSender {
     }
 }
 
-/// Sends pre-built video RTP packets as SRTP. Clone freely.
+/// Sends pre-built video RTP packets as SRTP on one video section. Clone
+/// freely.
 #[derive(Clone)]
 pub struct VideoSender {
     transport: Transport,
+    stream: VideoStream,
     ssrc: u32,
     codec: VideoCodec,
     payload_type: u8,
@@ -813,7 +923,12 @@ impl VideoSender {
     /// packets — and the retransmissions it answers NACKs with — go through
     /// here as they are.
     pub async fn send_packet(&self, packet: Bytes) -> Result<()> {
-        self.transport.send_video(packet).await
+        self.transport.send_video_on(packet, self.stream).await
+    }
+
+    /// Which section this sender's packets go out on.
+    pub fn stream(&self) -> VideoStream {
+        self.stream
     }
 
     /// Send RTCP from this task; see [`PeerConnection::send_rtcp`].

@@ -9,8 +9,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use common::*;
+use forge_rtp::rtp::RtpExtension;
 use forge_rtp::{PayloadFeedback, PsFeedback, RtcpPacket, RtpFeedback, RtpPacket};
-use forge_webrtc::{Direction, PeerConfig, PeerConnection, VideoCodec, VideoConfig};
+use forge_webrtc::{
+    Direction, PeerConfig, PeerConnection, PeerEvent, VideoCodec, VideoConfig, VideoStream,
+};
 
 fn video_cfg(codecs: &[(VideoCodec, u8)]) -> PeerConfig {
     PeerConfig {
@@ -251,4 +254,156 @@ async fn video_added_by_reoffer_on_the_same_transport() {
     assert!(caller.negotiated_video().is_none());
     assert!(callee.negotiated_video().is_none());
     let _ = PeerConnection::new(vec![]).await.unwrap();
+}
+
+/// The next `n` content packets.
+async fn expect_content(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<PeerEvent>,
+    n: usize,
+) -> Vec<RtpPacket> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut out = Vec::with_capacity(n);
+    while out.len() < n {
+        let ev = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("timed out waiting for content RTP")
+            .expect("events closed");
+        if let PeerEvent::ContentRtp(pkt) = ev {
+            out.push(pkt);
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_shared_screen_rides_a_second_video_section() {
+    init_tracing();
+    let vp8 = [(VideoCodec::VP8, 96)];
+    let with_content = || PeerConfig {
+        video: Some(VideoConfig {
+            codecs: vp8.to_vec(),
+            content: true,
+            ..VideoConfig::default()
+        }),
+        ..PeerConfig::default()
+    };
+    let (caller, callee, mut caller_ev, mut callee_ev) =
+        connect_pair_with(with_content(), with_content()).await;
+    let offer = callee.remote_sdp().unwrap();
+    assert!(offer.contains("a=group:BUNDLE 0 1 2\r\n"), "{offer}");
+    assert!(offer.contains("a=mid:2\r\n"));
+    assert!(offer.contains("a=content:slides\r\n"));
+    assert_eq!(
+        offer.matches("urn:ietf:params:rtp-hdrext:sdes:mid").count(),
+        3
+    );
+    for peer in [&caller, &callee] {
+        let c = peer.negotiated_content().expect("content negotiated");
+        assert_eq!((c.codec, c.payload_type), (VideoCodec::VP8, 96));
+        assert_eq!(c.mid.as_deref(), Some("2"));
+        assert_eq!(peer.negotiated_video().unwrap().mid.as_deref(), Some("1"));
+    }
+    assert_ne!(caller.content_ssrc(), caller.video_ssrc());
+    assert_eq!(
+        callee.negotiated_content().unwrap().remote_ssrc,
+        Some(caller.content_ssrc())
+    );
+
+    // The same payload type on both sections: what tells them apart on
+    // the wire is the SSRC each side signalled, since these packets
+    // carry no extension.
+    let cam = caller.video_sender().unwrap();
+    let screen = caller.content_sender().unwrap();
+    assert_eq!(screen.stream(), VideoStream::Content);
+    assert_eq!(screen.ssrc(), caller.content_ssrc());
+    cam.send_packet(video_packet(1, 0, true)).await.unwrap();
+    let got = expect_video(&mut callee_ev, 1).await;
+    assert_eq!({ got[0].header.ssrc }, caller.video_ssrc());
+    assert_eq!({ got[0].header.sequence_number }, 1);
+    screen.send_packet(video_packet(2, 0, true)).await.unwrap();
+    screen
+        .send_packet(video_packet(3, 3000, true))
+        .await
+        .unwrap();
+    let got = expect_content(&mut callee_ev, 2).await;
+    assert_eq!({ got[0].header.ssrc }, caller.content_ssrc());
+    assert_eq!({ got[0].header.sequence_number }, 2);
+    assert_eq!({ got[1].header.sequence_number }, 3);
+
+    // And back, on both sections.
+    callee
+        .content_sender()
+        .unwrap()
+        .send_packet(video_packet(9, 0, true))
+        .await
+        .unwrap();
+    let got = expect_content(&mut caller_ev, 1).await;
+    assert_eq!({ got[0].header.ssrc }, callee.content_ssrc());
+    callee
+        .video_sender()
+        .unwrap()
+        .send_packet(video_packet(8, 0, true))
+        .await
+        .unwrap();
+    let got = expect_video(&mut caller_ev, 1).await;
+    assert_eq!({ got[0].header.ssrc }, callee.video_ssrc());
+
+    // A packet that names its section in the header extension goes where
+    // the extension says, whatever SSRC it carries (a browser's packets
+    // carry one; ours do not, so this is sent on the camera's sender):
+    // the mid names the content section, and the receiver remembers the
+    // SSRC for the next packet, which carries none.
+    let mut with_mid = RtpPacket::build(96, 20, 0, 0, Bytes::from(vec![7; 20]), true);
+    with_mid.extension = Some(RtpExtension::one_byte(&[(1, b"2")]));
+    cam.send_packet(with_mid.to_bytes().freeze()).await.unwrap();
+    let got = expect_content(&mut callee_ev, 1).await;
+    assert_eq!(
+        { got[0].header.ssrc },
+        caller.video_ssrc(),
+        "the camera's SSRC, on the content section by its mid"
+    );
+    assert_eq!(
+        got[0].extension.as_ref().unwrap().element(1),
+        Some(&b"2"[..])
+    );
+    cam.send_packet(video_packet(21, 3000, true)).await.unwrap();
+    let got = expect_content(&mut callee_ev, 1).await;
+    assert_eq!(
+        { got[0].header.sequence_number },
+        21,
+        "learned from the mid, kept for the SSRC"
+    );
+}
+
+#[tokio::test]
+async fn a_peer_without_content_rejects_the_second_section() {
+    init_tracing();
+    let vp8 = [(VideoCodec::VP8, 96)];
+    let caller_cfg = PeerConfig {
+        video: Some(VideoConfig {
+            codecs: vp8.to_vec(),
+            content: true,
+            ..VideoConfig::default()
+        }),
+        ..PeerConfig::default()
+    };
+    let (caller, callee, _caller_ev, mut callee_ev) =
+        connect_pair_with(caller_cfg, video_cfg(&vp8)).await;
+    assert!(caller.negotiated_video().is_some());
+    assert!(caller.negotiated_content().is_none());
+    assert!(callee.negotiated_content().is_none());
+    assert!(caller.content_sender().is_err());
+    assert!(caller
+        .remote_sdp()
+        .unwrap()
+        .contains("m=video 0 UDP/TLS/RTP/SAVPF 96"));
+    // The camera still works.
+    caller
+        .video_sender()
+        .unwrap()
+        .send_packet(video_packet(1, 0, true))
+        .await
+        .unwrap();
+    let got = expect_video(&mut callee_ev, 1).await;
+    assert_eq!({ got[0].header.ssrc }, caller.video_ssrc());
 }

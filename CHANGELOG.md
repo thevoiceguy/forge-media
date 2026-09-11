@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**A shared screen over WebRTC** (FCP video conferencing, phase 7c, the
+forge-media half). A browser's screen is a second video track, which on the
+wire is a second video section sharing the camera's payload types — so the
+transport has to read the RFC 8285 `sdes:mid` header extension to tell the
+two apart, which nothing here did before.
+
+**`forge-rtp` 0.7.0**: `RtpExtension::elements` / `element` walk an RFC 8285
+one-byte (`0xBEDE`) or two-byte (`0x100x`) extension, `one_byte` / `two_byte`
+build one, and `RtpPacket::to_bytes` sets the header's X bit to match the
+extension it writes (a packet built with an extension used to go out with
+the bit clear). A ninth fuzz target, `rtp_extension`, walks the elements of
+whatever parses as a packet, seeded by `fuzz_seeds`.
+
+**`forge-webrtc` 0.7.0**: `VideoConfig::content` offers (or accepts) a second
+video section — `a=mid:2`, `a=content:slides` (RFC 4796), the same codecs and
+direction, BUNDLE `0 1 2` — and every section offers `a=extmap … sdes:mid`;
+an answer mirrors the offer's id. Inbound video is sorted into
+`TransportEvent::VideoRtp` (the camera) or the new `TransportEvent::ContentRtp`
+by `VideoDemux`: the mid extension when a packet carries one — and the SSRC
+is remembered so the next packets need none — else the SSRC each side
+signalled for the section, else the camera. A third SSRC and
+`PeerConnection::content_sender`; `NegotiatedVideo::mid`,
+`PeerConnection::negotiated_content` / `content_ssrc`;
+`RemoteDescription::{content, mid_ext}`, `LocalParams::{content, mid_ext}`,
+`LocalVideo::content`, `Negotiated::content`, `DemuxConfig` and
+`Transport::set_demux` in place of `set_payload_map`, `Transport::send_video_on`.
+
+Breaking: `TransportEvent` has a new variant; `LocalParams`, `LocalVideo`
+and `NegotiatedVideo` have new fields; `Transport::new` takes the content
+SSRC; `set_payload_map` is gone.
+
 ## [2026-09-11] — workspace release
 
 **A shared screen** (FCP video conferencing, phase 7a). A participant can

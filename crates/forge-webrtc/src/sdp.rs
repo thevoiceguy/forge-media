@@ -3,7 +3,11 @@
 //! The peer connection negotiates one audio section (Opus, G.722 and/or
 //! G.711, optional telephone-event) and, when configured, one video
 //! section (H.264, VP8, VP9, AV1 with `nack`, `nack pli`, `ccm fir` and
-//! `goog-remb` feedback), BUNDLE + rtcp-mux, DTLS-SRTP and trickle ICE —
+//! `goog-remb` feedback) — plus, when asked, a second video section for
+//! a shared screen (`a=content:slides`, RFC 4796), with the `sdes:mid`
+//! header extension (RFC 8285, RFC 8843) offered on every section so the
+//! two video streams, which share payload types, can be told apart on
+//! the wire — BUNDLE + rtcp-mux, DTLS-SRTP and trickle ICE —
 //! the shape every browser produces and the shape the DSIP WebRTC Media
 //! Binding pins. Offers are built from scratch; answers mirror the remote
 //! offer (payload types, `a=mid`, protocol, `fmtp`) and reject every
@@ -103,10 +107,16 @@ pub fn rtp_clock(codec: AudioCodec) -> u32 {
     }
 }
 
+/// The RFC 8285 header extension that names a packet's section (RFC 8843
+/// §9.2): the one thing that tells two video streams sharing a payload
+/// type apart. Offered on every section; an answer mirrors the id the
+/// offer chose.
+pub const MID_EXTENSION_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
+
 /// The feedback messages this endpoint sends and acts on (RFC 4585 NACK
 /// and PLI, RFC 5104 FIR, REMB). Anything else a peer offers — notably
-/// `transport-cc`, which needs the RFC 8285 header extension this
-/// endpoint does not write — is left out of the answer.
+/// `transport-cc`, which needs a header extension this endpoint does not
+/// write — is left out of the answer.
 const SUPPORTED_FEEDBACK: [(&str, Option<&str>); 4] = [
     ("nack", None),
     ("nack", Some("pli")),
@@ -144,6 +154,9 @@ pub struct LocalVideo<'a> {
     pub h264_profile_level_id: &'a str,
     /// Bitrate cap advertised as `b=AS` on the section, in kb/s.
     pub max_kbps: Option<u32>,
+    /// A shared screen's section rather than the camera's: marked
+    /// `a=content:slides` (RFC 4796).
+    pub content: bool,
 }
 
 /// Everything local that goes into an offer or answer.
@@ -180,6 +193,12 @@ pub struct LocalParams<'a> {
     pub mid: &'a str,
     /// The video section, if we offer or accept one.
     pub video: Option<LocalVideo<'a>>,
+    /// A shared screen's section (`a=content:slides`), if we offer or
+    /// accept one beside the camera's.
+    pub content: Option<LocalVideo<'a>>,
+    /// The id the `sdes:mid` header extension is offered (or mirrored)
+    /// under; `None` leaves it out.
+    pub mid_ext: Option<u8>,
     /// `o=` session id.
     pub session_id: u64,
     /// `o=` session version (incremented per description).
@@ -257,12 +276,19 @@ pub struct RemoteDescription {
     pub ice_lite: bool,
     /// The accepted audio section, if the remote offered/answered one.
     pub audio: Option<RemoteAudio>,
-    /// The active video section, if the remote offered/answered one.
+    /// The camera's video section — the first active one that is not
+    /// `a=content:slides` — if the remote offered/answered one.
     pub video: Option<RemoteVideo>,
+    /// A shared screen's section — the first active `a=content:slides`
+    /// one — if the remote offered/answered one.
+    pub content: Option<RemoteVideo>,
     /// All remote sections, in order (used to mirror rejected ones).
     pub media: Vec<MediaDescription>,
     /// BUNDLE mids, in order.
     pub bundle: Vec<String>,
+    /// The id the remote uses for the `sdes:mid` header extension, when
+    /// it listed one (`a=extmap`) at session level or on a video section.
+    pub mid_ext: Option<u8>,
 }
 
 impl RemoteAudio {
@@ -333,6 +359,9 @@ pub struct NegotiatedVideo {
     pub fir: bool,
     /// REMB negotiated.
     pub remb: bool,
+    /// The section's `a=mid`, by which the `sdes:mid` header extension
+    /// names its packets.
+    pub mid: Option<String>,
 }
 
 impl NegotiatedVideo {
@@ -348,6 +377,7 @@ impl NegotiatedVideo {
             payload_type,
             direction,
             remote_ssrc: remote.ssrc,
+            mid: remote.mid.clone(),
             fmtp: remote.fmtp_of(payload_type),
             nack: feedback
                 .iter()
@@ -364,8 +394,10 @@ impl NegotiatedVideo {
 pub struct Negotiated {
     /// The audio codec, with the payload type the remote expects.
     pub audio: (AudioCodec, u8),
-    /// The video section, when both sides accepted one.
+    /// The camera's video section, when both sides accepted one.
     pub video: Option<NegotiatedVideo>,
+    /// A shared screen's section, when both sides accepted one.
+    pub content: Option<NegotiatedVideo>,
 }
 
 /// The first local preference the remote listed, with the **remote's**
@@ -449,10 +481,15 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
         .iter()
         .position(|m| m.media_type == MediaType::Audio && m.port != 0);
     let audio_media = audio_index.map(|i| &desc.media[i]);
+    let is_slides = |m: &MediaDescription| forge_sdp::is_slides(m);
     let video_index = desc
         .media
         .iter()
-        .position(|m| m.media_type == MediaType::Video && m.port != 0);
+        .position(|m| m.media_type == MediaType::Video && m.port != 0 && !is_slides(m));
+    let content_index = desc
+        .media
+        .iter()
+        .position(|m| m.media_type == MediaType::Video && m.port != 0 && is_slides(m));
     let video_media = video_index.map(|i| &desc.media[i]);
     // With BUNDLE every section carries the same transport attributes;
     // read them from the first active one.
@@ -548,7 +585,7 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
         }
     });
 
-    let video = video_index.map(|index| {
+    let remote_video = |index: usize| {
         let m = &desc.media[index];
         let mut codecs = Vec::new();
         for f in &m.formats {
@@ -575,12 +612,21 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
             protocol: m.protocol.clone(),
             media: m.clone(),
         }
-    });
+    };
+    let video = video_index.map(remote_video);
+    let content = content_index.map(remote_video);
 
     let bundle = value_attr(&desc.attributes, "group")
         .and_then(|v| v.strip_prefix("BUNDLE"))
         .map(|v| v.split_whitespace().map(str::to_string).collect())
         .unwrap_or_default();
+
+    // The `sdes:mid` extension id: session level, or on any section
+    // (RFC 8285 §5 lets it be declared per section; a browser puts the
+    // same id on all of them).
+    let mid_ext = std::iter::once(&desc.attributes)
+        .chain(desc.media.iter().map(|m| &m.attributes))
+        .find_map(|attrs| extmap_id(attrs, MID_EXTENSION_URI));
 
     Ok(RemoteDescription {
         ufrag,
@@ -594,8 +640,22 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
         ice_lite,
         audio,
         video,
+        content,
         media: desc.media.clone(),
         bundle,
+        mid_ext,
+    })
+}
+
+/// The id an `a=extmap` list assigns to `uri`, if any (`a=extmap:<id>[/<dir>] <uri> [attrs]`).
+fn extmap_id(attrs: &[Attribute], uri: &str) -> Option<u8> {
+    attrs.iter().find_map(|a| match a {
+        Attribute::Value { name, value } if name == "extmap" => {
+            let mut parts = value.split_whitespace();
+            let id = parts.next()?.split('/').next()?.parse::<u8>().ok()?;
+            (parts.next()? == uri && (1..=255).contains(&id)).then_some(id)
+        }
+        _ => None,
     })
 }
 
@@ -645,6 +705,9 @@ fn transport_attrs(a: &mut Vec<Attribute>, p: &LocalParams<'_>, port: u16) {
     push_value(a, "ice-options", "trickle".into());
     push_value(a, "fingerprint", format!("sha-256 {}", p.fingerprint));
     push_value(a, "setup", p.setup.as_str().into());
+    if let Some(id) = p.mid_ext {
+        push_value(a, "extmap", format!("{id} {MID_EXTENSION_URI}"));
+    }
 }
 
 /// The source and candidate attributes that close every section.
@@ -769,6 +832,9 @@ fn video_section(
     let a = &mut media.attributes;
     transport_attrs(a, p, port);
     push_value(a, "mid", mid.into());
+    if lv.content {
+        push_value(a, "content", "slides".into());
+    }
     push_prop(a, direction.as_str());
     push_prop(a, "rtcp-mux");
     for f in formats {
@@ -789,7 +855,13 @@ fn video_section(
             push_value(a, "rtcp-fb", format!("{} {}{param}", f.pt, fb.kind));
         }
     }
-    source_attrs(&mut media, p, direction, lv.ssrc, "video0");
+    source_attrs(
+        &mut media,
+        p,
+        direction,
+        lv.ssrc,
+        if lv.content { "content0" } else { "video0" },
+    );
     media
 }
 
@@ -870,7 +942,7 @@ pub fn build_offer(p: &LocalParams<'_>) -> String {
     );
     let mut media = vec![audio];
     let mut bundle = vec![p.mid];
-    if let Some(lv) = &p.video {
+    for lv in p.video.iter().chain(p.content.iter()) {
         let formats = offered_video_formats(lv);
         media.push(video_section(
             p,
@@ -945,52 +1017,63 @@ pub fn build_answer(
         dtmf,
     );
 
-    // Video: accepted when we have a configuration for it, want more than
-    // `inactive`, and the offer lists a codec we carry.
-    let mut accepted_video: Option<(usize, MediaDescription, String, NegotiatedVideo)> = None;
-    if let (Some(lv), Some(rv)) = (&p.video, &remote.video) {
-        if lv.direction != Direction::Inactive {
-            if let Some((codec, pt)) = select_video_codec(lv.codecs, rv) {
-                let feedback: Vec<RtcpFeedbackAttr> = rv
-                    .feedback_for(pt)
-                    .into_iter()
-                    .filter(feedback_supported)
-                    .map(|fb| RtcpFeedbackAttr {
-                        payload_type: Some(pt),
-                        ..fb
-                    })
-                    .collect();
-                let direction = Direction::answer_for(rv.direction, lv.direction);
-                let mid = rv.mid.clone().unwrap_or_else(|| "1".to_string());
-                let format = VideoFormat {
-                    codec,
-                    pt,
-                    fmtp: rv.fmtp_of(pt),
-                    feedback: feedback.clone(),
-                };
-                let section =
-                    video_section(p, lv, port, rv.protocol.clone(), &mid, direction, &[format]);
-                let negotiated =
-                    NegotiatedVideo::from_feedback(codec, pt, direction, rv, &feedback);
-                accepted_video = Some((rv.index, section, mid, negotiated));
-            }
+    // Video: a section is accepted when we have a configuration for it,
+    // want more than `inactive`, and the offer lists a codec we carry —
+    // the camera's through `video`, a shared screen's through `content`.
+    let accept = |lv: &LocalVideo<'_>,
+                  rv: &RemoteVideo,
+                  fallback_mid: &str|
+     -> Option<(usize, MediaDescription, String, NegotiatedVideo)> {
+        if lv.direction == Direction::Inactive {
+            return None;
         }
-    }
+        let (codec, pt) = select_video_codec(lv.codecs, rv)?;
+        let feedback: Vec<RtcpFeedbackAttr> = rv
+            .feedback_for(pt)
+            .into_iter()
+            .filter(feedback_supported)
+            .map(|fb| RtcpFeedbackAttr {
+                payload_type: Some(pt),
+                ..fb
+            })
+            .collect();
+        let direction = Direction::answer_for(rv.direction, lv.direction);
+        let mid = rv.mid.clone().unwrap_or_else(|| fallback_mid.to_string());
+        let format = VideoFormat {
+            codec,
+            pt,
+            fmtp: rv.fmtp_of(pt),
+            feedback: feedback.clone(),
+        };
+        let section = video_section(p, lv, port, rv.protocol.clone(), &mid, direction, &[format]);
+        let negotiated = NegotiatedVideo::from_feedback(codec, pt, direction, rv, &feedback);
+        Some((rv.index, section, mid, negotiated))
+    };
+    let accepted_video = match (&p.video, &remote.video) {
+        (Some(lv), Some(rv)) => accept(lv, rv, "1"),
+        _ => None,
+    };
+    let accepted_content = match (&p.content, &remote.content) {
+        (Some(lv), Some(rv)) => accept(lv, rv, "2"),
+        _ => None,
+    };
 
     let mut media = Vec::with_capacity(remote.media.len());
-    let mut bundle: Vec<&str> = Vec::with_capacity(2);
+    let mut bundle: Vec<&str> = Vec::with_capacity(3);
     for (i, m) in remote.media.iter().enumerate() {
         if i == audio.index {
             media.push(accepted_audio.clone());
             bundle.push(audio_mid.as_str());
             continue;
         }
-        if let Some((index, section, mid, _)) = &accepted_video {
-            if i == *index {
-                media.push(section.clone());
-                bundle.push(mid.as_str());
-                continue;
-            }
+        let accepted = [&accepted_video, &accepted_content]
+            .into_iter()
+            .flatten()
+            .find(|(index, _, _, _)| i == *index);
+        if let Some((_, section, mid, _)) = accepted {
+            media.push(section.clone());
+            bundle.push(mid.as_str());
+            continue;
         }
         media.push(rejected_section(m));
     }
@@ -999,6 +1082,7 @@ pub fn build_answer(
     let negotiated = Negotiated {
         audio: selected,
         video: accepted_video.map(|(_, _, _, v)| v),
+        content: accepted_content.map(|(_, _, _, v)| v),
     };
     Ok((sdp, negotiated))
 }
@@ -1076,6 +1160,8 @@ a=fmtp:97 apt=96\r\n";
             dtmf_pt: Some(101),
             mid: "0",
             video: None,
+            content: None,
+            mid_ext: Some(1),
             session_id: 1,
             session_version: 1,
         }
@@ -1089,6 +1175,7 @@ a=fmtp:97 apt=96\r\n";
             mid: "1",
             h264_profile_level_id: "42e01f",
             max_kbps: Some(1200),
+            content: false,
         }
     }
 
@@ -1533,5 +1620,144 @@ a=ssrc:2222 cname:user@example.com\r\n";
             r.audio.unwrap().codecs,
             vec![(AudioCodec::G722, 9), (AudioCodec::PCMU, 0)]
         );
+    }
+
+    /// A browser's offer with a camera and a shared screen, the mid
+    /// extension on both, as Chrome produces it after `addTransceiver`
+    /// twice.
+    const TWO_VIDEO_OFFER: &str = "v=0\r\n\
+o=- 4611728142112323737 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1 2\r\n\
+a=msid-semantic: WMS stream0\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=ice-ufrag:abcd\r\n\
+a=ice-pwd:efghijklmnopqrstuvwxyz0123\r\n\
+a=fingerprint:sha-256 12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0:12:34:56:78:9A:BC:DE:F0\r\n\
+a=setup:actpass\r\n\
+a=mid:0\r\n\
+a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=mid:1\r\n\
+a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtcp-fb:96 nack pli\r\n\
+a=ssrc:1111 cname:x\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=mid:2\r\n\
+a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n\
+a=content:slides\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=ssrc:2222 cname:x\r\n";
+
+    #[test]
+    fn a_shared_screen_is_a_second_video_section_told_apart_by_mid() {
+        let remote = parse_remote(TWO_VIDEO_OFFER).unwrap();
+        let video = remote.video.as_ref().expect("camera");
+        let content = remote.content.as_ref().expect("content");
+        assert_eq!(
+            (video.index, video.mid.as_deref(), video.ssrc),
+            (1, Some("1"), Some(1111))
+        );
+        assert_eq!(
+            (content.index, content.mid.as_deref(), content.ssrc),
+            (2, Some("2"), Some(2222))
+        );
+        assert_eq!(remote.mid_ext, Some(4), "the offer's extension id");
+        assert_eq!(remote.bundle, vec!["0", "1", "2"]);
+
+        // The answer takes both, mirrors the extension id on every
+        // section, and marks the second `slides`.
+        let cands = vec![];
+        let mut p = local(&cands);
+        p.mid_ext = remote.mid_ext;
+        let video_cfg = [(VideoCodec::VP8, 120)];
+        p.video = Some(LocalVideo {
+            ssrc: 10,
+            codecs: &video_cfg,
+            direction: Direction::SendRecv,
+            mid: "1",
+            h264_profile_level_id: "42e01f",
+            max_kbps: None,
+            content: false,
+        });
+        p.content = Some(LocalVideo {
+            ssrc: 20,
+            codecs: &video_cfg,
+            direction: Direction::SendRecv,
+            mid: "2",
+            h264_profile_level_id: "42e01f",
+            max_kbps: None,
+            content: true,
+        });
+        let (answer, negotiated) = build_answer(&p, &remote).unwrap();
+        let v = negotiated.video.expect("camera pinned");
+        let c = negotiated.content.expect("content pinned");
+        assert_eq!(
+            (v.payload_type, v.mid.as_deref(), v.remote_ssrc),
+            (96, Some("1"), Some(1111))
+        );
+        assert_eq!(
+            (c.payload_type, c.mid.as_deref(), c.remote_ssrc),
+            (96, Some("2"), Some(2222))
+        );
+        assert!(v.pli && !c.pli, "feedback is per section");
+        assert_eq!(
+            answer
+                .matches("a=extmap:4 urn:ietf:params:rtp-hdrext:sdes:mid\r\n")
+                .count(),
+            3
+        );
+        assert!(answer.contains("a=group:BUNDLE 0 1 2\r\n"), "{answer}");
+        let content_part = &answer[answer.find("a=mid:2").unwrap()..];
+        assert!(content_part.contains("a=content:slides\r\n"));
+        assert!(content_part.contains("a=ssrc:20 cname:"));
+        assert!(content_part.contains("msid:") && content_part.contains(" content0"));
+        let camera_part = &answer[answer.find("a=mid:1").unwrap()..answer.find("a=mid:2").unwrap()];
+        assert!(!camera_part.contains("a=content:"));
+
+        // Without a content configuration the slides section is rejected.
+        p.content = None;
+        let (answer, negotiated) = build_answer(&p, &remote).unwrap();
+        assert!(negotiated.content.is_none());
+        assert!(
+            answer.contains("m=video 0 UDP/TLS/RTP/SAVPF 96"),
+            "{answer}"
+        );
+
+        // An offer of ours carries both sections and the extension.
+        p.content = Some(LocalVideo {
+            ssrc: 20,
+            codecs: &video_cfg,
+            direction: Direction::SendRecv,
+            mid: "2",
+            h264_profile_level_id: "42e01f",
+            max_kbps: None,
+            content: true,
+        });
+        p.mid_ext = Some(1);
+        let offer = build_offer(&p);
+        assert!(offer.contains("a=group:BUNDLE 0 1 2\r\n"), "{offer}");
+        assert_eq!(
+            offer
+                .matches("a=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\r\n")
+                .count(),
+            3
+        );
+        let parsed = parse_remote(&offer).unwrap();
+        assert_eq!(parsed.mid_ext, Some(1));
+        assert_eq!(parsed.content.unwrap().ssrc, Some(20));
+        assert_eq!(parsed.video.unwrap().ssrc, Some(10));
     }
 }

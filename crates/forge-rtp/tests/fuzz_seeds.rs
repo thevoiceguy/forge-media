@@ -246,6 +246,38 @@ fn frame_assembler_seeds() {
 }
 
 #[test]
+fn rtp_extension_seeds() {
+    use forge_rtp::rtp::RtpExtension;
+    for (name, ext) in [
+        (
+            "one_byte_mid",
+            RtpExtension::one_byte(&[(1, b"1"), (4, b"2")]),
+        ),
+        (
+            "two_byte_mid",
+            RtpExtension::two_byte(&[(1, b"video0"), (200, b"content")]),
+        ),
+    ] {
+        let mut packet = RtpPacket {
+            header: RtpHeader {
+                version_flags: 0x90,
+                marker_payload_type: 0xE0,
+                sequence_number: 1000,
+                timestamp: 90_000,
+                ssrc: 0x1234_5678,
+            },
+            csrc_list: Vec::new(),
+            extension: Some(ext),
+            payload: Bytes::from_static(&[0x10, 0x00, 0x9d, 0x01, 0x2a]),
+            padding_len: 0,
+        };
+        // The builder sets the extension bit; the literal above must too.
+        packet.header.version_flags |= 0x10;
+        write("rtp_extension", name, &packet.to_bytes());
+    }
+}
+
+#[test]
 fn rtcp_seeds() {
     let mut sr = SenderReport::new(0x1234_5678);
     sr.ntp_timestamp_msw = 0xE1B2_0000;

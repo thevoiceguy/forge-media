@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-11] — workspace release
+
 **A shared screen** (FCP video conferencing, phase 7a). A participant can
 send a second stream — the content of a screen or a window — and the room
 shows it large and plain, one at a time, to everyone.
@@ -60,6 +62,15 @@ and `for_screen()`.
 `is_slides`, `set_content`), RFC 4574 `a=label` (`label`, `set_label`) and
 `video_sections` (the camera and the slides of an offer); `answer_video`
 repeats the offer's content and label.
+
+**Crate versions:** **forge-conference 0.12.0**, **forge-video 0.5.0**,
+**forge-video-codecs 0.1.1**, **forge-sdp 0.2.2**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-codecs 0.2.0, forge-core 0.2.2,
+forge-dtmf 0.2.1, forge-engine 0.6.0, forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0,
+forge-injection 0.1.1, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0,
+forge-recorder 0.2.0, forge-resampler 0.1.1, forge-rtp 0.6.0, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0,
+forge-webm 0.1.0, forge-webrtc 0.6.0. Embeds siphon-rs **v2026.09.05**.
 
 Breaking: `TileSource` and `EncoderSettings` have a new field; `OutputKey`
 has a `view`; `SubscribeRequest::view` and `RecordRequest::view` are new;

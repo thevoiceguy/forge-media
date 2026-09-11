@@ -18,6 +18,7 @@ bytes = "1"
 forge-core = { path = "../crates/forge-core" }
 forge-rtp = { path = "../crates/forge-rtp" }
 forge-webm = { path = "../crates/forge-webm" }
+forge-bfcp = { path = "../crates/forge-bfcp" }
 
 # Every target parses attacker-supplied bytes and must not panic on any of
 # them. Debug assertions stay on: an overflow or a slice out of bounds should
@@ -26,6 +27,12 @@ forge-webm = { path = "../crates/forge-webm" }
 debug = true
 debug-assertions = true
 overflow-checks = true
+
+[[bin]]
+name = "bfcp_parse"
+path = "fuzz_targets/bfcp_parse.rs"
+test = false
+doc = false
 
 [[bin]]
 name = "rtp_extension"

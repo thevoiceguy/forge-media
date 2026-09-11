@@ -30,6 +30,7 @@ members = [
     "crates/forge-video",
     "crates/forge-video-codecs",
     "crates/forge-webm",
+    "crates/forge-bfcp",
 ]
 # forge-kernel-ebpf is a no_std eBPF crate built separately with nightly + bpfel-unknown-none.
 # See crates/forge-kernel/build.rs for instructions.

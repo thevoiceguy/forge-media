@@ -27,7 +27,7 @@ use forge_video::codec::{CodecRegistry, EncoderSettings};
 use forge_video::compose::{Compositor, HostCompositor, TileSource};
 use forge_video::flavor::Flavor;
 use forge_video::frame::{MediaDevice, Resolution, VideoFrame};
-use forge_video::ladder::{Ladder, LadderPolicy};
+use forge_video::ladder::{Ladder, LadderPolicy, Rung};
 use forge_video::layout::Layout;
 use forge_video::{ClockEvent, VideoClock};
 use metrics::{counter, gauge, histogram};
@@ -218,6 +218,85 @@ impl VideoState {
     }
 }
 
+/// Lets the video clock ask the room to give up an output's rung before it
+/// halves everybody's frame rate. The room's own state is behind
+/// `DashMap`s and a `Mutex`, so a shared reference is all this needs.
+struct RoomShedder<'a> {
+    room: &'a VideoRoom,
+}
+
+impl forge_video::LoadShedder for RoomShedder<'_> {
+    fn shed(&mut self) -> bool {
+        self.room.shed_one()
+    }
+
+    fn restore(&mut self) -> bool {
+        self.room.restore_one()
+    }
+}
+
+/// Where a subscriber actually goes, given the rung its link wants, the
+/// resolution it is on now, and the ceiling shedding has put on its scope.
+///
+/// A subscriber whose link has room may still be held down by a shed: the
+/// ceiling is about this node's CPU, not about the link, and climbing
+/// through it would undo the shedding on the very next tick. Going *down*
+/// is never clamped — a link that cannot carry the ceiling is a separate
+/// problem from the room overrunning, and the smaller picture is right for
+/// both. `None` when the subscriber should not move at all.
+fn clamp_to_cap(wants: Rung, at: Resolution, cap: Rung) -> Option<Rung> {
+    if wants.resolution.height <= cap.resolution.height {
+        return Some(wants);
+    }
+    // It wants to climb above the ceiling. Let it as far as the ceiling,
+    // if it is below that; otherwise it stays where it is.
+    (at.height < cap.resolution.height).then_some(cap)
+}
+
+/// Which output gives up a rung next, given what each live scope is held
+/// at today: the largest, and the scope's own order to settle a tie so
+/// that two runs of the same room shed the same way. `None` when every
+/// output is already at the bottom of the ladder.
+///
+/// Pure, because the rule is the interesting part and a `VideoRoom` needs
+/// a codec pool and an audio room to exist.
+fn next_to_shed(
+    held: &[(OutputScope, Rung)],
+    ladder: &Ladder,
+) -> Option<(OutputScope, Rung, Rung)> {
+    held.iter()
+        .filter_map(|(scope, at)| ladder.below(*at).map(|to| (scope.clone(), *at, to)))
+        .max_by(|(a_scope, a_at, _), (b_scope, b_at, _)| {
+            (a_at.resolution.height, a_scope).cmp(&(b_at.resolution.height, b_scope))
+        })
+}
+
+/// Which output gets a rung back next: the one furthest below the top,
+/// since it has the most to gain. `None` when nothing is shed. A cap that
+/// is already at the top rung is stale and is reported as such by the
+/// returned rungs being equal, so the caller can drop it.
+fn next_to_restore(
+    caps: &[(OutputScope, Rung)],
+    ladder: &Ladder,
+) -> Option<(OutputScope, Rung, Option<Rung>)> {
+    caps.iter()
+        .min_by(|(a_scope, a_at), (b_scope, b_at)| {
+            (a_at.resolution.height, a_scope).cmp(&(b_at.resolution.height, b_scope))
+        })
+        .map(|(scope, at)| (scope.clone(), *at, ladder.above(*at)))
+}
+
+/// Name a scope for an event or a log line: `all`, `excluding:<id>` or
+/// `local-only`. Chosen over `Debug` because these strings reach the
+/// conference server's JSON and its events, where they are read by people.
+fn scope_label(scope: &OutputScope) -> String {
+    match scope {
+        OutputScope::All => "all".to_string(),
+        OutputScope::Excluding(id) => format!("excluding:{id}"),
+        OutputScope::LocalOnly => "local-only".to_string(),
+    }
+}
+
 /// What the room tells the server about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VideoRoomEvent {
@@ -235,6 +314,16 @@ pub enum VideoRoomEvent {
         /// The remote tile they are behind, when they are on a peer node
         /// ([`RemoteSpeaker`]); `None` for a caller on this one.
         via: Option<String>,
+    },
+    /// An output was dropped a rung because the room could not keep up
+    /// (§9). Shedding happens before the frame rate is touched, so this
+    /// event says a picture got smaller while everyone's motion was left
+    /// alone; `FpsChanged { overload: true }` says shedding ran out.
+    Shed {
+        /// Which composite: `all`, `excluding:<id>` or `local-only`.
+        output: String,
+        from: Resolution,
+        to: Resolution,
     },
     /// Layout, pin or spotlight changed.
     LayoutChanged {
@@ -512,6 +601,12 @@ pub struct VideoRoom {
     /// This node's name, which settles a tie against a peer's claim.
     local_node: Mutex<String>,
     control: Mutex<Control>,
+    /// While the room is overrunning, the rung an output's scope may not
+    /// go above. Absent means the ladder's top, which is to say nothing is
+    /// shed. Keyed by scope rather than by `OutputKey`, because dropping a
+    /// rung changes an output's resolution and so its key: the scope is
+    /// what an output keeps across a shed.
+    shed_caps: DashMap<OutputScope, Rung>,
     /// Current and wanted clock rate; the clock task applies changes.
     fps: AtomicU32,
     target_fps: AtomicU32,
@@ -548,6 +643,7 @@ impl VideoRoom {
             subscribers: DashMap::new(),
             recorders: DashMap::new(),
             outputs: Mutex::new(HashMap::new()),
+            shed_caps: DashMap::new(),
             speaker: Mutex::new(ActiveSpeaker::default()),
             remote_speakers: DashMap::new(),
             forwarders: AtomicU32::new(0),
@@ -1344,7 +1440,10 @@ impl VideoRoom {
                     break;
                 }
                 let _ = rx.await;
-                if let Some(ev) = clock.done() {
+                // The clock asks this before it halves the rate, and again
+                // when a calm stretch means something can be given back.
+                let mut shedder = RoomShedder { room: &room };
+                if let Some(ev) = clock.done_with(&mut shedder) {
                     let (from, to, overload) = match ev {
                         ClockEvent::FpsHalved { from, to } => (from, to, true),
                         ClockEvent::FpsRestored { from, to } => (from, to, false),
@@ -1613,19 +1712,22 @@ impl VideoRoom {
         if ladder.rungs().len() < 2 {
             return;
         }
-        let moves: Vec<(String, forge_video::ladder::Rung)> = self
+        let moves: Vec<(String, Rung)> = self
             .subscribers
             .iter()
             .filter(|s| s.forwarded_source().is_none())
             .filter_map(|s| {
-                s.ladder_move(
+                let rung = s.ladder_move(
                     &ladder,
                     settings.ladder_policy,
                     settings.ladder_down_after,
                     settings.ladder_up_after,
                     now,
-                )
-                .map(|rung| (s.id.clone(), rung))
+                )?;
+                let output = s.output();
+                let cap = self.cap_for(&output.scope, &ladder);
+                let rung = clamp_to_cap(rung, output.resolution, cap)?;
+                Some((s.id.clone(), rung))
             })
             .collect();
         for (id, rung) in moves {
@@ -1633,15 +1735,149 @@ impl VideoRoom {
         }
     }
 
+    /// Give up one step of load: the largest output drops a rung (§9).
+    ///
+    /// Asked by the clock before it halves the room's frame rate, because
+    /// halving is the one cost everybody pays. A room overrunning on one
+    /// expensive composite should degrade that composite: the largest
+    /// output goes down a rung, then the next largest, and only when
+    /// every output is at the bottom does the clock take the frame rate.
+    ///
+    /// The rung becomes a *ceiling* on the scope rather than a one-off
+    /// move, or the ladder would put the subscribers straight back up on
+    /// the next tick — their links are fine; it is this node that is not.
+    ///
+    /// Returns whether anything was shed.
+    fn shed_one(&self) -> bool {
+        let settings = self.settings.read().clone();
+        let ladder = Ladder::for_room(settings.resolution);
+        if ladder.rungs().len() < 2 {
+            return false;
+        }
+
+        let held: Vec<(OutputScope, Rung)> = self
+            .live_scopes()
+            .into_iter()
+            .map(|scope| {
+                let at = self.cap_for(&scope, &ladder);
+                (scope, at)
+            })
+            .collect();
+        let Some((scope, from, to)) = next_to_shed(&held, &ladder) else {
+            return false;
+        };
+
+        self.shed_caps.insert(scope.clone(), to);
+        self.apply_cap(&scope, to, &settings);
+        counter!("forge_conference_video_shed_total", "room_id" => self.id.clone()).increment(1);
+        warn!(
+            room = %self.id,
+            output = %scope_label(&scope),
+            from = %from.resolution,
+            to = %to.resolution,
+            "video room is overrunning; dropped an output a rung"
+        );
+        let _ = self.events.send(VideoRoomEvent::Shed {
+            output: scope_label(&scope),
+            from: from.resolution,
+            to: to.resolution,
+        });
+        true
+    }
+
+    /// Take one step back: the most degraded output climbs a rung.
+    ///
+    /// Asked by the clock once the frame rate is whole again, so the room
+    /// gives back what it took in the opposite order — everyone's motion
+    /// first, then the pictures. The worst-off output goes first, on the
+    /// grounds that it has the most to gain.
+    ///
+    /// Returns whether anything was given back.
+    fn restore_one(&self) -> bool {
+        let settings = self.settings.read().clone();
+        let ladder = Ladder::for_room(settings.resolution);
+
+        let caps: Vec<(OutputScope, Rung)> = self
+            .shed_caps
+            .iter()
+            .map(|e| (e.key().clone(), *e.value()))
+            .collect();
+        let Some((scope, cap, above)) = next_to_restore(&caps, &ladder) else {
+            return false;
+        };
+        let Some(up) = above else {
+            // Capped at the top already: nothing to give back, and the
+            // entry is only noise.
+            self.shed_caps.remove(&scope);
+            return false;
+        };
+
+        if up == ladder.top() {
+            self.shed_caps.remove(&scope);
+        } else {
+            self.shed_caps.insert(scope.clone(), up);
+        }
+        // With the ladder on, raising the ceiling is enough: `walk_the_ladder`
+        // moves each subscriber up as its own link allows, and one whose link
+        // cannot take the higher rung stays where it is. With the ladder off
+        // there is no per-link judgement to wait for, so move them now.
+        if !settings.ladder {
+            self.apply_cap(&scope, up, &settings);
+        }
+        info!(
+            room = %self.id,
+            output = %scope_label(&scope),
+            from = %cap.resolution,
+            to = %up.resolution,
+            "video room is keeping up again; gave an output a rung back"
+        );
+        let _ = self.events.send(VideoRoomEvent::Shed {
+            output: scope_label(&scope),
+            from: cap.resolution,
+            to: up.resolution,
+        });
+        true
+    }
+
+    /// Every scope some subscriber is watching.
+    fn live_scopes(&self) -> Vec<OutputScope> {
+        let mut scopes: Vec<OutputScope> = self
+            .subscribers
+            .iter()
+            .map(|s| s.output().scope)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        scopes.sort();
+        scopes
+    }
+
+    /// The rung a scope is currently held at: its cap, or the ladder's top.
+    fn cap_for(&self, scope: &OutputScope, ladder: &Ladder) -> Rung {
+        self.shed_caps
+            .get(scope)
+            .map(|c| *c)
+            .unwrap_or_else(|| ladder.top())
+    }
+
+    /// Move every subscriber of `scope` that is above `cap` down onto it.
+    fn apply_cap(&self, scope: &OutputScope, cap: Rung, settings: &VideoRoomSettings) {
+        let ids: Vec<String> = self
+            .subscribers
+            .iter()
+            .filter(|s| &s.output().scope == scope)
+            .filter(|s| s.output().resolution.height > cap.resolution.height)
+            .map(|s| s.id.clone())
+            .collect();
+        for id in ids {
+            self.move_to_rung(&id, cap, settings);
+        }
+    }
+
     /// Put one subscriber on another rung: a flavor at that size and
     /// rate, the output that goes with it, an encoder for it, and the
     /// old flavor released if nobody is left on it.
-    fn move_to_rung(
-        &self,
-        id: &str,
-        rung: forge_video::ladder::Rung,
-        settings: &VideoRoomSettings,
-    ) {
+    fn move_to_rung(&self, id: &str, rung: Rung, settings: &VideoRoomSettings) {
         let Some(sub) = self.subscribers.get(id).map(|s| Arc::clone(&s)) else {
             return;
         };
@@ -1950,6 +2186,153 @@ mod tests {
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A 1080p room: rungs 1080, 720, 360, 180.
+    fn ladder() -> Ladder {
+        Ladder::for_room(Resolution::new(1920, 1080))
+    }
+
+    fn at(ladder: &Ladder, height: u32) -> Rung {
+        ladder.rung_for(Resolution::new(height * 16 / 9, height))
+    }
+
+    #[test]
+    fn shedding_takes_the_largest_output_first_then_the_next() {
+        let l = ladder();
+        let held = vec![
+            (OutputScope::LocalOnly, at(&l, 360)),
+            (OutputScope::All, at(&l, 1080)),
+            (OutputScope::Excluding("a".into()), at(&l, 720)),
+        ];
+        // The 1080p one goes first, down one rung.
+        let (scope, from, to) = next_to_shed(&held, &l).expect("something to shed");
+        assert_eq!(scope, OutputScope::All);
+        assert_eq!(from.resolution.height, 1080);
+        assert_eq!(to.resolution.height, 720);
+
+        // With that one at 720 the next largest is picked, and the tie
+        // between the two 720s is settled the same way every time.
+        let held = vec![
+            (OutputScope::LocalOnly, at(&l, 360)),
+            (OutputScope::All, at(&l, 720)),
+            (OutputScope::Excluding("a".into()), at(&l, 720)),
+        ];
+        let first = next_to_shed(&held, &l).expect("something to shed");
+        let again = next_to_shed(&held, &l).expect("something to shed");
+        assert_eq!(first.0, again.0, "the choice is deterministic");
+        assert_eq!(first.1.resolution.height, 720);
+    }
+
+    #[test]
+    fn shedding_stops_when_every_output_is_at_the_bottom() {
+        let l = ladder();
+        let held = vec![
+            (OutputScope::All, at(&l, 180)),
+            (OutputScope::LocalOnly, at(&l, 180)),
+        ];
+        assert_eq!(next_to_shed(&held, &l), None, "the clock takes over here");
+        assert_eq!(next_to_shed(&[], &l), None, "a room with no subscribers");
+    }
+
+    #[test]
+    fn restoring_takes_the_worst_off_output_first() {
+        let l = ladder();
+        let caps = vec![
+            (OutputScope::All, at(&l, 720)),
+            (OutputScope::LocalOnly, at(&l, 180)),
+        ];
+        let (scope, from, up) = next_to_restore(&caps, &l).expect("something to restore");
+        assert_eq!(scope, OutputScope::LocalOnly, "the smallest picture first");
+        assert_eq!(from.resolution.height, 180);
+        assert_eq!(up.expect("a rung above").resolution.height, 360);
+    }
+
+    #[test]
+    fn restoring_reports_a_cap_that_is_already_at_the_top() {
+        let l = ladder();
+        assert_eq!(next_to_restore(&[], &l), None, "nothing shed");
+        let caps = vec![(OutputScope::All, at(&l, 1080))];
+        let (_, _, up) = next_to_restore(&caps, &l).expect("an entry");
+        assert_eq!(up, None, "so the caller can drop the stale cap");
+    }
+
+    #[test]
+    fn shedding_and_restoring_walk_the_same_path_in_reverse() {
+        let l = ladder();
+        let mut caps = vec![
+            (OutputScope::All, at(&l, 1080)),
+            (OutputScope::LocalOnly, at(&l, 1080)),
+        ];
+        // Shed until there is nothing left, remembering the order.
+        let mut down = Vec::new();
+        while let Some((scope, _, to)) = next_to_shed(&caps, &l) {
+            down.push((scope.clone(), to));
+            for entry in caps.iter_mut() {
+                if entry.0 == scope {
+                    entry.1 = to;
+                }
+            }
+        }
+        assert_eq!(down.len(), 6, "two outputs, three rungs each to give up");
+        assert!(caps.iter().all(|(_, r)| r.resolution.height == 180));
+
+        // Restore until everything is back at the top.
+        let mut steps = 0;
+        while let Some((scope, _, Some(up))) = next_to_restore(&caps, &l) {
+            steps += 1;
+            for entry in caps.iter_mut() {
+                if entry.0 == scope {
+                    entry.1 = up;
+                }
+            }
+            assert!(steps <= 6, "restoring must terminate");
+        }
+        assert_eq!(steps, 6, "everything given back, one rung at a time");
+        assert!(caps.iter().all(|(_, r)| r.resolution.height == 1080));
+    }
+
+    #[test]
+    fn a_shed_ceiling_holds_a_good_link_down_but_never_pushes_one_up() {
+        let l = ladder();
+        let (top, mid, low) = (at(&l, 1080), at(&l, 720), at(&l, 360));
+
+        // Nothing shed: the ladder gets what it asked for.
+        assert_eq!(
+            clamp_to_cap(top, Resolution::new(1280, 720), top),
+            Some(top)
+        );
+
+        // Shed to 720. A link with room for 1080 is held at 720 — and if
+        // it is already there, it does not move at all, so the room is not
+        // asked to rebuild the same flavor every tick.
+        assert_eq!(
+            clamp_to_cap(top, Resolution::new(640, 360), mid),
+            Some(mid),
+            "climbs as far as the ceiling"
+        );
+        assert_eq!(
+            clamp_to_cap(top, Resolution::new(1280, 720), mid),
+            None,
+            "already at the ceiling: stays put"
+        );
+
+        // Down is never clamped: a link that cannot carry the ceiling gets
+        // the smaller picture it asked for.
+        assert_eq!(
+            clamp_to_cap(low, Resolution::new(1280, 720), mid),
+            Some(low)
+        );
+    }
+
+    #[test]
+    fn a_scope_is_named_for_the_events_people_read() {
+        assert_eq!(scope_label(&OutputScope::All), "all");
+        assert_eq!(scope_label(&OutputScope::LocalOnly), "local-only");
+        assert_eq!(
+            scope_label(&OutputScope::Excluding("alice".into())),
+            "excluding:alice"
+        );
     }
 
     #[test]

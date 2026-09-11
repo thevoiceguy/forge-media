@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**A shared screen** (FCP video conferencing, phase 7a). A participant can
+send a second stream — the content of a screen or a window — and the room
+shows it large and plain, one at a time, to everyone.
+
+**`forge-conference` 0.12.0**: a `content` module. A source has a
+`StreamKind`, `Camera` or `Content`, and sources and channels are keyed by
+participant *and* kind (`SourceKey`); `add_source_kind`, `push_rtp_kind`,
+`subscribe_kind`, `handle_feedback_kind` and their camera-only shorthands
+(`add_source`, `push_rtp`, `subscribe`, … unchanged). One participant at a
+time holds the **floor**: the first content packet takes it when it is free,
+a `ContentGate` can refuse a grant the node cannot afford, and it is given up
+when the presenter stops (`release_content`, the source removed), leaves,
+sends nothing for `content_idle` (30 s, judged on packets, since a still slide
+is not a lost one), or a host stops them (`stop_content`, after which
+`set_participant_content_enabled` lets them back). Refusals are reported once
+per participant per floor. Every output names a `View`: `Composite` (the
+layout, and a presentation — or the content alone, per `content_layout` —
+while a screen is shared), `Cameras` (never the content) and `Content` (the
+content alone, letterboxed, no chrome, nothing at all while nobody shares).
+An endpoint with one video section takes `Composite`; one with a content
+section of its own takes `Cameras` on its main section and `Content` on the
+other, and is never sent its own share back. A content channel is capped at
+`content_max_resolution` (1080p) rather than the room's canvas, is forwarded
+verbatim under any passthrough mode but `Off` (there is no banner on it to
+lose), is not on the resolution ladder (it moves in frame rate instead:
+`Subscriber::fps_move`), and is shed last. A recording's `Composite` view
+follows a share into the presentation and back. `add_remote_content` brings a
+peer's screen over a trunk (7d). Events: `ParticipantState` carries the
+`kind`, `LayoutChanged` the `content_layout`, and `Content { participant_id,
+event: Started | Stopped(reason) | Refused(reason) }` is new; `Shed.output`
+names the view after the scope when it is not the composite.
+`VideoParticipantInfo` gains `content_state`, `presenting`, `content` and
+`content_subscription`; `VideoRoomStatus` gains `content` and
+`content_layout`; `VideoSubscriberInfo::forwarding` is a `SourceKey`.
+Metrics: `forge_conference_video_content_rooms`, `…_content_started_total`,
+`…_content_stopped_total` (by reason), `…_content_refused_total` (by reason)
+and `…_content_packets_refused_total`.
+
+**`forge-video` 0.5.0**: `Layout::Presentation` (the active-speaker geometry
+with the shared screen as its subject); `TileSource::kind` (`TileKind::Content`
+draws the picture alone — no border, no name band, no avatar — shrunk with a
+box filter so text survives); `scale::box_plane`, `ScaleMode`, `resize_with`,
+`letterbox_with` and `fit_within`; `EncoderSettings::content` (`ContentHint`)
+and `for_screen()`.
+
+**`forge-video-codecs` 0.1.1**: `ContentHint::Screen` selects OpenH264's
+`ScreenContentRealTime`, libvpx's `VP8E_SET_SCREEN_CONTENT_MODE` /
+`VP9E_SET_TUNE_CONTENT` and SVT-AV1's `screen_content_mode`.
+
+**`forge-sdp` 0.2.2**: RFC 4796 `a=content` (`Content`, `contents`,
+`is_slides`, `set_content`), RFC 4574 `a=label` (`label`, `set_label`) and
+`video_sections` (the camera and the slides of an offer); `answer_video`
+repeats the offer's content and label.
+
+Breaking: `TileSource` and `EncoderSettings` have a new field; `OutputKey`
+has a `view`; `SubscribeRequest::view` and `RecordRequest::view` are new;
+`Subscriber::new` takes the channel's kind; `VideoRoomEvent::ParticipantState`
+and `LayoutChanged` carry one more field.
+
 ## [2026-09-10.1] — workspace release
 
 **HEP media chunks on the call they belong to.** forge-engine stamped every HEP RTCP

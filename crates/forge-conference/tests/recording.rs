@@ -36,6 +36,7 @@ impl Camera {
             bitrate_kbps: 500,
             keyframe_interval: 30,
             profile: String::new(),
+            content: Default::default(),
         };
         Self {
             enc: raw_registry()
@@ -106,6 +107,7 @@ fn subscribe(codec: VideoCodec) -> SubscribeRequest {
         fps: None,
         max_kbps: None,
         scope: None,
+        view: None,
     }
 }
 

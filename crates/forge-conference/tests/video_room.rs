@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use forge_conference::video::{
-    OutputScope, PassthroughMode, RemoteSpeaker, SubscribeRequest, VideoBackend, VideoRoomEvent,
-    VideoRoomSettings, VideoState,
+    ContentEvent, ContentLayout, ContentRefusal, ContentStop, OutputScope, PassthroughMode,
+    RemoteSpeaker, SourceKey, StreamKind, SubscribeRequest, VideoBackend, VideoRoomEvent,
+    VideoRoomSettings, VideoState, View,
 };
 use forge_conference::{AudioFormat, ConferenceRoom};
 use forge_core::VideoCodec;
@@ -39,6 +40,7 @@ impl Camera {
             bitrate_kbps: 500,
             keyframe_interval: 30,
             profile: String::new(),
+            content: Default::default(),
         };
         Self {
             enc: raw_registry()
@@ -136,6 +138,7 @@ fn subscribe(codec: VideoCodec, res: Option<Resolution>) -> SubscribeRequest {
         fps: None,
         max_kbps: None,
         scope: None,
+        view: None,
     }
 }
 
@@ -854,7 +857,7 @@ async fn a_single_source_is_forwarded_and_a_second_one_brings_the_composite_back
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let sub_info = video.participant("bob").unwrap().subscription.unwrap();
-    assert_eq!(sub_info.forwarding.as_deref(), Some("alice"));
+    assert_eq!(sub_info.forwarding, Some(SourceKey::camera("alice")));
     assert_eq!(sub_info.ssrc, sub.ssrc, "his own SSRC throughout");
     // Nothing is being encoded for him.
     assert_eq!(
@@ -1048,4 +1051,720 @@ async fn a_poor_link_moves_down_the_ladder_instead_of_dragging_everyone_with_it(
     );
 
     feeder.abort();
+}
+
+/// Wait for a room event that passes `check`, or fail after five seconds.
+async fn wait_for_event(
+    events: &mut tokio::sync::broadcast::Receiver<VideoRoomEvent>,
+    what: &str,
+    check: impl Fn(&VideoRoomEvent) -> bool,
+) -> VideoRoomEvent {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let ev = timeout(deadline - tokio::time::Instant::now(), events.recv())
+            .await
+            .unwrap_or_else(|_| panic!("no {what} event in time"))
+            .expect("events open");
+        if check(&ev) {
+            return ev;
+        }
+    }
+}
+
+/// Feed a camera or a screen on its own task until aborted.
+fn feed(
+    video: &Arc<forge_conference::video::VideoRoom>,
+    id: &str,
+    kind: StreamKind,
+    mut cam: Camera,
+    luma: u8,
+) -> tokio::task::JoinHandle<()> {
+    let video = Arc::clone(video);
+    let id = id.to_string();
+    tokio::spawn(async move {
+        loop {
+            for p in cam.frame(luma) {
+                video.push_rtp_kind(&id, kind, p);
+            }
+            tokio::time::sleep(Duration::from_millis(33)).await;
+        }
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_screen_takes_the_floor_and_the_composite_becomes_a_presentation() {
+    // Alice shares her screen (§15.6): the composite everyone with one
+    // video section gets — and the recording — puts it in the main
+    // region with the cameras in a strip; a second sharer is refused
+    // while she holds the floor and gets it the moment she stops.
+    let audio = audio_room("share");
+    audio.add_participant("alice", true).unwrap();
+    audio.add_participant("bob", false).unwrap();
+    let video = audio.enable_video(settings(320, 180, 30), &VideoBackend::raw());
+    let mut events = video.events();
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
+    video.add_source("bob", VideoCodec::VP8, "").unwrap();
+    video
+        .add_source_kind("alice", StreamKind::Content, VideoCodec::VP8, "")
+        .unwrap();
+    let mut sub = video
+        .subscribe("bob", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    let mut alice_sub = video
+        .subscribe("alice", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    let mut recording = video
+        .record(
+            "rec",
+            forge_conference::video::RecordRequest::new(VideoCodec::VP8),
+        )
+        .unwrap();
+
+    let cams = [
+        feed(
+            &video,
+            "alice",
+            StreamKind::Camera,
+            Camera::new(1, 128, 72),
+            200,
+        ),
+        feed(
+            &video,
+            "bob",
+            StreamKind::Camera,
+            Camera::new(2, 128, 72),
+            60,
+        ),
+    ];
+    // Two cameras, a grid, and no share yet.
+    let mut screen = Screen::new();
+    wait_for_composite(&mut sub.packets, &mut screen, |f| {
+        f.luma(79, 90) == 200 && f.luma(241, 90) == 60
+    })
+    .await;
+    assert!(video.content().is_none());
+    assert_eq!(
+        video.participant("alice").unwrap().content_state,
+        VideoState::Lost,
+        "a section, no frames yet"
+    );
+
+    // Her first content packet takes the floor.
+    let doc = feed(
+        &video,
+        "alice",
+        StreamKind::Content,
+        Camera::new(3, 160, 90),
+        90,
+    );
+    let started = wait_for_event(&mut events, "content started", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Started,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(
+        matches!(started, VideoRoomEvent::Content { ref participant_id, .. } if participant_id == "alice")
+    );
+    // The composite is a presentation: her screen in the main region,
+    // the two cameras in the strip at the right.
+    wait_for_composite(&mut sub.packets, &mut screen, |f| {
+        f.luma(118, 90) == 90 && f.luma(280, 44) == 200 && f.luma(280, 136) == 60
+    })
+    .await;
+    let info = video.participant("alice").unwrap();
+    assert!(info.presenting);
+    assert_eq!(info.content_state, VideoState::On);
+    assert_eq!(info.state, VideoState::On, "her camera is still on too");
+    let content = info.content.expect("the screen's ingress");
+    assert_eq!(content.resolution, Resolution::new(160, 90));
+    let st = video.status();
+    let c = st.content.expect("a share under way");
+    assert_eq!(c.participant_id, "alice");
+    assert!(c.live);
+    assert_eq!(st.content_layout, ContentLayout::Presentation);
+    assert_eq!(st.sources, 3, "two cameras and a screen");
+    assert!(!video.participant("bob").unwrap().presenting);
+
+    // The recording follows the composite into the presentation.
+    let mut rec_dec = raw_registry()
+        .decoder(VideoCodec::VP8, &MediaDevice::Host)
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let f = timeout(
+            deadline - tokio::time::Instant::now(),
+            recording.frames.recv(),
+        )
+        .await
+        .expect("recorded frames keep coming")
+        .expect("recording open");
+        if let Some(frame) = rec_dec
+            .decode(&f.frame)
+            .unwrap()
+            .and_then(|v| v.into_host())
+        {
+            if frame.luma(118, 90) == 90 && frame.luma(280, 44) == 200 {
+                break;
+            }
+        }
+    }
+
+    // Bob tries to share too: refused, once, while Alice holds the floor.
+    video
+        .add_source_kind("bob", StreamKind::Content, VideoCodec::VP8, "")
+        .unwrap();
+    let bob_doc = feed(
+        &video,
+        "bob",
+        StreamKind::Content,
+        Camera::new(4, 160, 90),
+        30,
+    );
+    let refused = wait_for_event(&mut events, "content refused", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Refused(_),
+                ..
+            }
+        )
+    })
+    .await;
+    assert_eq!(
+        refused,
+        VideoRoomEvent::Content {
+            participant_id: "bob".into(),
+            event: ContentEvent::Refused(ContentRefusal::Held("alice".into())),
+        }
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        video
+            .participant("bob")
+            .unwrap()
+            .content
+            .unwrap()
+            .packets_received,
+        0,
+        "refused packets never reach his decoder"
+    );
+    assert_eq!(video.content_holder().as_deref(), Some("alice"));
+    assert_eq!(
+        video.request_content("bob"),
+        Err(ContentRefusal::Held("alice".into()))
+    );
+    assert_eq!(video.request_content("alice"), Ok(()), "holding it already");
+
+    // Alice's content section goes away: the floor is free, the grid is
+    // back, and Bob's next packets take it.
+    doc.abort();
+    video.remove_source_kind("alice", StreamKind::Content);
+    let stopped = wait_for_event(&mut events, "content stopped", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Stopped(_),
+                ..
+            }
+        )
+    })
+    .await;
+    assert_eq!(
+        stopped,
+        VideoRoomEvent::Content {
+            participant_id: "alice".into(),
+            event: ContentEvent::Stopped(ContentStop::Ended),
+        }
+    );
+    assert_eq!(
+        video.participant("alice").unwrap().content_state,
+        VideoState::Off
+    );
+    let started = wait_for_event(&mut events, "bob's share", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Started,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(
+        matches!(started, VideoRoomEvent::Content { ref participant_id, .. } if participant_id == "bob")
+    );
+    wait_for_composite(&mut sub.packets, &mut screen, |f| f.luma(118, 90) == 30).await;
+    assert_eq!(video.content_holder().as_deref(), Some("bob"));
+
+    // Bob leaves: the floor goes with him and the grid is Alice alone.
+    bob_doc.abort();
+    audio.remove_participant("bob").unwrap();
+    let stopped = wait_for_event(&mut events, "bob left", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Stopped(ContentStop::Left),
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(
+        matches!(stopped, VideoRoomEvent::Content { ref participant_id, .. } if participant_id == "bob")
+    );
+    let mut alice_screen = Screen::new();
+    wait_for_composite(&mut alice_sub.packets, &mut alice_screen, |f| {
+        f.luma(160, 90) == 200
+    })
+    .await;
+    for c in cams {
+        c.abort();
+    }
+    audio.disable_video();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_content_channel_gets_the_slides_alone_and_the_cameras_stay_on_the_main() {
+    // Carol's endpoint has a content section of its own: people on her
+    // main section, the slides on the other — forwarded from Alice's own
+    // stream, since there is no banner to lose (§15.6). Alice's own
+    // content channel is sent nothing.
+    let audio = audio_room("channels");
+    for id in ["alice", "carol"] {
+        audio.add_participant(id, id == "alice").unwrap();
+    }
+    let video = audio.enable_video(
+        VideoRoomSettings {
+            passthrough: PassthroughMode::Auto,
+            ..settings(320, 180, 30)
+        },
+        &VideoBackend::raw(),
+    );
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
+    video
+        .add_source_kind("alice", StreamKind::Content, VideoCodec::VP8, "")
+        .unwrap();
+    let mut carol_main = video
+        .subscribe(
+            "carol",
+            SubscribeRequest {
+                view: Some(View::Cameras),
+                ..subscribe(VideoCodec::VP8, None)
+            },
+        )
+        .unwrap();
+    let mut carol_content = video
+        .subscribe_kind(
+            "carol",
+            StreamKind::Content,
+            subscribe(VideoCodec::VP8, None),
+        )
+        .unwrap();
+    let _alice_content = video
+        .subscribe_kind(
+            "alice",
+            StreamKind::Content,
+            subscribe(VideoCodec::VP8, None),
+        )
+        .unwrap();
+    assert!(video.has_subscriber_kind("carol", StreamKind::Content));
+    assert!(
+        !video.has_subscriber("alice"),
+        "no main subscription for alice"
+    );
+    // The content channel is capped at the content cap, not the canvas.
+    assert_eq!(carol_content.flavor.resolution, Resolution::new(1920, 1080));
+    assert_eq!(
+        video
+            .participant("carol")
+            .unwrap()
+            .content_subscription
+            .unwrap()
+            .view,
+        View::Content
+    );
+
+    let cam = feed(
+        &video,
+        "alice",
+        StreamKind::Camera,
+        Camera::new(1, 128, 72),
+        200,
+    );
+    let doc = feed(
+        &video,
+        "alice",
+        StreamKind::Content,
+        Camera::new(3, 160, 90),
+        90,
+    );
+
+    // Her content channel is Alice's own stream, at its own size.
+    let mut screen = Screen::new();
+    let frame = wait_for_composite(&mut carol_content.packets, &mut screen, |f| {
+        f.luma(80, 45) == 90
+    })
+    .await;
+    assert_eq!(
+        frame.resolution(),
+        Resolution::new(160, 90),
+        "forwarded, not composed"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while video
+        .participant("carol")
+        .and_then(|p| p.content_subscription)
+        .and_then(|s| s.forwarding)
+        .is_none()
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        video
+            .participant("carol")
+            .unwrap()
+            .content_subscription
+            .unwrap()
+            .forwarding,
+        Some(SourceKey::content("alice"))
+    );
+    // Her main is the cameras: Alice's camera alone, never the slides.
+    let mut main = Screen::new();
+    // (Two tiles: Alice's camera and Carol's own avatar.)
+    let frame = wait_for_composite(&mut carol_main.packets, &mut main, |f| {
+        f.luma(79, 90) == 200
+    })
+    .await;
+    assert_ne!(frame.luma(118, 90), 90);
+    assert_eq!(video.status().layout, Layout::Grid);
+    // Alice's own content channel: nothing at all.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let own = video
+        .participant("alice")
+        .unwrap()
+        .content_subscription
+        .unwrap();
+    assert_eq!(
+        own.packets_sent, 0,
+        "a presenter is not sent her own screen"
+    );
+    assert_eq!(own.forwarding, None);
+
+    // Passthrough off: the content channel is composed — the slides
+    // alone on a canvas, no chrome — rather than forwarded.
+    audio.disable_video();
+    cam.abort();
+    doc.abort();
+    let audio = audio_room("channels-composed");
+    for id in ["alice", "carol"] {
+        audio.add_participant(id, id == "alice").unwrap();
+    }
+    let video = audio.enable_video(settings(320, 180, 30), &VideoBackend::raw());
+    video
+        .add_source_kind("alice", StreamKind::Content, VideoCodec::VP8, "")
+        .unwrap();
+    let mut carol_content = video
+        .subscribe_kind(
+            "carol",
+            StreamKind::Content,
+            subscribe(VideoCodec::VP8, Some(Resolution::new(320, 180))),
+        )
+        .unwrap();
+    // Nothing shared: nothing sent on the content channel.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        video
+            .participant("carol")
+            .unwrap()
+            .content_subscription
+            .unwrap()
+            .packets_sent,
+        0
+    );
+    let doc = feed(
+        &video,
+        "alice",
+        StreamKind::Content,
+        Camera::new(3, 120, 90),
+        90,
+    );
+    let mut screen = Screen::new();
+    let frame = wait_for_composite(&mut carol_content.packets, &mut screen, |f| {
+        f.luma(160, 90) == 90
+    })
+    .await;
+    assert_eq!(
+        frame.resolution(),
+        Resolution::new(320, 180),
+        "composed onto the channel's canvas"
+    );
+    assert_eq!(
+        frame.luma(160, 2),
+        90,
+        "right up to the edge: no border, no band"
+    );
+    assert_eq!(
+        frame.luma(10, 90),
+        24,
+        "pillar bars for a 4:3 screen, in the background colour"
+    );
+    assert_eq!(
+        video
+            .participant("carol")
+            .unwrap()
+            .content_subscription
+            .unwrap()
+            .forwarding,
+        None
+    );
+    doc.abort();
+    audio.disable_video();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_still_screen_is_not_lost_and_an_idle_one_frees_the_floor() {
+    // A slide that has not changed is still being shared: the content
+    // source has no freeze timeout. A sender that has stopped sending is
+    // not: after the idle timeout the floor is free.
+    let audio = audio_room("idle");
+    audio.add_participant("alice", true).unwrap();
+    audio.add_participant("bob", false).unwrap();
+    let video = audio.enable_video(
+        VideoRoomSettings {
+            content_idle: Duration::from_millis(1200),
+            ..settings(320, 180, 30)
+        },
+        &VideoBackend::raw(),
+    );
+    let mut events = video.events();
+    video
+        .add_source_kind("alice", StreamKind::Content, VideoCodec::VP8, "")
+        .unwrap();
+    let mut sub = video
+        .subscribe("bob", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    let mut doc = Camera::new(3, 160, 90);
+    for _ in 0..10 {
+        for p in doc.frame(90) {
+            video.push_rtp_kind("alice", StreamKind::Content, p);
+        }
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    }
+    let mut screen = Screen::new();
+    wait_for_composite(&mut sub.packets, &mut screen, |f| f.luma(118, 90) == 90).await;
+
+    // Well past the camera freeze timeout (300 ms here) and nothing has
+    // been sent: still on, still shown.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        video.participant("alice").unwrap().content_state,
+        VideoState::On
+    );
+    assert_eq!(video.content_holder().as_deref(), Some("alice"));
+    let frame = wait_for_composite(&mut sub.packets, &mut screen, |_| true).await;
+    assert_eq!(
+        frame.luma(118, 90),
+        90,
+        "the last slide is what it looks like"
+    );
+
+    // Past the idle timeout: the floor is given up.
+    let stopped = wait_for_event(&mut events, "idle stop", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Stopped(_),
+                ..
+            }
+        )
+    })
+    .await;
+    assert_eq!(
+        stopped,
+        VideoRoomEvent::Content {
+            participant_id: "alice".into(),
+            event: ContentEvent::Stopped(ContentStop::Idle),
+        }
+    );
+    assert!(video.content().is_none());
+    wait_for_composite(&mut sub.packets, &mut screen, |f| f.luma(118, 90) != 90).await;
+    // Sending again takes it straight back.
+    for p in doc.frame(90) {
+        video.push_rtp_kind("alice", StreamKind::Content, p);
+    }
+    assert_eq!(video.content_holder().as_deref(), Some("alice"));
+    audio.disable_video();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_stops_a_share_and_the_presenter_cannot_take_it_back_by_sending() {
+    let audio = audio_room("host-stop");
+    audio.add_participant("alice", true).unwrap();
+    audio.add_participant("bob", false).unwrap();
+    let video = audio.enable_video(settings(320, 180, 30), &VideoBackend::raw());
+    let mut events = video.events();
+    video
+        .add_source_kind("alice", StreamKind::Content, VideoCodec::VP8, "")
+        .unwrap();
+    let _sub = video
+        .subscribe("bob", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    // Nobody can be granted a floor for a source they do not have, and a
+    // room with sharing off refuses everyone.
+    assert_eq!(video.request_content("bob"), Err(ContentRefusal::NoSource));
+    assert!(!video.release_content("alice"), "not holding it");
+    assert_eq!(video.stop_content(), None);
+
+    let doc = feed(
+        &video,
+        "alice",
+        StreamKind::Content,
+        Camera::new(3, 160, 90),
+        90,
+    );
+    wait_for_event(&mut events, "started", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Started,
+                ..
+            }
+        )
+    })
+    .await;
+
+    // The host stops it. Alice keeps sending: refused, and told once.
+    assert_eq!(video.stop_content().as_deref(), Some("alice"));
+    let ev = wait_for_event(&mut events, "host stop", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Stopped(_),
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(matches!(
+        ev,
+        VideoRoomEvent::Content {
+            event: ContentEvent::Stopped(ContentStop::Host),
+            ..
+        }
+    ));
+    let ev = wait_for_event(&mut events, "refused", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Refused(_),
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(matches!(
+        ev,
+        VideoRoomEvent::Content {
+            event: ContentEvent::Refused(ContentRefusal::ParticipantDisabled),
+            ..
+        }
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(video.content_holder().is_none());
+    assert_eq!(
+        video.participant("alice").unwrap().content_state,
+        VideoState::Disabled
+    );
+    assert_eq!(
+        video.request_content("alice"),
+        Err(ContentRefusal::ParticipantDisabled)
+    );
+    // Only one refusal is reported for the same floor.
+    assert!(
+        events.try_recv().is_err()
+            || !matches!(
+                events.try_recv(),
+                Ok(VideoRoomEvent::Content {
+                    event: ContentEvent::Refused(_),
+                    ..
+                })
+            ),
+    );
+
+    // Let her back: her packets take the floor again.
+    video.set_participant_content_enabled("alice", true);
+    let ev = wait_for_event(&mut events, "started again", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Started,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(
+        matches!(ev, VideoRoomEvent::Content { ref participant_id, .. } if participant_id == "alice")
+    );
+    // She stops herself (a BFCP release, a track that ended).
+    assert!(video.release_content("alice"));
+    let ev = wait_for_event(&mut events, "released", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Stopped(_),
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(matches!(
+        ev,
+        VideoRoomEvent::Content {
+            event: ContentEvent::Stopped(ContentStop::Ended),
+            ..
+        }
+    ));
+    doc.abort();
+
+    // A room with sharing off.
+    let video2 = {
+        audio.disable_video();
+        audio.enable_video(
+            VideoRoomSettings {
+                content: false,
+                ..settings(320, 180, 30)
+            },
+            &VideoBackend::raw(),
+        )
+    };
+    video2
+        .add_source_kind("alice", StreamKind::Content, VideoCodec::VP8, "")
+        .unwrap();
+    assert_eq!(
+        video2.request_content("alice"),
+        Err(ContentRefusal::Disabled)
+    );
+    // The content layout is a live control and reaches the event.
+    let mut events2 = video2.events();
+    video2.set_content_layout(ContentLayout::ContentOnly);
+    assert_eq!(video2.content_layout(), ContentLayout::ContentOnly);
+    let ev = wait_for_event(&mut events2, "layout", |ev| {
+        matches!(ev, VideoRoomEvent::LayoutChanged { .. })
+    })
+    .await;
+    assert!(matches!(
+        ev,
+        VideoRoomEvent::LayoutChanged {
+            content_layout: ContentLayout::ContentOnly,
+            ..
+        }
+    ));
+    audio.disable_video();
 }

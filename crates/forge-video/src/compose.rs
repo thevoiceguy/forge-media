@@ -15,7 +15,20 @@ use crate::codec::CodecError;
 use crate::font;
 use crate::frame::{HostFrame, MediaDevice, Resolution, VideoFrame};
 use crate::layout::{Layout, Rect};
-use crate::scale;
+use crate::scale::{self, ScaleMode};
+
+/// What a tile shows: a person, or a shared screen.
+///
+/// A content tile is drawn plain — no border, no name band, no avatar,
+/// shrunk with a box filter so text survives — because it is a picture
+/// of a document, not of a participant, and every pixel of chrome on it
+/// is a pixel of the document lost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum TileKind {
+    #[default]
+    Camera,
+    Content,
+}
 
 /// One participant as the compositor sees it.
 #[derive(Debug, Clone)]
@@ -30,6 +43,9 @@ pub struct TileSource<'a> {
     pub frame: Option<&'a VideoFrame>,
     pub speaking: bool,
     pub muted: bool,
+    /// A camera (labelled, bordered, an avatar when there is no frame)
+    /// or shared content (the picture alone).
+    pub kind: TileKind,
 }
 
 /// Colours in Y/U/V, limited range.
@@ -132,6 +148,20 @@ impl HostCompositor {
 
     fn draw_tile(&mut self, src: &TileSource<'_>, frame: Option<&HostFrame>, rect: Rect) {
         let t = self.theme;
+        if src.kind == TileKind::Content {
+            // The document, and nothing on top of it. Without a frame
+            // there is nothing to say either: the room falls back to
+            // its cameras before it draws an empty content tile, so
+            // this is only ever a tick's worth of background.
+            let canvas = self.canvas_mut();
+            match frame {
+                Some(frame) => {
+                    scale::letterbox_with(canvas, rect, frame, t.background, ScaleMode::Box)
+                }
+                None => scale::fill(canvas, rect, t.background.0, t.background.1, t.background.2),
+            }
+            return;
+        }
         let border = t.border_px.min(rect.w / 8).min(rect.h / 8);
         let canvas = self.canvas_mut();
         // Border ring: bright when speaking, tile colour otherwise.
@@ -272,6 +302,14 @@ mod tests {
             frame,
             speaking,
             muted: false,
+            kind: TileKind::Camera,
+        }
+    }
+
+    fn content<'a>(frame: Option<&'a VideoFrame>) -> TileSource<'a> {
+        TileSource {
+            kind: TileKind::Content,
+            ..src("screen", frame, true)
         }
     }
 
@@ -347,6 +385,57 @@ mod tests {
             .unwrap();
         // PiP corner holds b's picture (with a label band below it).
         assert_eq!(c.host_canvas().luma(112, 56), 200);
+    }
+
+    #[test]
+    fn a_content_tile_is_the_picture_alone_and_a_presentation_puts_it_first() {
+        // A shared screen at 4:3 into a 16:9 room, "speaking" and all: no
+        // border, no band, bars in the background colour, and the picture
+        // right up to the rectangle's edge.
+        let doc = solid(120, 90, 200);
+        let mut c = HostCompositor::new(320, 180, Layout::Spotlight);
+        c.render(&[content(Some(&doc))], 0).unwrap();
+        let canvas = c.host_canvas();
+        let t = Theme::default();
+        assert_eq!(canvas.luma(160, 90), 200, "the document");
+        assert_eq!(canvas.luma(160, 1), 200, "up to the top edge: no border");
+        assert_eq!(canvas.luma(160, 178), 200, "and the bottom: no label band");
+        assert_eq!(
+            canvas.luma(10, 90),
+            t.background.0,
+            "pillar bars, in the background colour"
+        );
+        assert_ne!(
+            canvas.luma(1, 90),
+            t.speaking_border.0,
+            "no speaking ring on a document"
+        );
+
+        // In a presentation the content takes the main region and the
+        // cameras the strip, chrome and all.
+        let cam = solid(64, 36, 100);
+        let mut p = HostCompositor::new(320, 180, Layout::Presentation).with_theme(flat());
+        p.render(
+            &[
+                content(Some(&doc)),
+                src("Bob", Some(&cam), false),
+                src("Cy", None, false),
+            ],
+            1,
+        )
+        .unwrap();
+        let canvas = p.host_canvas();
+        assert_eq!(canvas.luma(120, 90), 200, "content in the main region");
+        assert_eq!(canvas.luma(280, 40), 100, "bob in the strip");
+        assert_eq!(
+            canvas.luma(280, 130),
+            t.tile.0,
+            "cy's avatar tile below him"
+        );
+        // No frame yet: background, and nothing drawn on it.
+        let mut e = HostCompositor::new(64, 36, Layout::Spotlight);
+        e.render(&[content(None)], 2).unwrap();
+        assert!(e.host_canvas().y.iter().all(|&y| y == t.background.0));
     }
 
     #[test]

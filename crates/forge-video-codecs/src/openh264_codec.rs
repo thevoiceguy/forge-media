@@ -4,8 +4,8 @@
 use forge_core::VideoCodec;
 use forge_rtp::CodedFrame;
 use forge_video::codec::{
-    CodecError, CodecRegistry, DecoderFactory, EncoderFactory, EncoderSettings, VideoDecoder,
-    VideoEncoder,
+    CodecError, CodecRegistry, ContentHint, DecoderFactory, EncoderFactory, EncoderSettings,
+    VideoDecoder, VideoEncoder,
 };
 use forge_video::frame::{HostFrame, MediaDevice, VideoFrame};
 use openh264::decoder::Decoder;
@@ -39,7 +39,10 @@ fn build_config(settings: &EncoderSettings) -> EncoderConfig {
     EncoderConfig::new()
         .bitrate(BitRate::from_bps(settings.bitrate_kbps * 1000))
         .max_frame_rate(FrameRate::from_hz(settings.fps as f32))
-        .usage_type(UsageType::CameraVideoRealTime)
+        .usage_type(match settings.content {
+            ContentHint::Camera => UsageType::CameraVideoRealTime,
+            ContentHint::Screen => UsageType::ScreenContentRealTime,
+        })
         .rate_control_mode(RateControlMode::Bitrate)
         .profile(profile_for(&settings.profile))
         .level(Level::Level_3_1)

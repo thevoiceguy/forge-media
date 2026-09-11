@@ -205,6 +205,7 @@ mod tests {
             bitrate_kbps: 100,
             keyframe_interval: 30,
             profile: String::new(),
+            content: Default::default(),
         };
         let mut enc = r.encoder(&settings, &MediaDevice::Host).unwrap();
         let mut dec = r.decoder(VideoCodec::H264, &MediaDevice::Host).unwrap();

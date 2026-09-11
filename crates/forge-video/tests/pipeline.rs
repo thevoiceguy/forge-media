@@ -34,6 +34,7 @@ impl Sender {
             bitrate_kbps: 500,
             keyframe_interval: 30,
             profile: String::new(),
+            content: Default::default(),
         };
         Self {
             enc: r.encoder(&settings, &MediaDevice::Host).unwrap(),
@@ -149,6 +150,7 @@ fn two_participants_are_mixed_into_a_grid_and_delivered_to_a_subscriber() {
                 frame: Some(&alice_slot),
                 speaking: true,
                 muted: false,
+                kind: Default::default(),
             },
             TileSource {
                 id: "bob",
@@ -156,6 +158,7 @@ fn two_participants_are_mixed_into_a_grid_and_delivered_to_a_subscriber() {
                 frame: Some(&bob_slot),
                 speaking: false,
                 muted: true,
+                kind: Default::default(),
             },
         ],
         30000,

@@ -1731,6 +1731,45 @@ async fn a_host_stops_a_share_and_the_presenter_cannot_take_it_back_by_sending()
             ..
         }
     ));
+    // Another node's presenter won the room-wide floor (7d): the node
+    // takes it from her with the reason, and she may share again later
+    // — unlike after a host's stop.
+    assert!(
+        !video.release_content_with("alice", ContentStop::Replaced),
+        "not holding it"
+    );
+    assert_eq!(video.request_content("alice"), Ok(()));
+    let _ = wait_for_event(&mut events, "started a third time", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Started,
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(video.release_content_with("alice", ContentStop::Replaced));
+    let ev = wait_for_event(&mut events, "replaced", |ev| {
+        matches!(
+            ev,
+            VideoRoomEvent::Content {
+                event: ContentEvent::Stopped(_),
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(matches!(
+        ev,
+        VideoRoomEvent::Content {
+            event: ContentEvent::Stopped(ContentStop::Replaced),
+            ..
+        }
+    ));
+    assert!(video.content_holder().is_none());
+    assert_eq!(video.request_content("alice"), Ok(()), "still allowed");
+    assert!(video.release_content("alice"));
     doc.abort();
 
     // A room with sharing off.

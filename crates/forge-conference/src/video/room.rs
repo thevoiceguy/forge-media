@@ -1249,7 +1249,18 @@ impl VideoRoom {
     /// The participant stops sharing (a BFCP release, a track that
     /// ended). `false` when they did not hold the floor.
     pub fn release_content(&self, id: &str) -> bool {
-        self.holder_is(id) && self.release_floor(ContentStop::Ended).is_some()
+        self.release_content_with(id, ContentStop::Ended)
+    }
+
+    /// Take the floor from `id` for a reason the caller knows and the
+    /// room cannot: [`ContentStop::Replaced`] when another node's
+    /// presenter won the room-wide floor (§15.6, 7d), or `Ended` when a
+    /// peer's share behind a remote source is known to be over. The
+    /// participant keeps their right to share again, unlike after
+    /// [`stop_content`](Self::stop_content). `false` when they did not
+    /// hold the floor.
+    pub fn release_content_with(&self, id: &str, reason: ContentStop) -> bool {
+        self.holder_is(id) && self.release_floor(reason).is_some()
     }
 
     /// A host ends the share. The presenter cannot take the floor back

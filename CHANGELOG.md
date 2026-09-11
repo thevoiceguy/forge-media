@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**`forge-conference` 0.12.1**: `VideoRoom::release_content_with(id, reason)`
+takes the floor from a holder for a reason the room cannot know — the
+`ContentStop::Replaced` that 7a reserved for a room-wide floor (FCP video
+conferencing phase 7d: another node's presenter won), or `Ended` for a
+peer's share behind a remote content source that is known to be over —
+without the host-stop's ban on sharing again. `release_content` is now
+`release_content_with(id, Ended)`.
+
 ## [2026-09-11.1] — workspace release
 
 **Crate versions:** **forge-rtp 0.7.0**, **forge-webrtc 0.7.0**. Unchanged: bcg729-sys 0.1.0,

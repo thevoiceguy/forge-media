@@ -57,6 +57,7 @@ forge-media/
 │   ├── forge-injection/    # Audio injection/TTS
 │   ├── forge-webrtc/       # WebRTC stack
 │   ├── forge-sdp/          # SDP parsing/generation
+│   ├── forge-bfcp/         # BFCP (RFC 8855): codec, a floor server, TCP/UDP transactions
 │   ├── forge-sbc/          # SBC features (proxy, CAC, DoS)
 │   ├── forge-siprec/       # SIPREC SRC & SRS (RFC 7865/7866)
 │   ├── forge-ai-stream/    # Real-time AI streaming

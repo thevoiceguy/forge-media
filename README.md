@@ -377,6 +377,7 @@ forge-media/
 ├── forge-injection             # Audio injection and TTS
 ├── forge-webrtc                # WebRTC support (ICE, DTLS)
 ├── forge-sdp                   # SDP parsing and generation
+├── forge-bfcp                  # BFCP floor control (RFC 8855) for a conference's shared screen
 ├── forge-siprec                # SIPREC (RFC 7865/7866)
 ├── forge-ai-stream             # AI streaming integration
 ├── forge-ha                    # High availability

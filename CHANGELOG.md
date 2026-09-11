@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**`forge-bfcp` 0.1.0** — BFCP, the Binary Floor Control Protocol (RFC 8855),
+as a conference floor server needs it (FCP video conferencing phase 7e,
+screen share for SIP room systems). `message`: the common header and every
+attribute of the base specification, grouped ones included, with a parser
+that never panics on hostile bytes and reports what an `Error` reply needs
+whenever the header was readable, and a writer that is exact about lengths
+and padding. `server`: `FloorServer`, one floor per conference, transport-
+agnostic — it answers `Hello`, takes `FloorRequest`s as pending and reports
+them as `Event`s for the owner to `grant`, `deny` or `revoke`, handles
+`FloorRelease` (Released or Cancelled), `FloorRequestQuery`, `UserQuery`,
+`FloorQuery` subscriptions kept told with `FloorStatus`, and `Goodbye`, and
+answers every mistake with the error code RFC 8855 §13 names (unsupported
+version, unknown conference, user, primitive or mandatory attribute, another
+floor, another's request, a second request, a chair's action). `transport`:
+`TcpFramer` cuts a stream into messages; `UdpPeer` keeps one client's
+RFC 8855 §8 transactions over UDP — the R flag, a cached response replayed
+for a retransmitted request until T2, one outstanding server-initiated
+message at a time retransmitted on T1 (doubling, three times) until
+acknowledged or the peer is broken. Left out: chairs, several floors, TLS/
+DTLS, BFCP-level fragmentation. A tenth fuzz target, `bfcp_parse`, seeded
+from the round-trip tests.
+
 ## [2026-09-11.2] — workspace release
 
 **Crate versions:** **forge-conference 0.12.1**. Unchanged: bcg729-sys 0.1.0,

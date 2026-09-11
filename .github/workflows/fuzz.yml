@@ -88,7 +88,7 @@ jobs:
         run: |
           set -eo pipefail
           FORGE_FUZZ_SEED_DIR="$PWD/fuzz/corpus" \
-            cargo test -p forge-rtp -p forge-webm --test fuzz_seeds
+            cargo test -p forge-rtp -p forge-webm -p forge-bfcp --test fuzz_seeds
           find fuzz/corpus -type f | wc -l | xargs echo "corpus entries:"
 
       - name: Fuzz

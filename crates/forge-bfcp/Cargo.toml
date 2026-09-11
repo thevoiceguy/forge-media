@@ -1,0 +1,13 @@
+[package]
+name = "forge-bfcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "BFCP (RFC 8855) for a conference floor server: the message codec, a floor server state machine, TCP framing and UDP transactions"
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }

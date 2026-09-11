@@ -31,7 +31,7 @@ Seed the corpora from the round-trip paths, then run a target:
 
 ```bash
 FORGE_FUZZ_SEED_DIR="$PWD/fuzz/corpus" \
-  cargo test -p forge-rtp -p forge-webm --test fuzz_seeds
+  cargo test -p forge-rtp -p forge-webm -p forge-bfcp --test fuzz_seeds
 
 cargo fuzz run depacketize_h264                       # until you stop it
 cargo fuzz run rtcp_parse -- -max_total_time=60       # for a minute
@@ -45,7 +45,8 @@ cargo fuzz run <target> fuzz/artifacts/<target>/<file>
 
 ## The corpora
 
-`crates/forge-rtp/tests/fuzz_seeds.rs` and `crates/forge-webm/tests/fuzz_seeds.rs`
+`crates/forge-rtp/tests/fuzz_seeds.rs`, `crates/forge-webm/tests/fuzz_seeds.rs` and
+`crates/forge-bfcp/tests/fuzz_seeds.rs`
 build the seeds by *packetizing and encoding real frames* and writing what
 comes out — the same round-trip the unit tests assert on. They are ordinary
 stable-toolchain tests and write nothing unless `FORGE_FUZZ_SEED_DIR` is set,

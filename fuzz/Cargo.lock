@@ -230,6 +230,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
+name = "forge-bfcp"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "forge-core"
 version = "0.2.2"
 dependencies = [
@@ -248,6 +256,7 @@ name = "forge-media-fuzz"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "forge-bfcp",
  "forge-core",
  "forge-rtp",
  "forge-webm",
@@ -256,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "aes",
  "aes-gcm",

@@ -66,17 +66,65 @@ has a `view`; `SubscribeRequest::view` and `RecordRequest::view` are new;
 `Subscriber::new` takes the channel's kind; `VideoRoomEvent::ParticipantState`
 and `LayoutChanged` carry one more field.
 
+## [2026-09-10.1] — workspace release
+
+**HEP media chunks on the call they belong to.** forge-engine stamped every HEP RTCP
+(`0x05`) and RTP-QoS chunk with the session's own call id. Homer threads a call view on
+the SIP `Call-ID`, and an embedder's session id is rarely that — siphon-ai's is its bridge
+id — so the RTCP and QoS of a call landed under a different key from its SIP ladder and
+CDR and never showed up beside them (siphon-ai #603). `MediaSession::set_hep_correlation_id`
+lets the embedder hand the session its `Call-ID` once known; every later chunk carries
+it. A setter rather than a `MediaSessionConfig` field because an offerer builds its
+session (for the SDP offer) before the INVITE that names the `Call-ID` exists.
+
+**Crate versions:** **forge-engine 0.6.0**. Unchanged: bcg729-sys 0.1.0, forge-ai-stream
+0.2.0, forge-api 0.4.0, forge-codecs 0.2.0, forge-conference 0.11.0, forge-core 0.2.2,
+forge-dtmf 0.2.1, forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1,
+forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0, forge-recorder 0.2.0,
+forge-resampler 0.1.1, forge-rtp 0.6.0, forge-sdp 0.2.1, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0,
+forge-video 0.4.0, forge-video-codecs 0.1.0, forge-webm 0.1.0, forge-webrtc 0.6.0,
+forge-media (standalone server) 0.2.0. Embeds siphon-rs **v2026.09.05**.
+
+**Breaking changes:** none. forge-engine's minor bump is for new public API:
+`set_hep_correlation_id` / `hep_correlation_id` here (#154), and the dynamic payload-type
+map (`payload_type_map` / `set_payload_type_map`, `to_transcoder_codec` made `pub`) that
+shipped in v2026.09.02 without a bump.
+
+### Added
+
+- **forge-engine**: `MediaSession::set_hep_correlation_id` / `hep_correlation_id` (#154).
+  The HEP RTCP (`0x05`) and RTP-QoS chunks forge ships carried the session's own call id
+  as their correlation id, which is rarely the SIP `Call-ID` Homer keys its call view on —
+  so an embedder's media chunks landed under a different key from its SIP ladder and CDR
+  and never appeared beside them (siphon-ai #603). An embedder now sets the SIP `Call-ID`
+  once it is known, and every later RTCP / QoS chunk for the session carries it. Set-once
+  (a `OnceLock`), so the RTCP path reads it with one atomic load. Unset, the chunks carry
+  the session call id exactly as before.
+
+### Changed
+
+- CI: fuzz targets run nightly rather than weekly (#153).
+
 ## [2026-09-10] — workspace release
 
-**Shedding before slowing, and fuzzing** (FCP video conferencing, phase 6c;
-released without this entry, written after the fact). `forge-video` 0.4.0:
-`LoadShedder` and `VideoClock::done_with`, so a room gives up an output's
-rung — the largest first, then the next — before it halves everyone's frame
-rate. `forge-conference` 0.11.0: `RoomShedder`, `VideoRoomEvent::Shed
-{ output, from, to }` in both directions, `forge_conference_video_shed_total`.
-Eight `cargo-fuzz` targets under `fuzz/` (the five depacketizers, the frame
-assembler, compound RTCP, the WebM reader) on corpora derived by the
-`fuzz_seeds` tests in forge-rtp and forge-webm, run nightly.
+Backfilled from the `v2026.09.10` tag message, which shipped without a changelog section.
+
+**Overload shedding and fuzzing (video phase 6c).** A room whose compositor overruns
+three ticks in a row no longer halves everyone's frame rate first. forge-video's clock now
+asks a `LoadShedder` before it halves (`VideoClock::done_with`), and the video room answers
+by taking its largest output down a rung of the bitrate ladder, then the next largest,
+until every output is at the bottom; only then does the rate halve. A shed is a ceiling on
+the output's scope, which the ladder does not climb through. Recovery unwinds in the
+opposite order: the frame rate first, then the pictures, worst-off first.
+`VideoRoomEvent::Shed { output, from, to }` reports each step, down or back up.
+
+A `fuzz` crate holds eight cargo-fuzz targets for the parsers that read bytes nobody here
+wrote: the five video depacketizers, the frame assembler, compound RTCP and the WebM
+reader. Their seed corpora are derived by the `fuzz_seeds` tests in forge-rtp and
+forge-webm.
+
+**Crate versions:** **forge-video 0.4.0**, **forge-conference 0.11.0**.
 
 ## [2026-09-08.4] — workspace release
 

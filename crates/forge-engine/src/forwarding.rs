@@ -231,7 +231,7 @@ impl ForwardingEngine {
                                         source_addr,
                                         local,
                                         &plain_data,
-                                        Some(&call_id.0),
+                                        Some(session.hep_correlation_id()),
                                     );
                                 }
                             }
@@ -1553,7 +1553,7 @@ impl ForwardingEngine {
                             local,
                             addr,
                             data,
-                            Some(&call_id.0),
+                            Some(session.hep_correlation_id()),
                         );
                     }
                 }
@@ -1767,7 +1767,7 @@ impl ForwardingEngine {
         let generated = session.generated_rtp_state(ParticipantLabel::A);
         for block in blocks {
             Self::record_report_block_metrics(block);
-            Self::emit_qos_report(sockets, source_addr, &call_id.0, block);
+            Self::emit_qos_report(sockets, source_addr, session.hep_correlation_id(), block);
             // RTT (RFC 3550 §A.7): only when the block reports on our
             // generated SSRC and carries the echo of an SR we sent. A
             // non-matching SSRC or `last_sr == 0` yields `None`.

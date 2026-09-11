@@ -317,6 +317,9 @@ async fn a_shared_screen_rides_a_second_video_section() {
     assert_eq!(screen.stream(), VideoStream::Content);
     assert_eq!(screen.ssrc(), caller.content_ssrc());
     cam.send_packet(video_packet(1, 0, true)).await.unwrap();
+    let got = expect_video(&mut callee_ev, 1).await;
+    assert_eq!({ got[0].header.ssrc }, caller.video_ssrc());
+    assert_eq!({ got[0].header.sequence_number }, 1);
     screen.send_packet(video_packet(2, 0, true)).await.unwrap();
     screen
         .send_packet(video_packet(3, 3000, true))
@@ -326,9 +329,6 @@ async fn a_shared_screen_rides_a_second_video_section() {
     assert_eq!({ got[0].header.ssrc }, caller.content_ssrc());
     assert_eq!({ got[0].header.sequence_number }, 2);
     assert_eq!({ got[1].header.sequence_number }, 3);
-    let got = expect_video(&mut callee_ev, 1).await;
-    assert_eq!({ got[0].header.ssrc }, caller.video_ssrc());
-    assert_eq!({ got[0].header.sequence_number }, 1);
 
     // And back, on both sections.
     callee

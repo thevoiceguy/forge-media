@@ -216,7 +216,7 @@ impl RtpPacket {
 
         // The X bit says whether an extension follows: a packet built with one
         // carries it whatever the header said.
-        let mut header = self.header.clone();
+        let mut header = self.header;
         if self.extension.is_some() {
             header.version_flags |= 0x10;
         } else {

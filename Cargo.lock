@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "forge-video"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bytes",
  "forge-core",
@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "forge-video-hw"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "ffmpeg-sys-next",

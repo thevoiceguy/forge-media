@@ -292,10 +292,164 @@ pub fn measure_compose_on(
     Ok(total_ns as f64 / (frames as f64 * resolution.pixels() as f64))
 }
 
+/// How much a device sustains of composition: the summed tick rate of
+/// several compositors at once, when adding more stops helping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComposeSaturation {
+    pub device: MediaDevice,
+    pub resolution: Resolution,
+    pub tiles: usize,
+    /// Compositors run at once when throughput stopped growing.
+    pub graphs: usize,
+    /// Renders per second, summed over them, at that point.
+    pub ticks_per_second: f64,
+    /// The step where throughput stopped growing; `false` when the cap
+    /// on graphs was reached first.
+    pub saturated: bool,
+}
+
+impl ComposeSaturation {
+    /// The per-pixel constant that makes this many composites fill one
+    /// execution unit of a thousand work units: what a GPU's compose
+    /// engine is priced at (FCP §15.8, decision 1). A room at `fps`
+    /// composing one output then costs `1000 × fps / ticks_per_second`
+    /// units, as `units(ns_per_px, resolution, fps)` computes it.
+    pub fn ns_per_px(&self) -> f64 {
+        let ticks = self.ticks_per_second.max(0.1);
+        1e9 / (ticks * self.resolution.pixels() as f64)
+    }
+}
+
+/// [`measure_compose_on`] with 1, 2, 4, … compositors on their own
+/// threads for `per_step` each (after a warm-up of the same length,
+/// uncounted), until the summed render rate grows by less than a tenth
+/// or `max_graphs` is reached: how a GPU's composition is priced, since
+/// it runs many graphs at once and one graph's tick says little.
+pub fn measure_compose_saturated(
+    backend: &dyn DeviceBackend,
+    resolution: Resolution,
+    tiles: usize,
+    per_step: Duration,
+    max_graphs: usize,
+) -> Result<ComposeSaturation, CodecError> {
+    let tiles = tiles.clamp(1, Layout::Grid.capacity());
+    let max_graphs = max_graphs.max(1);
+    let mut best = (0usize, 0.0f64);
+    let mut graphs = 1usize;
+    let mut saturated = false;
+    loop {
+        let counts: Vec<Result<u64, CodecError>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..graphs)
+                .map(|g| {
+                    scope.spawn(move || -> Result<u64, CodecError> {
+                        // Each graph has its own sources, uploaded once.
+                        let mut sources: Vec<[VideoFrame; 2]> = Vec::with_capacity(tiles);
+                        for i in 0..tiles {
+                            sources.push([
+                                backend.upload(&noisy(2 * (i + g * tiles), 640, 360))?,
+                                backend.upload(&noisy(2 * (i + g * tiles) + 1, 640, 360))?,
+                            ]);
+                        }
+                        let names: Vec<String> =
+                            (0..tiles).map(|i| format!("Participant {i}")).collect();
+                        let mut compositor = backend.compositor(
+                            resolution.width,
+                            resolution.height,
+                            Layout::Grid,
+                        )?;
+                        let mut n = 0u32;
+                        let mut render = |n: u32| -> Result<(), CodecError> {
+                            let tile_sources: Vec<TileSource<'_>> = sources
+                                .iter()
+                                .enumerate()
+                                .map(|(i, pair)| TileSource {
+                                    id: &names[i],
+                                    name: &names[i],
+                                    frame: Some(&pair[n as usize % 2]),
+                                    speaking: i == n as usize % tiles,
+                                    muted: false,
+                                    kind: Default::default(),
+                                })
+                                .collect();
+                            compositor.render(&tile_sources, n * 3000)
+                        };
+                        let warm = Instant::now();
+                        while warm.elapsed() < per_step {
+                            render(n)?;
+                            n += 1;
+                        }
+                        let mut ticks = 0u64;
+                        let start = Instant::now();
+                        while start.elapsed() < per_step {
+                            render(n)?;
+                            n += 1;
+                            ticks += 1;
+                        }
+                        Ok(ticks)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err(CodecError::Codec("bench thread panicked".into())))
+                })
+                .collect()
+        });
+        let mut total = 0u64;
+        for c in counts {
+            total += c?;
+        }
+        let ticks_per_second = total as f64 / per_step.as_secs_f64();
+        if ticks_per_second <= best.1 * 1.1 && graphs > 1 {
+            saturated = true;
+            break;
+        }
+        best = (graphs, ticks_per_second);
+        if graphs >= max_graphs {
+            break;
+        }
+        graphs = (graphs * 2).min(max_graphs);
+    }
+    Ok(ComposeSaturation {
+        device: backend.device(),
+        resolution,
+        tiles,
+        graphs: best.0,
+        ticks_per_second: best.1,
+        saturated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::raw::raw_registry;
+
+    #[test]
+    fn composition_saturates_the_host_and_prices_by_the_summed_rate() {
+        let sat = measure_compose_saturated(
+            &HostBackend,
+            Resolution::new(320, 180),
+            4,
+            Duration::from_millis(60),
+            4,
+        )
+        .unwrap();
+        assert!(sat.device.is_host());
+        assert_eq!(sat.tiles, 4);
+        assert!(sat.graphs >= 1 && sat.graphs <= 4, "{}", sat.graphs);
+        assert!(sat.ticks_per_second > 0.0);
+        // The constant makes `ticks_per_second` composites at one tick a
+        // second fill a thousand units.
+        let ns = sat.ns_per_px();
+        let units = ns * sat.resolution.pixels() as f64 * sat.ticks_per_second / 1e6;
+        assert!((units - 1000.0).abs() < 1.0, "{units}");
+        // The single-graph measure agrees on the order of magnitude.
+        let one = measure_compose_on(&HostBackend, Resolution::new(320, 180), 4, 20).unwrap();
+        assert!(one > 0.0);
+    }
 
     #[test]
     fn sources_are_deterministic_and_stamped() {

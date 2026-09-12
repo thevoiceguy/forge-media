@@ -1242,7 +1242,8 @@ impl VideoRoom {
             // Under the lock, so two first packets cannot both be granted.
             let gate = self.content_gate.read().clone();
             if let Some(g) = gate {
-                if !g.admit(&self.id, id) {
+                let settings = self.settings.read().clone();
+                if !g.admit(&self.id, id, &settings) {
                     return Err(ContentRefusal::Budget);
                 }
             }

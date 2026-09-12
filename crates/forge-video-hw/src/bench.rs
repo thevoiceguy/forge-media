@@ -44,7 +44,15 @@ pub struct Saturation {
 
 /// Run `stage` of `codec` on `device` with 1, 2, 4, … streams for
 /// `per_step` each, until the summed frame rate grows by less than a
-/// tenth or `max_streams` is reached.
+/// tenth or `max_streams` is reached. Each step first runs for a
+/// warm-up ([`WARMUP`], or the step's own length when that is shorter)
+/// that is not counted: an engine's first frames — context creation,
+/// the pools filling, clocks ramping — read far faster or slower than
+/// its rate, and a short step read 109 real-time H.264 encodes where a
+/// long one measures 62 (FCP §15.8, decision 2).
+/// The most a saturation step spends warming up before it counts.
+pub const WARMUP: Duration = Duration::from_secs(1);
+
 pub fn saturate(
     registry: &Arc<CodecRegistry>,
     device: &MediaDevice,
@@ -83,6 +91,7 @@ pub fn saturate(
     } else {
         Arc::new(Vec::new())
     };
+    let warmup = WARMUP.min(per_step);
     let mut best = (0usize, 0.0f64);
     let mut streams = 1usize;
     let mut saturated = false;
@@ -96,7 +105,6 @@ pub fn saturate(
             let coded = Arc::clone(&coded);
             handles.push(std::thread::spawn(move || -> Result<u64, CodecError> {
                 let mut frames = 0u64;
-                let start = Instant::now();
                 match stage {
                     Stage::Encode => {
                         // The ring goes up once; what is timed is the
@@ -109,6 +117,16 @@ pub fn saturate(
                             .collect::<Result<_, _>>()?;
                         let mut enc = registry.encoder(&settings, &device)?;
                         let mut i = 0u32;
+                        // Warm up, uncounted; then count.
+                        let warm = Instant::now();
+                        while warm.elapsed() < warmup {
+                            let mut f = device_ring[i as usize % device_ring.len()].clone();
+                            if let VideoFrame::Device(d) = &mut f {
+                                d.pts = i * 3000;
+                            }
+                            enc.encode(&f, false)?;
+                            i += 1;
+                        }
                         let start = Instant::now();
                         while start.elapsed() < per_step {
                             let mut f = device_ring[i as usize % device_ring.len()].clone();
@@ -123,6 +141,12 @@ pub fn saturate(
                     Stage::Decode => {
                         let mut dec = registry.decoder(settings.codec, &device)?;
                         let mut i = 0usize;
+                        let warm = Instant::now();
+                        while warm.elapsed() < warmup {
+                            dec.decode(&coded[i % coded.len()])?;
+                            i += 1;
+                        }
+                        let start = Instant::now();
                         while start.elapsed() < per_step {
                             if dec.decode(&coded[i % coded.len()])?.is_some() {
                                 frames += 1;

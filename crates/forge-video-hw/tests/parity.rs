@@ -112,6 +112,30 @@ fn a_steady_scene_builds_its_graph_once_and_a_changed_shape_rebuilds_it() {
 }
 
 #[test]
+fn composition_is_priced_by_saturation_on_the_device() {
+    use forge_video::bench::measure_compose_saturated;
+    use std::time::Duration;
+    let Some(d) = device() else { return };
+    let backend = HwBackend::open(&d).unwrap();
+    let res = Resolution::new(1280, 720);
+    let sat = measure_compose_saturated(&backend, res, 9, Duration::from_secs(1), 8).unwrap();
+    let one = measure_compose_on(&backend, res, 9, 60).unwrap();
+    eprintln!(
+        "720p grid of 9: one graph {:.2} ms/tick; saturated at {} graphs, {:.0} ticks/s = {:.2} ns/px (one graph's tick as a constant: {:.2})",
+        one * res.pixels() as f64 / 1e6,
+        sat.graphs,
+        sat.ticks_per_second,
+        sat.ns_per_px(),
+        one
+    );
+    assert_eq!(sat.device, d);
+    assert!(sat.ticks_per_second > 30.0, "{}", sat.ticks_per_second);
+    // Several graphs at once do more than one: the constant priced by
+    // saturation is below one graph's tick.
+    assert!(sat.ns_per_px() < one, "{} vs {}", sat.ns_per_px(), one);
+}
+
+#[test]
 fn the_composite_s_cost_on_the_device_is_measured_against_the_host_s() {
     let Some(d) = device() else { return };
     let backend = HwBackend::open(&d).unwrap();

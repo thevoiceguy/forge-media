@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**`forge-video-hw` 0.1.0** — GPU video over FFmpeg's hardware device
+contexts (FCP video conferencing phase 8a). `HwDevice` opens a
+`MediaDevice::Gpu` (`cuda:0`; `vaapi` and `qsv` compile, untested) and
+hands out `HwFrames` pools; a `DeviceFrame`'s handle is an `AVFrame` in
+device memory (NV12) with `frame::upload` / `download` crossing the bus
+with one chroma interleave each way. `HwDecoder` runs FFmpeg's `h264`,
+`hevc`, `vp8`, `vp9` and `av1` decoders with the device's acceleration
+(NVDEC), output resident; `NvEncoder` is `h264_nvenc`, `hevc_nvenc` and
+`av1_nvenc` taking device frames (a host frame is uploaded), zero
+latency, parameter sets in-band on every IDR, `ContentHint` mapped to
+NVENC's presets and spatial AQ, and a bitrate retarget by reopening on
+the next frame, which is then a keyframe. `DeviceScaler` is `scale_cuda`
+in a kept two-node filter graph per pair of sizes. `probe` says what a
+device offers; `register` puts it in a `CodecRegistry`. `bench::saturate`
+runs 1, 2, 4, … streams of one stage on their own threads until the
+summed frame rate stops growing — how a GPU, being several engines, is
+priced. On an NVIDIA L4 (driver 550, FFmpeg 7.1, 720p30, 1.2 Mb/s):
+H.264 encode saturates at about 62 real-time streams, AV1 at 79, HEVC at
+57; decode at 237, 252 and 306; `scale_cuda` matches the host's bilinear
+within 29 dB. The bindings are `ffmpeg-sys-next`, generated against the
+machine's FFmpeg; a machine without a GPU builds the crate and its tests
+skip.
+
+**`forge-video-codecs` 0.1.2**: a `hwaccel` feature that pulls
+`forge-video-hw` and registers the default device's codecs when it
+opens.
+
 ## [2026-09-11.3] — workspace release
 
 **Crate versions:** **forge-bfcp 0.1.0** (new). Unchanged: bcg729-sys 0.1.0,

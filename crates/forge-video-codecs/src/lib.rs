@@ -9,6 +9,7 @@
 //! | `openh264` | OpenH264 (built from source) | H.264 encode + decode |
 //! | `dav1d` | libdav1d (system) | AV1 decode |
 //! | `svt-av1` | libsvtav1enc (system) | AV1 encode |
+//! | `hwaccel` | FFmpeg device contexts (`forge-video-hw`) | NVDEC decode, NVENC encode, on a GPU |
 //!
 //! Licensing and the measured cost of each are in FCP's
 //! `docs/VIDEO_CONFERENCING.md` (§6, §9.4).
@@ -58,6 +59,12 @@ pub fn register_all(registry: &mut CodecRegistry) {
     dav1d_dec::register(registry);
     #[cfg(feature = "svt-av1")]
     svt_av1::register(registry);
+    // The GPU's codecs, on the default device when it opens; a node
+    // that names another device registers it itself.
+    #[cfg(feature = "hwaccel")]
+    if let Some(caps) = forge_video_hw::register_default(registry) {
+        tracing::info!(device = %caps.device, decoders = ?caps.decoders, encoders = ?caps.encoders, "hardware video codecs registered");
+    }
     let _ = registry;
 }
 
@@ -75,6 +82,9 @@ pub fn enabled_backends() -> Vec<&'static str> {
     }
     if cfg!(feature = "svt-av1") {
         v.push("svt-av1");
+    }
+    if cfg!(feature = "hwaccel") {
+        v.push("hwaccel");
     }
     v
 }

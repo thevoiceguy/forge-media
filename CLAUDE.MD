@@ -51,6 +51,7 @@ forge-media/
 │   ├── forge-conference/   # Audio conferencing, and the video room beside it
 │   ├── forge-video/        # Video mixer core: frames, scaling, layouts, compositor, clock, flavors
 │   ├── forge-video-codecs/ # Native video codecs (libvpx, OpenH264, dav1d, SVT-AV1) behind features
+│   ├── forge-video-hw/     # GPU video over FFmpeg device contexts: NVDEC/NVENC codecs, scale_cuda, device frames
 │   ├── forge-recording/    # Recording system
 │   ├── forge-dtmf/         # DTMF detection/generation
 │   ├── forge-transcription/# Real-time transcription

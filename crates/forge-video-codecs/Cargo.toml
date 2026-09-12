@@ -1,6 +1,6 @@
 [package]
 name = "forge-video-codecs"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -22,12 +22,16 @@ dav1d = ["dep:dav1d"]
 # AV1 encode via the system libsvtav1enc (pkg-config `SvtAv1Enc`,
 # bindings generated at build time with libclang).
 svt-av1 = ["dep:bindgen", "dep:pkg-config"]
-all = ["vpx", "openh264", "dav1d", "svt-av1"]
+# GPU codecs over FFmpeg's device contexts (NVDEC / NVENC; needs the
+# FFmpeg headers to build and a GPU to run: forge-video-hw).
+hwaccel = ["dep:forge-video-hw"]
+all = ["vpx", "openh264", "dav1d", "svt-av1", "hwaccel"]
 
 [dependencies]
 forge-core = { path = "../forge-core" }
 forge-rtp = { path = "../forge-rtp" }
 forge-video = { path = "../forge-video" }
+forge-video-hw = { path = "../forge-video-hw", optional = true }
 
 bytes = { workspace = true }
 thiserror = { workspace = true }

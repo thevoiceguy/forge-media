@@ -8,8 +8,12 @@
 //! FFmpeg. Around that: decoders that leave their output on the device
 //! (NVDEC through FFmpeg's hardware acceleration), encoders that take
 //! frames from it (`h264_nvenc`, `hevc_nvenc`, `av1_nvenc`), a scaler
-//! (`scale_cuda`), and [`upload`](frame::upload) / [`download`](frame::download)
+//! (`scale_cuda`), a compositor ([`DeviceCompositor`], a filter graph
+//! per output that scales and overlays the pictures onto an uploaded
+//! underlay), and [`upload`](frame::upload) / [`download`](frame::download)
 //! for the copies the design allows but the scheduler avoids.
+//! [`HwBackend`] is all of that as the [`forge_video::DeviceBackend`] a
+//! room is placed on.
 //!
 //! The device's software pixel format is NV12 throughout — what the
 //! decoders produce and the encoders take — and a host frame crosses the
@@ -21,7 +25,9 @@
 //! are generated against it at build time, and [`probe`] says whether
 //! a device opens at all, so a test on a machine without one skips.
 
+pub mod backend;
 pub mod bench;
+pub mod compose;
 pub mod decoder;
 pub mod device;
 pub mod encoder;
@@ -29,7 +35,10 @@ pub mod frame;
 pub mod scale;
 
 mod ffi;
+mod graph;
 
+pub use backend::HwBackend;
+pub use compose::DeviceCompositor;
 pub use decoder::HwDecoder;
 pub use device::{HwDevice, HwFrames};
 pub use encoder::NvEncoder;
@@ -69,14 +78,37 @@ pub fn probe(device: &MediaDevice) -> Option<Capabilities> {
     })
 }
 
-/// Register every hardware decoder and encoder `device` offers.
+/// Register every hardware decoder and encoder `device` offers, on a
+/// fresh open of it. A room's backend and its codecs should share one
+/// open device: see [`HwBackend::register`].
 pub fn register(
     registry: &mut CodecRegistry,
     device: &MediaDevice,
 ) -> Result<Capabilities, CodecError> {
     let hw = Arc::new(HwDevice::open(device)?);
-    let caps =
-        probe(device).ok_or_else(|| CodecError::InvalidConfig(format!("{device} did not open")))?;
+    register_on(registry, &hw)
+}
+
+/// Register every hardware decoder and encoder an open device offers.
+pub fn register_on(
+    registry: &mut CodecRegistry,
+    hw: &Arc<HwDevice>,
+) -> Result<Capabilities, CodecError> {
+    let hw = Arc::clone(hw);
+    let device = hw.device().clone();
+    let caps = Capabilities {
+        device: device.clone(),
+        decoders: VideoCodec::ALL
+            .iter()
+            .copied()
+            .filter(|c| decoder::available(&hw, *c))
+            .collect(),
+        encoders: VideoCodec::ALL
+            .iter()
+            .copied()
+            .filter(|c| encoder::available(*c))
+            .collect(),
+    };
     for codec in &caps.decoders {
         registry.register_decoder(Box::new(decoder::Factory {
             device: Arc::clone(&hw),

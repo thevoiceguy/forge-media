@@ -68,6 +68,45 @@ pub fn register_all(registry: &mut CodecRegistry) {
     let _ = registry;
 }
 
+/// Open `device` as the backend a room is placed on, with its codecs
+/// registered in `registry` on the same open device (design §15.7,
+/// block 8b). `None` when the device does not open, or when this build
+/// has no `hwaccel`: the node then stays on the host.
+#[cfg(feature = "hwaccel")]
+pub fn open_device(
+    registry: &mut CodecRegistry,
+    device: &forge_video::frame::MediaDevice,
+) -> Option<std::sync::Arc<dyn forge_video::device::DeviceBackend>> {
+    let backend = match forge_video_hw::HwBackend::open(device) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(%device, error = %e, "hardware video device did not open");
+            return None;
+        }
+    };
+    match backend.register(registry) {
+        Ok(caps) => {
+            tracing::info!(%device, decoders = ?caps.decoders, encoders = ?caps.encoders,
+                           "hardware video device open");
+        }
+        Err(e) => {
+            tracing::warn!(%device, error = %e, "hardware video codecs did not register");
+            return None;
+        }
+    }
+    Some(std::sync::Arc::new(backend))
+}
+
+/// [`open_device`] without the feature: nothing opens.
+#[cfg(not(feature = "hwaccel"))]
+pub fn open_device(
+    _registry: &mut CodecRegistry,
+    device: &forge_video::frame::MediaDevice,
+) -> Option<std::sync::Arc<dyn forge_video::device::DeviceBackend>> {
+    tracing::warn!(%device, "this build has no hardware video (the hwaccel feature is off)");
+    None
+}
+
 /// Names of the features compiled in, for logs and health endpoints.
 pub fn enabled_backends() -> Vec<&'static str> {
     let mut v = Vec::new();

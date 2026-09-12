@@ -18,7 +18,8 @@
 //! bracket, not a promise.
 
 use crate::codec::{CodecError, CodecRegistry, EncoderSettings};
-use crate::compose::{Compositor, HostCompositor, TileSource};
+use crate::compose::TileSource;
+use crate::device::{DeviceBackend, HostBackend};
 use crate::frame::{HostFrame, MediaDevice, Resolution, VideoFrame};
 use crate::layout::Layout;
 use forge_core::VideoCodec;
@@ -245,18 +246,30 @@ pub fn measure_all(
 /// pixel per render (§9.3 `k_cmp`, before its `1 + 0.1 × tiles` term).
 /// Sources are 640×360 so each tile is scaled, as in a room.
 pub fn measure_compose(resolution: Resolution, tiles: usize, frames: u32) -> f64 {
+    measure_compose_on(&HostBackend, resolution, tiles, frames)
+        .expect("the host composes host frames")
+}
+
+/// [`measure_compose`] on any device: the sources are uploaded once
+/// and the compositor is the device's, so what is timed is the
+/// composite alone — on a GPU, the filter graph's tick.
+pub fn measure_compose_on(
+    backend: &dyn DeviceBackend,
+    resolution: Resolution,
+    tiles: usize,
+    frames: u32,
+) -> Result<f64, CodecError> {
     let tiles = tiles.clamp(1, Layout::Grid.capacity());
     // Two frames per tile, alternated, so every render repaints.
-    let sources: Vec<[VideoFrame; 2]> = (0..tiles)
-        .map(|i| {
-            [
-                VideoFrame::Host(noisy(2 * i, 640, 360)),
-                VideoFrame::Host(noisy(2 * i + 1, 640, 360)),
-            ]
-        })
-        .collect();
+    let mut sources: Vec<[VideoFrame; 2]> = Vec::with_capacity(tiles);
+    for i in 0..tiles {
+        sources.push([
+            backend.upload(&noisy(2 * i, 640, 360))?,
+            backend.upload(&noisy(2 * i + 1, 640, 360))?,
+        ]);
+    }
     let names: Vec<String> = (0..tiles).map(|i| format!("Participant {i}")).collect();
-    let mut compositor = HostCompositor::new(resolution.width, resolution.height, Layout::Grid);
+    let mut compositor = backend.compositor(resolution.width, resolution.height, Layout::Grid)?;
     let mut total_ns = 0u128;
     let frames = frames.max(1);
     for n in 0..frames {
@@ -273,12 +286,10 @@ pub fn measure_compose(resolution: Resolution, tiles: usize, frames: u32) -> f64
             })
             .collect();
         let t = Instant::now();
-        compositor
-            .render(&tile_sources, n * 3000)
-            .expect("host frames render on the host compositor");
+        compositor.render(&tile_sources, n * 3000)?;
         total_ns += t.elapsed().as_nanos();
     }
-    total_ns as f64 / (frames as f64 * resolution.pixels() as f64)
+    Ok(total_ns as f64 / (frames as f64 * resolution.pixels() as f64))
 }
 
 #[cfg(test)]

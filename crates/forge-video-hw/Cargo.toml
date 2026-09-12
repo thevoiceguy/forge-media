@@ -1,6 +1,6 @@
 [package]
 name = "forge-video-hw"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -21,3 +21,8 @@ tracing = { workspace = true }
 # has (pkg-config, or FFMPEG_DIR). avutil comes with them; avcodec for
 # the codecs, avfilter for scale_cuda.
 ffmpeg-sys-next = { version = "7.1", default-features = false, features = ["avcodec", "avfilter"] }
+
+[dev-dependencies]
+forge-conference = { path = "../forge-conference" }
+forge-mixer = { path = "../forge-mixer" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

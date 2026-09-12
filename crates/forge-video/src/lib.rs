@@ -10,7 +10,12 @@
 //!   geometry.
 //! - [`compose`]: the [`Compositor`] trait and the [`HostCompositor`]
 //!   that draws a layout of sources onto a canvas, with name labels,
-//!   speaking indicators and avatars.
+//!   speaking indicators and avatars; the chrome is shared so a device
+//!   compositor draws the same, and [`parity`] holds the scenes it is
+//!   checked against.
+//! - [`device`]: the [`DeviceBackend`] a room is placed on — its
+//!   compositor and scaler, and the copies across the bus — with the
+//!   host as [`HostBackend`]; [`testing`] has a fake device for tests.
 //! - [`clock`]: the per-room [`VideoClock`] with overrun back-off.
 //! - [`flavor`]: [`Flavor`], what a receiver consumes, and the table that
 //!   lets subscribers with the same needs share one encoder.
@@ -27,14 +32,17 @@ pub mod bench;
 pub mod clock;
 pub mod codec;
 pub mod compose;
+pub mod device;
 pub mod flavor;
 pub mod font;
 pub mod frame;
 pub mod ladder;
 pub mod layout;
 pub mod metrics;
+pub mod parity;
 pub mod raw;
 pub mod scale;
+pub mod testing;
 
 pub use bench::{BenchSettings, CodecCost};
 pub use clock::{ClockEvent, LoadShedder, RateOnly, VideoClock};
@@ -42,7 +50,8 @@ pub use codec::{
     CodecError, CodecRegistry, ContentHint, DecoderFactory, EncoderFactory, EncoderSettings,
     VideoDecoder, VideoEncoder,
 };
-pub use compose::{Compositor, HostCompositor, Theme, TileKind, TileSource};
+pub use compose::{Compositor, HostCompositor, Theme, TileGeometry, TileKind, TileSource};
+pub use device::{DeviceBackend, HostBackend};
 pub use flavor::{Flavor, FlavorTable};
 pub use frame::{DeviceFrame, HostFrame, MediaDevice, Resolution, VideoFrame};
 pub use layout::{Layout, Rect};

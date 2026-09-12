@@ -9,7 +9,13 @@
 //!
 //! [`Compositor`] is the trait every device implements; [`HostCompositor`]
 //! is the CPU reference. A device compositor must draw the same layouts
-//! within a PSNR tolerance (checked with [`crate::metrics::psnr_luma`]).
+//! within a PSNR tolerance (checked with [`crate::metrics::psnr_luma`]
+//! over the scenes in [`crate::parity`]). So that it can, the chrome is
+//! one piece of code for every compositor: [`tile_geometry`] says where
+//! the ring, the picture and the name band go, [`draw_chrome_under`]
+//! paints what lies under the picture and [`draw_band`] what lies over
+//! it — a device compositor paints those into host planes and uploads
+//! them, and scales and overlays only the pictures on the device.
 
 use crate::codec::CodecError;
 use crate::font;
@@ -148,82 +154,162 @@ impl HostCompositor {
 
     fn draw_tile(&mut self, src: &TileSource<'_>, frame: Option<&HostFrame>, rect: Rect) {
         let t = self.theme;
-        if src.kind == TileKind::Content {
-            // The document, and nothing on top of it. Without a frame
-            // there is nothing to say either: the room falls back to
-            // its cameras before it draws an empty content tile, so
-            // this is only ever a tick's worth of background.
-            let canvas = self.canvas_mut();
-            match frame {
-                Some(frame) => {
-                    scale::letterbox_with(canvas, rect, frame, t.background, ScaleMode::Box)
-                }
-                None => scale::fill(canvas, rect, t.background.0, t.background.1, t.background.2),
-            }
-            return;
-        }
-        let border = t.border_px.min(rect.w / 8).min(rect.h / 8);
+        let g = tile_geometry(rect, src.kind, &t);
         let canvas = self.canvas_mut();
-        // Border ring: bright when speaking, tile colour otherwise.
-        if src.speaking {
-            scale::fill(
-                canvas,
-                rect,
-                t.speaking_border.0,
-                t.speaking_border.1,
-                t.speaking_border.2,
-            );
-        } else {
-            scale::fill(canvas, rect, t.tile.0, t.tile.1, t.tile.2);
+        let picture = frame.map(|f| f.resolution());
+        draw_chrome_under(canvas, src, &g, picture, &t);
+        if let Some(frame) = frame {
+            let r = g.picture(frame.resolution());
+            let mode = match src.kind {
+                TileKind::Camera => ScaleMode::Bilinear,
+                TileKind::Content => ScaleMode::Box,
+            };
+            scale::scale_into_with(canvas, r, frame, mode);
         }
-        let inner = rect.inset(border).even();
-        if inner.is_empty() {
-            return;
-        }
-        match frame {
-            Some(frame) => scale::letterbox(canvas, inner, frame, t.bars),
-            None => {
-                scale::fill(canvas, inner, t.tile.0, t.tile.1, t.tile.2);
-                let avatar = Rect::new(inner.x, inner.y, inner.w, inner.h * 3 / 4);
-                let ini = font::initials(src.name);
-                let max_scale = (inner.h / 20).max(2);
-                font::draw_centered(canvas, avatar, &ini, max_scale, t.avatar_text);
-            }
-        }
-        self.draw_label(src, inner);
+        draw_band(canvas, src, &g, &t);
     }
+}
 
-    /// Name (and mute mark) on a dark band along the bottom of the tile.
-    fn draw_label(&mut self, src: &TileSource<'_>, inner: Rect) {
-        let t = self.theme;
-        let scale = (inner.h / 90).clamp(1, 4);
-        // Even height so the band reaches the tile's bottom edge exactly.
-        let band_h = ((font::text_height(scale) + 4 * scale).min(inner.h / 3) + 1) & !1;
-        if band_h < font::text_height(1) + 2 || inner.w < font::text_width("A", 1) + 4 {
-            return;
+/// Where the parts of one tile go. The same numbers on every device:
+/// the host draws them, a device compositor uploads what it drew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileGeometry {
+    pub kind: TileKind,
+    /// The whole tile. For a camera the ring around `inner` is what
+    /// shows of it; a content tile has no ring and `inner` is `rect`.
+    pub rect: Rect,
+    /// The picture area: letterboxed picture or avatar for a camera,
+    /// the document for content.
+    pub inner: Rect,
+    /// The name band along the bottom of `inner`, when one fits (never
+    /// on content).
+    pub band: Option<Rect>,
+    /// The bitmap font scale of the label.
+    pub label_scale: u32,
+}
+
+impl TileGeometry {
+    /// Where a picture of `size` lands: the largest rectangle of its
+    /// aspect ratio in `inner`, centred.
+    pub fn picture(&self, size: Resolution) -> Rect {
+        scale::fit(self.inner, size.width, size.height)
+    }
+}
+
+/// The geometry of a tile of `kind` in `rect`.
+pub fn tile_geometry(rect: Rect, kind: TileKind, theme: &Theme) -> TileGeometry {
+    if kind == TileKind::Content {
+        return TileGeometry {
+            kind,
+            rect,
+            inner: rect,
+            band: None,
+            label_scale: 1,
+        };
+    }
+    let border = theme.border_px.min(rect.w / 8).min(rect.h / 8);
+    let inner = rect.inset(border).even();
+    let label_scale = (inner.h / 90).clamp(1, 4);
+    // Even height so the band reaches the tile's bottom edge exactly.
+    let band_h = ((font::text_height(label_scale) + 4 * label_scale).min(inner.h / 3) + 1) & !1;
+    let band = if inner.is_empty()
+        || band_h < font::text_height(1) + 2
+        || inner.w < font::text_width("A", 1) + 4
+    {
+        None
+    } else {
+        Some(Rect::new(inner.x, inner.y + inner.h - band_h, inner.w, band_h).even())
+    };
+    TileGeometry {
+        kind,
+        rect,
+        inner,
+        band,
+        label_scale,
+    }
+}
+
+/// Paint what lies under the picture: the ring (bright when speaking),
+/// the bars a letterboxed picture of `picture`'s size leaves in
+/// `inner`, or the avatar when there is no picture. Content gets the
+/// background where the document does not reach.
+pub fn draw_chrome_under(
+    dst: &mut HostFrame,
+    src: &TileSource<'_>,
+    g: &TileGeometry,
+    picture: Option<Resolution>,
+    t: &Theme,
+) {
+    if g.kind == TileKind::Content {
+        // The document, and nothing on top of it. Without a frame
+        // there is nothing to say either: the room falls back to
+        // its cameras before it draws an empty content tile, so
+        // this is only ever a tick's worth of background.
+        let covered = picture.map(|p| g.picture(p) == g.rect).unwrap_or(false);
+        if !covered {
+            scale::fill(dst, g.rect, t.background.0, t.background.1, t.background.2);
         }
-        let band = Rect::new(inner.x, inner.y + inner.h - band_h, inner.w, band_h).even();
-        let canvas = self.canvas_mut();
-        scale::fill(canvas, band, t.label_band, 128, 128);
-        let mut text = String::new();
-        if src.muted {
-            text.push_str("[M] ");
+        return;
+    }
+    // Border ring: bright when speaking, tile colour otherwise.
+    let ring = if src.speaking {
+        t.speaking_border
+    } else {
+        t.tile
+    };
+    scale::fill(dst, g.rect, ring.0, ring.1, ring.2);
+    if g.inner.is_empty() {
+        return;
+    }
+    match picture {
+        Some(p) => {
+            if g.picture(p) != g.inner {
+                scale::fill(dst, g.inner, t.bars.0, t.bars.1, t.bars.2);
+            }
         }
-        text.push_str(src.name);
-        // Trim to what fits.
-        let mut chars: Vec<char> = text.chars().collect();
-        let max_w = band.w.saturating_sub(4 * scale);
-        while !chars.is_empty()
-            && font::text_width(&chars.iter().collect::<String>(), scale) > max_w
-        {
-            chars.pop();
+        None => {
+            scale::fill(dst, g.inner, t.tile.0, t.tile.1, t.tile.2);
+            let avatar = Rect::new(g.inner.x, g.inner.y, g.inner.w, g.inner.h * 3 / 4);
+            let ini = font::initials(src.name);
+            let max_scale = (g.inner.h / 20).max(2);
+            font::draw_centered(dst, avatar, &ini, max_scale, t.avatar_text);
         }
-        let text: String = chars.into_iter().collect();
-        if !text.is_empty() {
-            let x = band.x + 2 * scale;
-            let y = band.y + (band.h - font::text_height(scale)) / 2;
-            font::draw_text(canvas, x, y, &text, scale, t.label_text);
-        }
+    }
+}
+
+/// The label as it is drawn: the mute mark, the name, cut to what the
+/// band holds. Empty when nothing fits (or the tile has no band).
+pub fn label_text(src: &TileSource<'_>, g: &TileGeometry) -> String {
+    let Some(band) = g.band else {
+        return String::new();
+    };
+    let mut text = String::new();
+    if src.muted {
+        text.push_str("[M] ");
+    }
+    text.push_str(src.name);
+    let mut chars: Vec<char> = text.chars().collect();
+    let max_w = band.w.saturating_sub(4 * g.label_scale);
+    while !chars.is_empty()
+        && font::text_width(&chars.iter().collect::<String>(), g.label_scale) > max_w
+    {
+        chars.pop();
+    }
+    chars.into_iter().collect()
+}
+
+/// Paint the name band over the bottom of the picture: a dark band
+/// with the label. Nothing when the tile has no band.
+pub fn draw_band(dst: &mut HostFrame, src: &TileSource<'_>, g: &TileGeometry, t: &Theme) {
+    let Some(band) = g.band else {
+        return;
+    };
+    scale::fill(dst, band, t.label_band, 128, 128);
+    let text = label_text(src, g);
+    if !text.is_empty() {
+        let x = band.x + 2 * g.label_scale;
+        let y = band.y + (band.h - font::text_height(g.label_scale)) / 2;
+        font::draw_text(dst, x, y, &text, g.label_scale, t.label_text);
     }
 }
 

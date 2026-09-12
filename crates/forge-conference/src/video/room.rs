@@ -31,6 +31,7 @@ use forge_rtp::rtcp::{PayloadFeedback, RtcpPacket, TransportFeedback};
 use forge_rtp::{CodedFrame, RtpPacket};
 use forge_video::codec::{CodecRegistry, EncoderSettings};
 use forge_video::compose::{Compositor, HostCompositor, TileKind, TileSource};
+use forge_video::device::{DeviceBackend, HostBackend};
 use forge_video::flavor::Flavor;
 use forge_video::frame::{MediaDevice, Resolution, VideoFrame};
 use forge_video::ladder::{Ladder, LadderPolicy, Rung};
@@ -53,21 +54,46 @@ use super::source::{SourceLimits, VideoSource};
 use super::speaker::{ActiveSpeaker, Level};
 use crate::{ConferenceError, ConferenceRoom, Result};
 
-/// The codec registry and thread pool every video room on a node shares.
+/// The codec registry, thread pool and device every video room on a
+/// node shares.
+///
+/// A room is placed on `device` end to end — its sources decode there,
+/// its compositors draw there, its flavors encode there — and a stage
+/// the device lacks runs on the host with one copy per frame across
+/// the bus (design §15.7, block 8b): a decoder the device does not have
+/// uploads what it decodes, an encoder it does not have (VP8 and VP9 on
+/// NVENC, and so every WebM recording) takes the canvas downloaded once
+/// per tick, and a compositor that fails to build on the device gives
+/// the output a host one fed by downloaded tiles. The registry is
+/// keyed by device, so one registry holds the host's codecs and the
+/// device's.
 #[derive(Clone)]
 pub struct VideoBackend {
     pub registry: Arc<CodecRegistry>,
     pub pool: Arc<CodecPool>,
-    /// Where this node's rooms run (phase 7 adds GPUs).
+    /// Where this node's rooms run.
     pub device: MediaDevice,
+    /// The device's compositor, scaler and copies.
+    pub hw: Arc<dyn DeviceBackend>,
 }
 
 impl VideoBackend {
+    /// A backend on the host.
     pub fn new(registry: CodecRegistry, pool: Arc<CodecPool>) -> Self {
+        Self::on_device(registry, pool, Arc::new(HostBackend))
+    }
+
+    /// A backend on `hw`'s device.
+    pub fn on_device(
+        registry: CodecRegistry,
+        pool: Arc<CodecPool>,
+        hw: Arc<dyn DeviceBackend>,
+    ) -> Self {
         Self {
             registry: Arc::new(registry),
             pool,
-            device: MediaDevice::Host,
+            device: hw.device(),
+            hw,
         }
     }
 
@@ -424,7 +450,7 @@ struct Control {
 }
 
 struct Output {
-    compositor: HostCompositor,
+    compositor: Box<dyn Compositor>,
     encoders: HashMap<Flavor, FlavorEncoder>,
 }
 
@@ -599,6 +625,9 @@ pub struct VideoParticipantInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoSourceInfo {
     pub codec: VideoCodec,
+    /// Where the stream is decoded: the room's device, or the host when
+    /// the device has no decoder for the codec.
+    pub device: MediaDevice,
     pub resolution: Resolution,
     pub fps: u32,
     pub bitrate_kbps: u32,
@@ -634,6 +663,10 @@ pub struct VideoSubscriberInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoFlavorInfo {
     pub flavor: Flavor,
+    /// Where the flavor is encoded: the room's device, or the host when
+    /// the device has no encoder for the codec (the canvas is then
+    /// downloaded once a tick).
+    pub device: MediaDevice,
     pub subscribers: usize,
     pub target_kbps: u32,
     pub keyframes: u64,
@@ -647,12 +680,18 @@ pub struct VideoOutputInfo {
     /// What it shows.
     pub view: View,
     pub resolution: Resolution,
+    /// Where it is composed: the room's device, or the host when the
+    /// device's compositor could not be built.
+    pub device: MediaDevice,
     pub flavors: Vec<VideoFlavorInfo>,
 }
 
 /// The room's video, for the API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoRoomStatus {
+    /// The device the room is placed on; each stage says where it
+    /// actually runs.
+    pub device: MediaDevice,
     pub layout: Layout,
     /// How the composite shows a shared screen.
     pub content_layout: ContentLayout,
@@ -1039,11 +1078,7 @@ impl VideoRoom {
             )));
         }
         let settings = self.settings.read().clone();
-        let decoder = self
-            .backend
-            .registry
-            .decoder(codec, &self.backend.device)
-            .map_err(|e| ConferenceError::Internal(format!("no video decoder: {e}")))?;
+        let decoder = self.decoder_for(id, codec)?;
         let mut limits = settings.limits.clone();
         match kind {
             // The room's canvas is the most a camera can usefully send.
@@ -1063,6 +1098,7 @@ impl VideoRoom {
             codec,
             profile,
             decoder,
+            Arc::clone(&self.backend.hw),
             limits,
             rand::random(),
         ));
@@ -1476,6 +1512,80 @@ impl VideoRoom {
         debug!(room = %self.id, participant = %id, %kind, "video subscriber removed");
     }
 
+    // ---- placing stages on the device, or the host ----------------------------
+
+    /// A decoder for `codec` on the room's device, or on the host when
+    /// the device has none: the host's frames are uploaded as they are
+    /// decoded (§15.7, block 8b).
+    fn decoder_for(
+        &self,
+        id: &str,
+        codec: VideoCodec,
+    ) -> Result<Box<dyn forge_video::codec::VideoDecoder>> {
+        let device = &self.backend.device;
+        match self.backend.registry.decoder(codec, device) {
+            Ok(d) => Ok(d),
+            Err(on_device) if !device.is_host() => {
+                let d = self
+                    .backend
+                    .registry
+                    .decoder(codec, &MediaDevice::Host)
+                    .map_err(|e| ConferenceError::Internal(format!("no video decoder: {e}")))?;
+                info!(room = %self.id, participant = %id, %codec, %device, reason = %on_device,
+                      "video decoder on the host; frames uploaded");
+                Ok(d)
+            }
+            Err(e) => Err(ConferenceError::Internal(format!("no video decoder: {e}"))),
+        }
+    }
+
+    /// An encoder for `es` on the room's device, or on the host when the
+    /// device has none for the codec (VP8 and VP9 on NVENC): the canvas
+    /// is then downloaded once a tick for it.
+    fn encoder_for(
+        &self,
+        es: &EncoderSettings,
+    ) -> Result<Box<dyn forge_video::codec::VideoEncoder>> {
+        let device = &self.backend.device;
+        match self.backend.registry.encoder(es, device) {
+            Ok(e) => Ok(e),
+            Err(on_device) if !device.is_host() => {
+                let e = self
+                    .backend
+                    .registry
+                    .encoder(es, &MediaDevice::Host)
+                    .map_err(|e| ConferenceError::Internal(format!("no video encoder: {e}")))?;
+                info!(room = %self.id, codec = %es.codec, resolution = %es.resolution, %device,
+                      reason = %on_device, "video encoder on the host; canvas downloaded");
+                Ok(e)
+            }
+            Err(e) => Err(ConferenceError::Internal(format!("no video encoder: {e}"))),
+        }
+    }
+
+    /// A compositor on the room's device, or the host's when the
+    /// device's does not build: its tiles are then downloaded each tick.
+    fn compositor_for(&self, resolution: Resolution, layout: Layout) -> Box<dyn Compositor> {
+        match self
+            .backend
+            .hw
+            .compositor(resolution.width, resolution.height, layout)
+        {
+            Ok(c) => c,
+            Err(e) => {
+                if !self.backend.device.is_host() {
+                    warn!(room = %self.id, device = %self.backend.device, error = %e,
+                          "no compositor on the device; composing this output on the host");
+                }
+                Box::new(HostCompositor::new(
+                    resolution.width,
+                    resolution.height,
+                    layout,
+                ))
+            }
+        }
+    }
+
     /// The encoder for a flavor on an output, created when it is new.
     /// Whoever just arrived needs a keyframe, so one is asked for either
     /// way (§5.4); the flag it returns is the encoder's own.
@@ -1487,14 +1597,13 @@ impl VideoRoom {
     ) -> Result<Arc<AtomicBool>> {
         let layout = self.layout();
         let mut outputs = self.outputs.lock();
-        let out = outputs.entry(output.clone()).or_insert_with(|| Output {
-            compositor: HostCompositor::new(
-                output.resolution.width,
-                output.resolution.height,
-                layout,
-            ),
-            encoders: HashMap::new(),
-        });
+        let out = match outputs.entry(output.clone()) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(v) => v.insert(Output {
+                compositor: self.compositor_for(output.resolution, layout),
+                encoders: HashMap::new(),
+            }),
+        };
         if let Some(enc) = out.encoders.get(flavor) {
             enc.wants_keyframe.store(true, Ordering::Release);
             return Ok(Arc::clone(&enc.wants_keyframe));
@@ -1508,11 +1617,7 @@ impl VideoRoom {
         if output.view == View::Content {
             es = es.for_screen();
         }
-        let encoder = self
-            .backend
-            .registry
-            .encoder(&es, &self.backend.device)
-            .map_err(|e| ConferenceError::Internal(format!("no video encoder: {e}")))?;
+        let encoder = self.encoder_for(&es)?;
         let fe = FlavorEncoder::new(
             flavor.clone(),
             encoder,
@@ -1817,6 +1922,7 @@ impl VideoRoom {
         let st = &s.stats;
         VideoSourceInfo {
             codec: s.codec(),
+            device: s.device(),
             resolution: Resolution::new(
                 st.width.load(Ordering::Relaxed),
                 st.height.load(Ordering::Relaxed),
@@ -1895,6 +2001,7 @@ impl VideoRoom {
                     .values()
                     .map(|e| VideoFlavorInfo {
                         flavor: e.flavor.clone(),
+                        device: e.device(),
                         subscribers: self
                             .subscribers
                             .iter()
@@ -1910,6 +2017,7 @@ impl VideoRoom {
                     scope: k.scope.clone(),
                     view: k.view,
                     resolution: k.resolution,
+                    device: o.compositor.device(),
                     flavors,
                 }
             })
@@ -1920,6 +2028,7 @@ impl VideoRoom {
         let encoders = outputs.values().map(|o| o.encoders.len()).sum();
         drop(outputs);
         VideoRoomStatus {
+            device: self.backend.device.clone(),
             layout: c.layout.unwrap_or(settings.layout),
             content_layout: settings.content_layout,
             fps: self.fps(),
@@ -2230,6 +2339,10 @@ impl VideoRoom {
         // Recordings whose sink has gone, stopped after the loop:
         // `stop_record` wants the outputs lock this holds.
         let mut gone: Vec<String> = Vec::new();
+        // Tiles moved for an output composing off the room's device (a
+        // compositor that fell back to the host): once per tile per
+        // tick, shared by every such output.
+        let mut moved: HashMap<(SourceKey, bool), Option<Arc<VideoFrame>>> = HashMap::new();
         for (key, out) in outputs.iter_mut() {
             if out.encoders.is_empty() {
                 continue;
@@ -2248,14 +2361,28 @@ impl VideoRoom {
                 continue;
             }
             out.compositor.set_layout(plan.layout);
+            let compose_on = out.compositor.device();
+            let tile_frames: Vec<Option<Arc<VideoFrame>>> = plan
+                .tiles
+                .iter()
+                .filter_map(|k| tiles.get(k))
+                .map(|t| match &t.frame {
+                    Some(f) if f.device() != compose_on => moved
+                        .entry((t.key.clone(), compose_on.is_host()))
+                        .or_insert_with(|| self.move_frame(f, &compose_on))
+                        .clone(),
+                    other => other.clone(),
+                })
+                .collect();
             let sources: Vec<TileSource<'_>> = plan
                 .tiles
                 .iter()
                 .filter_map(|k| tiles.get(k))
-                .map(|t| TileSource {
+                .zip(&tile_frames)
+                .map(|(t, frame)| TileSource {
                     id: &t.key.participant,
                     name: &t.name,
-                    frame: t.frame.as_deref(),
+                    frame: frame.as_deref(),
                     speaking: t.speaking,
                     muted: t.muted,
                     kind: if t.key.is_content() {
@@ -2270,10 +2397,26 @@ impl VideoRoom {
                 continue;
             }
             let canvas = out.compositor.canvas().clone();
+            // The canvas where an encoder off the compositor's device
+            // needs it: downloaded (or uploaded) once for all of them.
+            let mut canvas_elsewhere: Option<Option<Arc<VideoFrame>>> = None;
             for enc in out.encoders.values_mut() {
                 if !enc.due(room_fps) {
                     continue;
                 }
+                let enc_on = enc.device();
+                let input: Arc<VideoFrame> = if enc_on == canvas.device() {
+                    Arc::new(canvas.clone())
+                } else {
+                    match canvas_elsewhere.get_or_insert_with(|| self.move_frame(&canvas, &enc_on))
+                    {
+                        Some(f) => Arc::clone(f),
+                        None => {
+                            enc.encode_errors += 1;
+                            continue;
+                        }
+                    }
+                };
                 let subs: Vec<Arc<Subscriber>> = self
                     .subscribers
                     .iter()
@@ -2301,7 +2444,7 @@ impl VideoRoom {
                     .unwrap_or(enc.flavor.max_kbps);
                 enc.set_target_kbps(floor.min(enc.flavor.max_kbps));
                 let codec = enc.flavor.codec;
-                for frame in enc.encode(&canvas, now, &self.id) {
+                for frame in enc.encode(&input, now, &self.id) {
                     for s in &subs {
                         s.send_frame(codec, &frame, pts);
                     }
@@ -2323,6 +2466,34 @@ impl VideoRoom {
         }
         histogram!("forge_conference_video_compose_duration_seconds", "room_id" => self.id.clone())
             .record(started.elapsed().as_secs_f64());
+    }
+
+    /// `frame` on `device`: downloaded when `device` is the host,
+    /// uploaded when it is the room's device. `None`, logged, when the
+    /// copy fails.
+    fn move_frame(&self, frame: &VideoFrame, device: &MediaDevice) -> Option<Arc<VideoFrame>> {
+        let moved = if device.is_host() {
+            self.backend.hw.download(frame).map(VideoFrame::Host)
+        } else if *device == self.backend.device {
+            self.backend.hw.resident(frame)
+        } else {
+            Err(forge_video::codec::CodecError::WrongDevice {
+                expected: device.clone(),
+                actual: frame.device(),
+            })
+        };
+        match moved {
+            Ok(f) => {
+                counter!("forge_conference_video_frames_moved_total", "room_id" => self.id.clone(),
+                         "to" => device.to_string())
+                .increment(1);
+                Some(Arc::new(f))
+            }
+            Err(e) => {
+                warn!(room = %self.id, %device, error = %e, "could not move a video frame");
+                None
+            }
+        }
     }
 
     /// Move whoever needs moving between rungs of the bitrate ladder

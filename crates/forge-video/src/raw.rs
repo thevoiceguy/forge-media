@@ -51,6 +51,7 @@ pub fn is_raw(data: &[u8]) -> bool {
 
 pub struct RawDecoder {
     codec: VideoCodec,
+    device: MediaDevice,
 }
 
 impl VideoDecoder for RawDecoder {
@@ -58,25 +59,33 @@ impl VideoDecoder for RawDecoder {
         self.codec
     }
     fn device(&self) -> MediaDevice {
-        MediaDevice::Host
+        self.device.clone()
     }
     fn decode(&mut self, frame: &CodedFrame) -> Result<Option<VideoFrame>, CodecError> {
         let f = decode_raw(&frame.data)?.with_pts(frame.timestamp);
-        Ok(Some(VideoFrame::Host(f)))
+        Ok(Some(on_device(&self.device, f)?))
     }
     fn reset(&mut self) {}
 }
 
 pub struct RawEncoder {
     codec: VideoCodec,
+    device: MediaDevice,
     settings: EncoderSettings,
     frames: u64,
 }
 
 impl RawEncoder {
     pub fn new(settings: EncoderSettings) -> Self {
+        Self::on(MediaDevice::Host, settings)
+    }
+
+    /// A raw encoder taking frames on `device` (the host, or a fake
+    /// device from [`crate::testing`]).
+    pub fn on(device: MediaDevice, settings: EncoderSettings) -> Self {
         Self {
             codec: settings.codec,
+            device,
             settings,
             frames: 0,
         }
@@ -93,7 +102,7 @@ impl VideoEncoder for RawEncoder {
         self.codec
     }
     fn device(&self) -> MediaDevice {
-        MediaDevice::Host
+        self.device.clone()
     }
     fn settings(&self) -> &EncoderSettings {
         &self.settings
@@ -103,10 +112,7 @@ impl VideoEncoder for RawEncoder {
         frame: &VideoFrame,
         _keyframe: bool,
     ) -> Result<Vec<CodedFrame>, CodecError> {
-        let host = frame.as_host().ok_or_else(|| CodecError::WrongDevice {
-            expected: MediaDevice::Host,
-            actual: frame.device(),
-        })?;
+        let host = pixels(&self.device, frame)?;
         // Encoders deliver the flavor's resolution whatever they are fed.
         let r = self.settings.resolution;
         let scaled;
@@ -125,20 +131,56 @@ impl VideoEncoder for RawEncoder {
     }
 }
 
-/// Factories for the raw codec, registered as `codec` on the host.
+/// The pixels of a frame the raw codec takes on `device`: a host frame
+/// on the host, a fake device's frame on a fake device.
+fn pixels<'a>(device: &MediaDevice, frame: &'a VideoFrame) -> Result<&'a HostFrame, CodecError> {
+    match (device, frame) {
+        (MediaDevice::Host, VideoFrame::Host(h)) => Ok(h),
+        (MediaDevice::Host, other) => Err(CodecError::WrongDevice {
+            expected: MediaDevice::Host,
+            actual: other.device(),
+        }),
+        (d, f) if crate::testing::is_fake(d) => crate::testing::unwrap(f, d),
+        (d, _) => Err(CodecError::InvalidConfig(format!(
+            "the raw codec has no frames on {d}"
+        ))),
+    }
+}
+
+/// A decoded frame as `device` holds it.
+fn on_device(device: &MediaDevice, frame: HostFrame) -> Result<VideoFrame, CodecError> {
+    match device {
+        MediaDevice::Host => Ok(VideoFrame::Host(frame)),
+        d if crate::testing::is_fake(d) => Ok(crate::testing::wrap(d, frame)),
+        d => Err(CodecError::InvalidConfig(format!(
+            "the raw codec has no frames on {d}"
+        ))),
+    }
+}
+
+/// Factories for the raw codec, registered as `codec` on the host (or,
+/// for tests, on a fake device).
 pub struct RawFactory {
     codec: VideoCodec,
+    device: MediaDevice,
 }
 
 impl RawFactory {
     pub fn new() -> Self {
-        Self {
-            codec: VideoCodec::VP8,
-        }
+        Self::for_codec(VideoCodec::VP8)
     }
 
     pub fn for_codec(codec: VideoCodec) -> Self {
-        Self { codec }
+        Self {
+            codec,
+            device: MediaDevice::Host,
+        }
+    }
+
+    /// The same factory keyed on `device`.
+    pub fn on(mut self, device: MediaDevice) -> Self {
+        self.device = device;
+        self
     }
 }
 
@@ -153,10 +195,13 @@ impl DecoderFactory for RawFactory {
         self.codec
     }
     fn device(&self) -> MediaDevice {
-        MediaDevice::Host
+        self.device.clone()
     }
     fn create(&self) -> Result<Box<dyn VideoDecoder>, CodecError> {
-        Ok(Box::new(RawDecoder { codec: self.codec }))
+        Ok(Box::new(RawDecoder {
+            codec: self.codec,
+            device: self.device.clone(),
+        }))
     }
 }
 
@@ -165,7 +210,7 @@ impl EncoderFactory for RawFactory {
         self.codec
     }
     fn device(&self) -> MediaDevice {
-        MediaDevice::Host
+        self.device.clone()
     }
     fn create(&self, settings: &EncoderSettings) -> Result<Box<dyn VideoEncoder>, CodecError> {
         if settings.codec != self.codec {
@@ -174,7 +219,10 @@ impl EncoderFactory for RawFactory {
                 self.codec, settings.codec
             )));
         }
-        Ok(Box::new(RawEncoder::new(settings.clone())))
+        Ok(Box::new(RawEncoder::on(
+            self.device.clone(),
+            settings.clone(),
+        )))
     }
 }
 

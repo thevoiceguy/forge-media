@@ -25,8 +25,9 @@ use forge_core::VideoCodec;
 use forge_rtp::rtcp::{PsFeedback, RtcpPacket, RtpFeedback};
 use forge_rtp::{AssemblerEvent, CodedFrame, FrameAssembler, KeyframeRequestGate, RtpPacket};
 use forge_video::codec::VideoDecoder;
-use forge_video::frame::{Resolution, VideoFrame};
-use forge_video::scale::{fit_within, resize_with, ScaleMode};
+use forge_video::device::DeviceBackend;
+use forge_video::frame::{MediaDevice, Resolution, VideoFrame};
+use forge_video::scale::{fit_within, resize_with, ScaleMode, Scaler};
 use metrics::counter;
 use parking_lot::Mutex;
 use tracing::{debug, warn};
@@ -144,6 +145,14 @@ pub struct VideoSource {
     /// arrived since the last loss).
     valid: AtomicBool,
     decoder: Arc<Mutex<DecoderState>>,
+    /// Where the decoder runs; the room's device when it has this
+    /// codec, the host otherwise (design §15.7, block 8b).
+    device: MediaDevice,
+    /// The room's device: what a decoded frame is moved to when the
+    /// decoder ran elsewhere, and whose scaler shrinks an oversize
+    /// screen on it.
+    hw: Arc<dyn DeviceBackend>,
+    scaler: Arc<Mutex<Option<Box<dyn Scaler>>>>,
     slot: Arc<Mutex<Slot>>,
     queued: Arc<AtomicUsize>,
     failed: Arc<AtomicBool>,
@@ -169,11 +178,16 @@ impl VideoSource {
         codec: VideoCodec,
         profile: &str,
         decoder: Box<dyn VideoDecoder>,
+        hw: Arc<dyn DeviceBackend>,
         limits: SourceLimits,
         local_ssrc: u32,
     ) -> Self {
         let now = Instant::now();
+        let device = decoder.device();
         Self {
+            device,
+            hw,
+            scaler: Arc::new(Mutex::new(None)),
             id: id.to_string(),
             room_id: room_id.to_string(),
             kind,
@@ -214,6 +228,11 @@ impl VideoSource {
 
     pub fn codec(&self) -> VideoCodec {
         self.codec
+    }
+
+    /// Where this stream is decoded.
+    pub fn device(&self) -> MediaDevice {
+        self.device.clone()
     }
 
     pub fn kind(&self) -> StreamKind {
@@ -424,6 +443,8 @@ impl VideoSource {
         let kind = self.kind;
         let id = self.id.clone();
         let room_id = self.room_id.clone();
+        let hw = Arc::clone(&self.hw);
+        let scaler = Arc::clone(&self.scaler);
         let submitted = pool.submit(move || {
             // Decrement whatever happens, including a panic unwinding
             // through the codec: `catch_unwind` in the pool ends the job,
@@ -452,10 +473,38 @@ impl VideoSource {
                         // A camera over the cap is a camera misbehaving.
                         // A screen over it is a big monitor: shrink it,
                         // with the filter that keeps its text readable.
-                        let shrunk = match (kind, decoded.as_host()) {
-                            (StreamKind::Content, Some(host)) => {
+                        let shrunk = match (kind, &decoded) {
+                            (StreamKind::Content, VideoFrame::Host(host)) => {
                                 let to = fit_within(res, limits.max_resolution);
-                                Some(resize_with(host, to.width, to.height, ScaleMode::Box))
+                                Some(VideoFrame::Host(resize_with(
+                                    host,
+                                    to.width,
+                                    to.height,
+                                    ScaleMode::Box,
+                                )))
+                            }
+                            // Decoded on the device: shrunk there, on
+                            // the room's scaler, made on first need.
+                            (StreamKind::Content, VideoFrame::Device(_)) => {
+                                let to = fit_within(res, limits.max_resolution);
+                                let mut sc = scaler.lock();
+                                if sc.is_none() {
+                                    match hw.scaler() {
+                                        Ok(s) => *sc = Some(s),
+                                        Err(e) => {
+                                            warn!(participant = %id, error = %e,
+                                                  "no scaler on the room's device");
+                                        }
+                                    }
+                                }
+                                sc.as_mut().and_then(|s| match s.scale(&decoded, to) {
+                                    Ok(f) => Some(f),
+                                    Err(e) => {
+                                        warn!(participant = %id, error = %e,
+                                              "could not shrink a shared screen on the device");
+                                        None
+                                    }
+                                })
                             }
                             _ => None,
                         };
@@ -463,12 +512,28 @@ impl VideoSource {
                             Some(frame) => {
                                 debug!(participant = %id, from = %res, to = %frame.resolution(),
                                        "shared screen over the resolution cap; shrunk");
-                                decoded = VideoFrame::Host(frame);
+                                decoded = frame;
                                 res = decoded.resolution();
                             }
                             None => {
                                 warn!(participant = %id, %res, cap = %limits.max_resolution,
                                       "decoded video frame over the resolution cap; dropped");
+                                stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
+                                counter!("forge_conference_video_frames_dropped_total", "room_id" => room_id.clone())
+                                    .increment(1);
+                                return;
+                            }
+                        }
+                    }
+                    // A frame decoded off the room's device (a codec
+                    // the device lacks) is moved onto it once, here,
+                    // rather than by every output that draws it.
+                    if decoded.device() != hw.device() {
+                        match hw.resident(&decoded) {
+                            Ok(f) => decoded = f,
+                            Err(e) => {
+                                warn!(participant = %id, error = %e,
+                                      "could not move a decoded frame onto the room's device; dropped");
                                 stats.frames_dropped.fetch_add(1, Ordering::Relaxed);
                                 counter!("forge_conference_video_frames_dropped_total", "room_id" => room_id.clone())
                                     .increment(1);

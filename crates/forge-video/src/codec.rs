@@ -218,6 +218,27 @@ impl CodecRegistry {
             .collect()
     }
 
+    /// Codecs with a decoder on `device`. A GPU decodes more than it
+    /// encodes (NVDEC has VP8 and VP9, NVENC has neither), so a room on
+    /// one takes its sources from this list and its flavors from
+    /// [`encodable_on`](Self::encodable_on).
+    pub fn decodable_on(&self, device: &MediaDevice) -> Vec<VideoCodec> {
+        VideoCodec::ALL
+            .iter()
+            .copied()
+            .filter(|c| self.decoders.contains_key(&(*c, device.clone())))
+            .collect()
+    }
+
+    /// Codecs with an encoder on `device`.
+    pub fn encodable_on(&self, device: &MediaDevice) -> Vec<VideoCodec> {
+        VideoCodec::ALL
+            .iter()
+            .copied()
+            .filter(|c| self.encoders.contains_key(&(*c, device.clone())))
+            .collect()
+    }
+
     pub fn can_decode(&self, codec: VideoCodec, device: &MediaDevice) -> bool {
         self.decoders.contains_key(&(codec, device.clone()))
     }

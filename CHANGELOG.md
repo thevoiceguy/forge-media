@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**`forge-video` 0.6.0** — the pipeline placed on a device (FCP video
+conferencing phase 8b). `device::DeviceBackend` is what a room is placed
+on: its compositor and scaler, and `upload` / `download` across the bus
+(`HostBackend` is the CPU; `resident` moves a frame onto the device when
+it is not there). The compositor's chrome is one piece of code for every
+device: `compose::tile_geometry` (ring, picture area, name band),
+`draw_chrome_under` (background, rings, bars, avatars), `draw_band` and
+`label_text`; `HostCompositor` draws through them, pixel for pixel as
+before. `parity::scenes` is the golden set a device compositor is checked
+against, rendered by the host as the reference. `CodecRegistry::
+decodable_on` / `encodable_on` split what `codecs_on` required of both
+(NVDEC decodes VP8 and VP9; NVENC encodes neither). `bench::
+measure_compose_on` times any backend's compositor. `testing` is a fake
+device — host frames behind device handles, copies counted, a compositor
+that can be told to fail — and the raw codec registers on it
+(`RawFactory::on`), so a room on a device is tested without one.
+
+**`forge-video-hw` 0.2.0**: `DeviceCompositor`, an FFmpeg filter graph
+per output — onto a background uploaded once, in tile order, each
+tile's chrome plane (its ring, bars or avatar, painted by the shared
+chrome code, cached by what it shows and uploaded when that changes),
+its picture through `scale_cuda` (bilinear for cameras, Lanczos for a
+shrunk screen) and its name band, each an `overlay_cuda`; the graph is
+rebuilt when its shape (tile rectangles, picture sizes, bands) changes
+and nothing crosses the bus for a steady scene. `HwBackend` is the `DeviceBackend` over an open `HwDevice`, with
+`register` putting the codecs on the same open device; `graph` is the
+shared graph builder the scaler now uses too (`DeviceScaler::scale_with`
+takes a `ScaleMode`). Tests on the box: every golden scene within a PSNR
+threshold of the host, the graph built once for a steady scene, the
+composite's per-tick cost against the host's, and a room on the device
+end to end with an H.264 (NVENC) and a VP8 (host, downloaded canvas)
+subscriber.
+
+**`forge-video-codecs` 0.1.3**: `open_device` opens a device as a room's
+backend and registers its codecs on it (a warning and `None` without the
+`hwaccel` feature).
+
+**`forge-conference` 0.13.0**: `VideoBackend::on_device` places a node's
+rooms on a `DeviceBackend`; `VideoBackend::new` is the host as before.
+Each stage runs on the device when it can and on the host otherwise, one
+copy per frame: a decoder the device lacks uploads what it decodes, an
+encoder it lacks (VP8 and VP9 on NVENC, so every WebM recording) takes
+the canvas downloaded once a tick for every such flavor, and an output
+whose device compositor does not build composes on the host from
+downloaded tiles. An oversize shared screen decoded on the device is
+shrunk on the device's scaler rather than dropped (it was dropped before:
+the shrink only knew host frames). The status names the device per
+stage: `VideoRoomStatus::device`, `VideoSourceInfo::device` (decode),
+`VideoOutputInfo::device` (compose), `VideoFlavorInfo::device` (encode).
+New counter `forge_conference_video_frames_moved_total{room_id,to}`. The
+codec pool binds no context per thread: FFmpeg's CUDA context is pushed
+per call, so none is needed.
+
 ## [2026-09-12] — workspace release
 
 **Crate versions:** **forge-video-hw 0.1.0** (new), **forge-video-codecs 0.1.2**.

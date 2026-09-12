@@ -21,7 +21,7 @@ use forge_rtp::video::payload::packetize;
 use forge_rtp::{KeyframeRequestGate, RtpPacket, RtxCache, StreamRewriter};
 use forge_video::codec::{EncoderSettings, VideoEncoder};
 use forge_video::flavor::Flavor;
-use forge_video::frame::{Resolution, VideoFrame};
+use forge_video::frame::{MediaDevice, Resolution, VideoFrame};
 use forge_video::ladder::{Ladder, LadderPolicy, Move, Rung};
 use metrics::counter;
 use parking_lot::Mutex;
@@ -551,6 +551,12 @@ impl FlavorEncoder {
 
     pub fn settings(&self) -> &EncoderSettings {
         self.encoder.settings()
+    }
+
+    /// Where this flavor is encoded: the room's device, or the host
+    /// when the device has no encoder for the codec.
+    pub fn device(&self) -> MediaDevice {
+        self.encoder.device()
     }
 
     pub fn target_kbps(&self) -> u32 {

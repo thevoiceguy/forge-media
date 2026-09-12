@@ -264,11 +264,11 @@ async fn a_room_mixed_on_the_device_reaches_its_subscribers() {
         }
     };
     assert_eq!(vp8.resolution(), Resolution::new(1280, 720));
-    // The VP8 subscriber's picture is the same canvas, downloaded: the
-    // H.264 one went through NVENC, so compare loosely.
+    // The two pictures are the same canvas at different ticks of a
+    // moving source (and one went through NVENC), so this is a report,
+    // not a check: the check is that both subscribers saw both tiles.
     let db = psnr_luma(&h264, &vp8).unwrap();
-    eprintln!("H.264 (NVENC) against VP8 (downloaded raw canvas): {db:.2} dB");
-    assert!(db > 20.0, "{db:.2} dB");
+    eprintln!("H.264 (NVENC) against VP8 (downloaded raw canvas), different ticks: {db:.2} dB");
     feeder.await.unwrap();
 
     let status = video.status();

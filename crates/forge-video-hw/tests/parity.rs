@@ -84,17 +84,21 @@ fn a_steady_scene_builds_its_graph_once_and_a_changed_shape_rebuilds_it() {
         c.render(&scene.sources(&frames), pts).unwrap();
     }
     assert_eq!(c.rebuilds(), 1, "one graph for a steady scene");
-    // Someone else speaks: the underlay changes, the graph does not.
+    let uploads = c.uploads();
+    c.render(&scene.sources(&frames), 4).unwrap();
+    assert_eq!(c.uploads(), uploads, "a steady scene uploads nothing");
+    // Someone else speaks: the tiles' planes change, the graph does not.
     let mut sources = scene.sources(&frames);
     for s in &mut sources {
         s.speaking = !s.speaking;
     }
-    c.render(&sources, 4).unwrap();
+    c.render(&sources, 5).unwrap();
     assert_eq!(c.rebuilds(), 1);
+    assert!(c.uploads() > uploads, "new rings went up");
     // A tile loses its picture: the shape changes.
     let mut fewer = frames.clone();
     fewer[0] = None;
-    c.render(&scene.sources(&fewer), 5).unwrap();
+    c.render(&scene.sources(&fewer), 6).unwrap();
     assert_eq!(c.rebuilds(), 2);
     // And the picture matches what the host draws for the same thing.
     let mut host_scene = scene.clone();

@@ -25,13 +25,13 @@ that can be told to fail — and the raw codec registers on it
 (`RawFactory::on`), so a room on a device is tested without one.
 
 **`forge-video-hw` 0.2.0**: `DeviceCompositor`, an FFmpeg filter graph
-per output — the pictures through `scale_cuda` (bilinear for cameras,
-Lanczos for a shrunk screen) and a chain of `overlay_cuda` onto an
-*underlay* the host paints with the shared chrome code and uploads when
-it changes, the name bands as small planes cached by their text and
-overlaid last; the graph is rebuilt when its shape (tile rectangles,
-picture sizes, bands) changes and nothing crosses the bus for a steady
-scene. `HwBackend` is the `DeviceBackend` over an open `HwDevice`, with
+per output — onto a background uploaded once, in tile order, each
+tile's chrome plane (its ring, bars or avatar, painted by the shared
+chrome code, cached by what it shows and uploaded when that changes),
+its picture through `scale_cuda` (bilinear for cameras, Lanczos for a
+shrunk screen) and its name band, each an `overlay_cuda`; the graph is
+rebuilt when its shape (tile rectangles, picture sizes, bands) changes
+and nothing crosses the bus for a steady scene. `HwBackend` is the `DeviceBackend` over an open `HwDevice`, with
 `register` putting the codecs on the same open device; `graph` is the
 shared graph builder the scaler now uses too (`DeviceScaler::scale_with`
 takes a `ScaleMode`). Tests on the box: every golden scene within a PSNR

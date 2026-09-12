@@ -370,6 +370,7 @@ forge-media/
 ├── forge-mixer                 # Multi-party audio mixing
 ├── forge-video                 # Video frames, scaling, layouts + compositor, clock, flavors, codec traits
 ├── forge-video-codecs          # libvpx / OpenH264 / dav1d / SVT-AV1 bindings behind cargo features
+├── forge-video-hw              # GPU video: FFmpeg device contexts, NVDEC / NVENC, scale_cuda
 ├── forge-conference-processor  # Conference bridge management
 ├── forge-recording             # Recording system
 ├── forge-dtmf                  # DTMF detection and generation

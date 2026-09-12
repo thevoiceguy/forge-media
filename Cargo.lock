@@ -505,6 +505,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.70.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
+dependencies = [
+ "bitflags 2.11.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.10.5",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1363,7 +1381,7 @@ version = "5.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26ecdc636a02003406cc821aa9d703c888a966a3fd9bbdae9f7cf27d71720147"
 dependencies = [
- "bindgen",
+ "bindgen 0.68.1",
  "pkg-config",
 ]
 
@@ -1488,6 +1506,20 @@ name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+
+[[package]]
+name = "ffmpeg-sys-next"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9e9c75ebd4463de9d8998fb134ba26347fe5faee62fabf0a4b4d41bd500b4ad"
+dependencies = [
+ "bindgen 0.70.1",
+ "cc",
+ "libc",
+ "num_cpus",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "filetime"
@@ -2019,17 +2051,31 @@ dependencies = [
 
 [[package]]
 name = "forge-video-codecs"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
- "bindgen",
+ "bindgen 0.68.1",
  "bytes",
  "dav1d",
  "env-libvpx-sys",
  "forge-core",
  "forge-rtp",
  "forge-video",
+ "forge-video-hw",
  "openh264",
  "pkg-config",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "forge-video-hw"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "ffmpeg-sys-next",
+ "forge-core",
+ "forge-rtp",
+ "forge-video",
  "thiserror 2.0.20",
  "tracing",
 ]
@@ -3191,6 +3237,16 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
+]
+
+[[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
 ]
 
 [[package]]

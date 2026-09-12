@@ -10,6 +10,7 @@
 //! [`View`] it shows: the composite, the cameras alone, or the content
 //! alone.
 
+use super::room::VideoRoomSettings;
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -287,7 +288,11 @@ pub struct ContentInfo {
 /// the floor, so a grant costs a decode's worth of budget rather than
 /// the room slowing (§15.6). Absent, everything is admitted.
 pub trait ContentGate: Send + Sync {
-    fn admit(&self, room: &str, participant: &str) -> bool;
+    /// Whether `participant` may take `room`'s floor now, given what
+    /// the room would decode: `settings` is the room's own, so the
+    /// share is priced at its content cap and rate rather than at
+    /// defaults (FCP §15.8, decision 3).
+    fn admit(&self, room: &str, participant: &str, settings: &VideoRoomSettings) -> bool;
 }
 
 #[cfg(test)]

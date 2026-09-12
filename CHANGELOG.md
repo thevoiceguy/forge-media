@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**`forge-video` 0.6.1**: `bench::measure_compose_saturated` — 1, 2, 4, …
+compositors on their own threads, each warmed up uncounted, until the
+summed render rate stops growing — and `ComposeSaturation::ns_per_px`,
+the constant that makes that many composites fill one execution unit:
+how a GPU's compose engine is priced (FCP §15.8, decision 1).
+
+**`forge-video-hw` 0.2.1**: `bench::saturate` warms each step up for a
+second (or the step's length when shorter) before it counts, so a short
+step no longer reads an engine's first frames as its rate (decision 2).
+
+**`forge-conference` 0.14.0**: `ContentGate::admit` takes the room's
+`VideoRoomSettings`, so a share is priced at the room's content cap and
+rate rather than at defaults (decision 3).
+
 ## [2026-09-12.1] — workspace release
 
 **Crate versions:** **forge-video 0.6.0**, **forge-video-hw 0.2.0**,

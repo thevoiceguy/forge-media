@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-12.1] — workspace release
+
+**Crate versions:** **forge-video 0.6.0**, **forge-video-hw 0.2.0**,
+**forge-video-codecs 0.1.3**, **forge-conference 0.13.0**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-bfcp 0.1.0, forge-codecs 0.2.0,
+forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine 0.6.0, forge-ha 0.2.0, forge-hep 0.0.1,
+forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0,
+forge-mixer 0.4.0, forge-recorder 0.2.0, forge-resampler 0.1.1, forge-rtp 0.7.0,
+forge-sdp 0.2.2, forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder 0.2.0,
+forge-transcription 0.2.0, forge-vad 0.2.0, forge-webm 0.1.0, forge-webrtc 0.7.0.
+Embeds siphon-rs **v2026.09.05**.
+
 **`forge-video` 0.6.0** — the pipeline placed on a device (FCP video
 conferencing phase 8b). `device::DeviceBackend` is what a room is placed
 on: its compositor and scaler, and `upload` / `download` across the bus

@@ -619,6 +619,41 @@ impl ConferenceRoom {
         self.add_participant_inner(&participant_id, false)
     }
 
+    /// Add a participant who was already admitted to this room on another
+    /// node and is moving here as it drains (FCP's distributed
+    /// conferencing, phase 5). The lock and wait-for-moderator do not
+    /// apply — they were passed once — but capacity does, hosts are
+    /// tracked, and no join sound plays (the room never heard them leave).
+    /// The caller is responsible for having verified the claim.
+    pub fn add_participant_admitted<S: Into<String>>(
+        &self,
+        participant_id: S,
+        is_host: bool,
+    ) -> Result<()> {
+        let participant_id = participant_id.into();
+        {
+            let config = self.room_config.read();
+            if let Some(cfg) = config.as_ref() {
+                if cfg.max_channels > 0 {
+                    let current_count =
+                        self.mixer.participant_count() + self.waiting_participants.len();
+                    if current_count >= cfg.max_channels {
+                        return Err(ConferenceError::ConferenceFull(cfg.max_channels));
+                    }
+                }
+            }
+        }
+        if is_host {
+            info!(
+                "Adding migrated host {} to room {}",
+                participant_id, self.id
+            );
+            self.hosts.insert(participant_id.clone(), ());
+            self.release_waiting_participants();
+        }
+        self.add_participant_inner(&participant_id, false)
+    }
+
     /// Add a participant that represents something other than a caller —
     /// an inter-node trunk, a media injector — and so answers to none of
     /// the caller-facing admission rules: no lock, wait-for-moderator or
@@ -1905,6 +1940,47 @@ impl Default for ConferenceBridge {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_migrated_participant_is_admitted_past_the_lock_and_the_waiting_room() {
+        let room = ConferenceRoom::new(
+            "moving",
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
+        room.configure(
+            crate::room_config::RoomConfig {
+                wait_for_moderator: Some(true),
+                max_channels: Some(2),
+                ..Default::default()
+            },
+            &crate::config::ConferenceConfig::default(),
+        )
+        .unwrap();
+        room.lock();
+
+        // A fresh guest is locked out; a migrated one is not, and does not
+        // wait for a moderator either.
+        assert!(matches!(
+            room.add_participant_quiet("fresh", false),
+            Err(ConferenceError::ConferenceLocked)
+        ));
+        room.add_participant_admitted("moved-guest", false).unwrap();
+        assert!(room.participants().contains(&"moved-guest".to_string()));
+        assert!(room.waiting_participants().is_empty());
+
+        // A migrated host counts as a host.
+        room.add_participant_admitted("moved-host", true).unwrap();
+        assert_eq!(room.host_count(), 1);
+
+        // Capacity still applies.
+        assert!(matches!(
+            room.add_participant_admitted("one-too-many", false),
+            Err(ConferenceError::ConferenceFull(2))
+        ));
+    }
 
     #[test]
     fn test_conference_room_lifecycle() {

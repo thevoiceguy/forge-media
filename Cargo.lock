@@ -1873,6 +1873,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-mp4"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "forge-recorder"
 version = "0.2.0"
 dependencies = [

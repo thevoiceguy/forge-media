@@ -258,9 +258,17 @@ dependencies = [
  "bytes",
  "forge-bfcp",
  "forge-core",
+ "forge-mp4",
  "forge-rtp",
  "forge-webm",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "forge-mp4"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

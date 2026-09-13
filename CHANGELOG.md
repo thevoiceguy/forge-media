@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-13] — workspace release
+
+**Crate versions:** **forge-mp4 0.1.1**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-bfcp 0.1.0, forge-codecs 0.2.0,
+forge-conference 0.14.0, forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine 0.6.0,
+forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0,
+forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0, forge-recorder 0.2.0, forge-resampler 0.1.1,
+forge-rtp 0.7.0, forge-sdp 0.2.2, forge-siprec 0.2.1, forge-storage 0.2.0,
+forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0, forge-video 0.6.1,
+forge-video-codecs 0.1.3, forge-video-hw 0.2.1, forge-webm 0.1.0, forge-webrtc 0.7.0.
+Embeds siphon-rs **v2026.09.05**.
+
+**`forge-mp4` 0.1.1**: `read` took a track's duration from the `tkhd`'s
+reserved field (four bytes before the duration), so `TrackInfo::duration`
+read zero on every finished file — which the phase 9b close-out
+recorded as the writer leaving the per-track durations unpatched. The
+writer was patching all three headers on `finish`; the reader now
+reads the `tkhd` at the right offset and reads the `mdhd` duration too,
+as `TrackInfo::media_duration`, and the writer's test asserts both
+against the movie's duration on a finished file and zero on an
+unfinished one.
+
 ## [2026-09-12.3] — workspace release
 
 **Crate versions:** **forge-mp4 0.1.0** (new). Unchanged: bcg729-sys 0.1.0,

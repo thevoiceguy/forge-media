@@ -880,6 +880,9 @@ mod tests {
         assert_eq!(s.fragments[1].traf(VIDEO_TRACK).unwrap().base_time, 1000);
         assert!(!s.mfra);
         assert_eq!(s.duration_ms, 0, "not patched: never finished");
+        for t in &s.tracks {
+            assert_eq!((t.duration, t.media_duration), (0, 0), "track {}", t.id);
+        }
         assert_eq!(s.video_samples(), 30);
 
         let done = recording(45, 15, 1000, true, true);
@@ -889,6 +892,15 @@ mod tests {
         assert!(s.mfra, "finished: an mfra");
         assert_eq!(s.access_points, 3);
         assert!(s.duration_ms >= 2_990, "{}", s.duration_ms);
+        // Finishing patches the movie's duration into every header:
+        // the mvhd and each track's tkhd and mdhd, all on the
+        // millisecond timescale.
+        assert_eq!(s.tracks.len(), 2);
+        for t in &s.tracks {
+            assert_eq!(t.timescale, TIMESCALE);
+            assert_eq!(t.duration, s.duration_ms, "tkhd of track {}", t.id);
+            assert_eq!(t.media_duration, s.duration_ms, "mdhd of track {}", t.id);
+        }
         // The samples are AVCC: length-prefixed, parameter sets lifted.
         let sample = s.first_video_sample(&done).unwrap();
         assert_eq!(&sample[..4], &[0, 0, 0, 5]);

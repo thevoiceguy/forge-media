@@ -35,6 +35,9 @@ pub struct TrackInfo {
     pub timescale: u32,
     /// From the `tkhd`, in the movie timescale; zero until finished.
     pub duration: u64,
+    /// From the `mdhd`, in the track's own `timescale`; zero until
+    /// finished.
+    pub media_duration: u64,
 }
 
 /// One track's run of samples in a fragment.
@@ -256,17 +259,19 @@ fn parse_moov(payload: &[u8], s: &mut Mp4Summary) {
 fn parse_trak(trak: &[u8], _movie_timescale: u64) -> Option<TrackInfo> {
     let tkhd = child(trak, b"tkhd")?;
     let version = *tkhd.first()?;
+    // tkhd: version/flags, creation and modification times, track id,
+    // four reserved bytes, then the duration.
     let (id, duration) = if version == 1 {
-        (be32(tkhd, 20)?, be64(tkhd, 24)?)
+        (be32(tkhd, 20)?, be64(tkhd, 28)?)
     } else {
-        (be32(tkhd, 12)?, be32(tkhd, 16)? as u64)
+        (be32(tkhd, 12)?, be32(tkhd, 20)? as u64)
     };
     let mdia = child(trak, b"mdia")?;
     let mdhd = child(mdia, b"mdhd")?;
-    let timescale = if *mdhd.first()? == 1 {
-        be32(mdhd, 20)?
+    let (timescale, media_duration) = if *mdhd.first()? == 1 {
+        (be32(mdhd, 20)?, be64(mdhd, 24)?)
     } else {
-        be32(mdhd, 12)?
+        (be32(mdhd, 12)?, be32(mdhd, 16)? as u64)
     };
     let hdlr = child(mdia, b"hdlr")?;
     let handler: [u8; 4] = hdlr.get(8..12)?.try_into().ok()?;
@@ -311,6 +316,7 @@ fn parse_trak(trak: &[u8], _movie_timescale: u64) -> Option<TrackInfo> {
         channels,
         timescale,
         duration,
+        media_duration,
     })
 }
 

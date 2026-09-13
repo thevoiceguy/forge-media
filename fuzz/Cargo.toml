@@ -18,6 +18,7 @@ bytes = "1"
 forge-core = { path = "../crates/forge-core" }
 forge-rtp = { path = "../crates/forge-rtp" }
 forge-webm = { path = "../crates/forge-webm" }
+forge-mp4 = { path = "../crates/forge-mp4" }
 forge-bfcp = { path = "../crates/forge-bfcp" }
 
 # Every target parses attacker-supplied bytes and must not panic on any of
@@ -92,6 +93,13 @@ bench = false
 [[bin]]
 name = "webm_read_summary"
 path = "fuzz_targets/webm_read_summary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mp4_read"
+path = "fuzz_targets/mp4_read.rs"
 test = false
 doc = false
 bench = false

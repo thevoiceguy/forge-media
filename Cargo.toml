@@ -30,6 +30,7 @@ members = [
     "crates/forge-video",
     "crates/forge-video-codecs",
     "crates/forge-webm",
+    "crates/forge-mp4",
     "crates/forge-bfcp",
     "crates/forge-video-hw",
 ]

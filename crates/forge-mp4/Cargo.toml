@@ -1,0 +1,15 @@
+[package]
+name = "forge-mp4"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fragmented MP4 (ISO base media) writer for conference recordings: H.264, HEVC or AV1 video and Opus audio"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.27"

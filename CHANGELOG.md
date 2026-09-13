@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**`forge-mp4` 0.1.0** — a fragmented MP4 (ISO base media) writer for
+conference recordings (FCP video conferencing phase 9a). `Mp4Writer`
+takes **H.264** (`avc1` + `avcC`), **HEVC** (`hvc1` + `hvcC`) or **AV1**
+(`av01` + `av1C`) video with **Opus** audio (`Opus` + `dOps`), both on a
+millisecond timescale: an `ftyp` and a `moov` with empty sample tables
+and an `mvex`, then a `moof` + `mdat` pair per fragment, a fragment
+closing at each video keyframe past `FragmentLimits::min_ms` and at
+`max_ms` regardless, the durations patched into the `moov` and an
+`mfra` appended on `finish`. The configuration record is built from the
+first keyframe's parameter sets (SPS/PPS, VPS/SPS/PPS, the AV1
+sequence header with profile, level and tier read from it), so the
+header is written when that frame arrives and audio before it is held
+for the first fragment; H.264 and HEVC frames arrive as Annex B and are
+stored as length-prefixed NAL units with the parameter sets lifted out,
+AV1 temporal units as they are. `read` parses a file back — brands,
+tracks with their records, every fragment's runs, the `mfra` — for the
+tests and for checking a file; it stops at the first box it cannot
+complete, so a recording cut short reads to its last whole fragment.
+Fuzz target `mp4_read` with seeds derived by a test.
+
 ## [2026-09-12.2] — workspace release
 
 **Crate versions:** **forge-video 0.6.1**, **forge-video-hw 0.2.1**,

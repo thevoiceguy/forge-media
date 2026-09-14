@@ -75,7 +75,7 @@ jobs:
       # key carries the run number so each night writes a new entry, and
       # entries older than a week are evicted by GitHub on its own schedule.
       - name: Restore fuzzing corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ github.run_number }}

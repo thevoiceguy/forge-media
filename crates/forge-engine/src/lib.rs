@@ -23,7 +23,7 @@ pub use dtls_srtp::{
     install_keys as install_dtls_srtp_keys, is_dtls_packet, is_rtp_packet,
     is_unsupported_first_byte, DtlsLeg, HandshakeOutcome,
 };
-pub use forge_dtmf::DtmfDigit;
+pub use forge_dtmf::{DtmfDigit, DtmfMethod};
 pub use forwarding::ForwardingEngine;
 pub use injection::{
     AudioTarget, MixMode, PlaybackHandle, PlaybackId, PlaybackManager, PlaybackStatus,
@@ -39,8 +39,9 @@ pub use persistence::{
     PersistenceConfig,
 };
 pub use session::{
-    MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig, ParticipantLabel,
-    ParticipantMediaState, ParticipantMediaUpdate, ParticipantStats, SessionState,
+    LegDigit, MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig,
+    ParticipantLabel, ParticipantMediaState, ParticipantMediaUpdate, ParticipantStats,
+    SessionState,
 };
 
 #[cfg(feature = "xdp")]

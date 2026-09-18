@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-09-17] — workspace release
+
+**Crate versions:** **forge-engine 0.6.1**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-bfcp 0.1.0, forge-codecs 0.2.0,
+forge-conference 0.14.1, forge-core 0.2.2, forge-dtmf 0.2.1, forge-ha 0.2.0,
+forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0,
+forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0, forge-mp4 0.1.1, forge-recorder 0.2.0,
+forge-resampler 0.1.1, forge-rtp 0.7.0, forge-sdp 0.2.2, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0,
+forge-video 0.6.1, forge-video-codecs 0.1.3, forge-video-hw 0.2.1, forge-webm 0.1.0,
+forge-webrtc 0.7.0. Embeds siphon-rs **v2026.09.05**.
+
+**`forge-engine` 0.6.1**: DTMF per leg, for a B2BUA whose legs do not
+take DTMF the same way (FCP tenant trunks, phase 3b-4: RFC 2833 ↔ SIP
+INFO).
+
+- `MediaSession::subscribe_digits` — every digit a leg sends, once, as it
+  ends, with the leg it came from and how it arrived (`LegDigit`).
+  RFC 2833 and in-band both count. The EventBus's `DtmfDigitDetected`
+  says which session, not which leg.
+- `MediaSession::set_rfc2833_relay_to(leg, false)` — telephone-event is
+  no longer relayed to a leg that did not negotiate it, though it is
+  still detected and published. Relay was one switch for both
+  directions.
+- `MediaSession::send_dtmf(leg, digit, duration_ms)` — a digit played to
+  one leg as telephone-event at that leg's payload type, for a digit
+  that arrived by signalling. The playout queue could do this already;
+  nothing outside the media bridge could reach it.
+
 ## [2026-09-13.1] — workspace release
 
 **Crate versions:** **forge-conference 0.14.1**. Unchanged: bcg729-sys 0.1.0,

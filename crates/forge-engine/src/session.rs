@@ -604,12 +604,61 @@ impl Default for GeneratedRtpState {
     }
 }
 
+/// A digit one leg of the session sent, and which leg sent it.
+///
+/// Published once per digit, when it ends, whether it arrived as RFC 2833
+/// telephone-event or was heard in-band — the shape a signalling layer
+/// needs to carry the digit on to the other leg some other way (SIP INFO,
+/// say) when that leg does not take telephone-event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegDigit {
+    /// The leg the digit came from.
+    pub leg: ParticipantLabel,
+    /// The digit.
+    pub digit: forge_dtmf::DtmfDigit,
+    /// How long it was held, when the sender said.
+    pub duration_ms: Option<u32>,
+    /// How it arrived. A digit heard in-band is already in the audio the
+    /// other leg hears; one sent as telephone-event is not.
+    pub method: forge_dtmf::DtmfMethod,
+}
+
+/// Per-leg DTMF state: the legs telephone-event is not relayed to, and the
+/// stream of digits each leg sends.
+#[derive(Debug)]
+pub(crate) struct LegDtmf {
+    no_relay_to_a: AtomicBool,
+    no_relay_to_b: AtomicBool,
+    digits: tokio::sync::broadcast::Sender<LegDigit>,
+}
+
+impl Default for LegDtmf {
+    fn default() -> Self {
+        Self {
+            no_relay_to_a: AtomicBool::new(false),
+            no_relay_to_b: AtomicBool::new(false),
+            digits: tokio::sync::broadcast::channel(32).0,
+        }
+    }
+}
+
+impl LegDtmf {
+    fn no_relay_to(&self, leg: ParticipantLabel) -> &AtomicBool {
+        match leg {
+            ParticipantLabel::A => &self.no_relay_to_a,
+            ParticipantLabel::B => &self.no_relay_to_b,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScheduledPlayoutSource {
     #[cfg_attr(not(feature = "ai"), allow(dead_code))]
     AI,
     MediaBridgeAudio,
     MediaBridgeDtmf,
+    /// A digit the signalling layer asked for ([`MediaSession::send_dtmf`]).
+    SignalledDtmf,
 }
 
 impl ScheduledPlayoutSource {
@@ -618,6 +667,7 @@ impl ScheduledPlayoutSource {
             Self::AI => "ai",
             Self::MediaBridgeAudio => "media_bridge_audio",
             Self::MediaBridgeDtmf => "media_bridge_dtmf",
+            Self::SignalledDtmf => "signalled_dtmf",
         }
     }
 }
@@ -860,6 +910,9 @@ pub struct MediaSession {
     dtls_b: Arc<Mutex<Option<crate::dtls_srtp::DtlsLeg>>>,
     /// Whether to relay RFC 2833 telephone-event packets to the other leg
     relay_rfc2833: AtomicBool,
+    /// DTMF per leg: where telephone-event is not relayed, and the digits
+    /// each leg sends.
+    leg_dtmf: LegDtmf,
     /// Telephone-event payload type negotiated with participant A (default 101)
     telephone_event_pt_a: AtomicU8,
     /// Telephone-event payload type negotiated with participant B (default 101)
@@ -1000,6 +1053,7 @@ impl MediaSession {
             #[cfg(feature = "dtls")]
             dtls_b: Arc::new(Mutex::new(None)),
             relay_rfc2833: AtomicBool::new(false),
+            leg_dtmf: LegDtmf::default(),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -1166,6 +1220,7 @@ impl MediaSession {
             #[cfg(feature = "dtls")]
             dtls_b: Arc::new(Mutex::new(None)),
             relay_rfc2833: AtomicBool::new(false),
+            leg_dtmf: LegDtmf::default(),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -1376,6 +1431,7 @@ impl MediaSession {
             #[cfg(feature = "dtls")]
             dtls_b: Arc::new(Mutex::new(None)),
             relay_rfc2833: AtomicBool::new(false),
+            leg_dtmf: LegDtmf::default(),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -2700,6 +2756,66 @@ impl MediaSession {
         self.relay_rfc2833.store(relay, Ordering::Relaxed);
     }
 
+    /// Whether telephone-event from the other leg is relayed *to* `leg`.
+    ///
+    /// Relay is on for both directions when [`Self::set_relay_rfc2833`]
+    /// turns it on; this turns one direction off, for a leg that did not
+    /// negotiate telephone-event and would be sent a payload type it never
+    /// agreed to. The digits are still detected and published
+    /// ([`Self::subscribe_digits`]), so the caller can carry them on
+    /// another way.
+    pub fn set_rfc2833_relay_to(&self, leg: ParticipantLabel, relay: bool) {
+        self.leg_dtmf
+            .no_relay_to(leg)
+            .store(!relay, Ordering::Relaxed);
+    }
+
+    /// Whether telephone-event from the other leg reaches `leg`.
+    pub fn rfc2833_relayed_to(&self, leg: ParticipantLabel) -> bool {
+        self.relay_rfc2833() && !self.leg_dtmf.no_relay_to(leg).load(Ordering::Relaxed)
+    }
+
+    /// The digits each leg sends, as each one ends ([`LegDigit`]).
+    pub fn subscribe_digits(&self) -> tokio::sync::broadcast::Receiver<LegDigit> {
+        self.leg_dtmf.digits.subscribe()
+    }
+
+    /// Publish a digit `leg` sent, once it has ended.
+    pub(crate) fn publish_leg_digit(&self, leg: ParticipantLabel, event: &forge_dtmf::DtmfEvent) {
+        if event.event_type != forge_dtmf::DtmfEventType::End {
+            return;
+        }
+        // No subscriber is not an error: most sessions have none.
+        let _ = self.leg_dtmf.digits.send(LegDigit {
+            leg,
+            digit: event.digit,
+            duration_ms: event.duration_ms,
+            method: event.method,
+        });
+    }
+
+    /// Send `digit` to `leg` as RFC 2833 telephone-event, at the payload
+    /// type that leg negotiated, behind anything already queued for it.
+    ///
+    /// For a digit that arrived by signalling (SIP INFO) and must reach a
+    /// leg that takes telephone-event.
+    pub async fn send_dtmf(
+        &self,
+        leg: ParticipantLabel,
+        digit: forge_dtmf::DtmfDigit,
+        duration_ms: u32,
+    ) -> Result<()> {
+        self.schedule_dtmf_playout_for_leg(
+            leg,
+            digit,
+            duration_ms,
+            None,
+            crate::media_bridge::PlayoutMode::Append,
+            ScheduledPlayoutSource::SignalledDtmf,
+        )
+        .await
+    }
+
     /// Telephone-event payload type negotiated with participant A
     pub fn telephone_event_pt_a(&self) -> u8 {
         self.telephone_event_pt_a.load(Ordering::Relaxed)
@@ -3135,6 +3251,7 @@ impl MediaSession {
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
             hep_correlation_id: OnceLock::new(),
             relay_rfc2833: AtomicBool::new(false),
+            leg_dtmf: LegDtmf::default(),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
         };

@@ -325,6 +325,11 @@ impl ForwardingEngine {
         let te_pt_b = session.telephone_event_pt_b();
         let pkt_pt = packet.header.payload_type();
         if (pkt_pt == te_pt_a || pkt_pt == te_pt_b) && session.dtmf_config().enable_rfc2833 {
+            // Which leg sent it decides where it may be relayed, and is
+            // what a subscriber to the session's digits is told.
+            let sides =
+                Self::determine_packet_sides(session, participant_a, participant_b, source_addr)
+                    .await;
             tracing::debug!(
                 "Received RFC 2833 telephone-event packet for session {} from {}",
                 call_id.0,
@@ -350,6 +355,9 @@ impl ForwardingEngine {
                             counter!("forge_dtmf_events_total", "method" => "rfc2833", "digit" => format!("{}", event.digit)).increment(1);
                             counter!("forge_dtmf_rfc2833_events_total", "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type)).increment(1);
 
+                            if let Some((sender, _)) = sides {
+                                session.publish_leg_digit(sender.label(), &event);
+                            }
                             // Publish event to EventBus
                             if let Some(bus) = session.event_bus() {
                                 let _ = bus.publish(event.to_forge_event(call_id.clone()));
@@ -376,9 +384,11 @@ impl ForwardingEngine {
             session.update_activity().await;
             counter!("forge_dtmf_rfc2833_packets_total").increment(1);
 
-            if !session.relay_rfc2833() {
-                // Detect-only mode: consume the packet, don't forward
-                return;
+            // Detect-only, or a receiver that did not negotiate
+            // telephone-event: consume the packet, don't forward it.
+            match sides {
+                Some((_, receiver)) if session.rfc2833_relayed_to(receiver.label()) => {}
+                _ => return,
             }
             // Relay mode: fall through to normal forwarding path.
             // The packet's PT won't match audio codecs, so pcm_samples will be
@@ -491,6 +501,7 @@ impl ForwardingEngine {
                                 counter!("forge_dtmf_events_total", "method" => "inband", "digit" => format!("{}", event.digit)).increment(1);
                                 counter!("forge_dtmf_inband_events_total", "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type)).increment(1);
 
+                                session.publish_leg_digit(sender.label(), &event);
                                 // Publish event to EventBus
                                 if let Some(bus) = session.event_bus() {
                                     let _ = bus.publish(event.to_forge_event(call_id.clone()));
@@ -1921,6 +1932,7 @@ mod tests {
     use forge_core::{CallId, ParticipantId};
     use forge_rtp::{PortPool, PortPoolConfig};
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_forwarding_basic() {
@@ -2195,6 +2207,126 @@ mod tests {
             }
             other => panic!("expected RtcpReportReceived, got {other:?}"),
         }
+    }
+
+    /// An RFC 2833 packet for `event` (0-9 are the digits), `duration`
+    /// timestamp units in, from an SSRC of its own.
+    fn telephone_event_packet(
+        pt: u8,
+        seq: u16,
+        timestamp: u32,
+        event: u8,
+        end: bool,
+        duration: u16,
+    ) -> forge_rtp::RtpPacket {
+        let mut b = vec![0x80, pt];
+        b.extend(seq.to_be_bytes());
+        b.extend(timestamp.to_be_bytes());
+        b.extend(0x1234_5678u32.to_be_bytes());
+        b.extend([event, if end { 0x8a } else { 0x0a }]);
+        b.extend(duration.to_be_bytes());
+        forge_rtp::RtpPacket::parse(bytes::Bytes::from(b)).unwrap()
+    }
+
+    /// A digit leg A sends is published once, as leg A's; it is not
+    /// relayed to a leg B that did not negotiate telephone-event, and is
+    /// once relay to B is turned back on.
+    #[tokio::test]
+    async fn telephone_event_is_published_with_its_leg_and_relayed_only_where_allowed() {
+        let session = make_rtcp_test_session(41800, None).await;
+        session.set_relay_rfc2833(true);
+        session.set_rfc2833_relay_to(ParticipantLabel::B, false);
+        assert!(session.rfc2833_relayed_to(ParticipantLabel::A));
+        assert!(!session.rfc2833_relayed_to(ParticipantLabel::B));
+
+        let sink_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a_addr: std::net::SocketAddr = "127.0.0.1:41990".parse().unwrap();
+        let (sockets, pa, pb) = (
+            session.sockets().clone(),
+            session.participant_a().clone(),
+            session.participant_b().clone(),
+        );
+        pa.write().await.remote_addr = Some(a_addr);
+        pb.write().await.remote_addr = Some(sink_b.local_addr().unwrap());
+        let mut digits = session.subscribe_digits();
+
+        // Digit 5: two packets in progress, then the end repeated three
+        // times, as RFC 4733 §2.5.1.4 has a sender do.
+        for (seq, end, duration) in [
+            (1, false, 160),
+            (2, false, 320),
+            (3, true, 480),
+            (4, true, 480),
+            (5, true, 480),
+        ] {
+            let packet = telephone_event_packet(101, seq, 8000, 5, end, duration);
+            ForwardingEngine::handle_rtp_packet(&session, &sockets, &pa, &pb, packet, a_addr).await;
+        }
+
+        let digit = digits.try_recv().expect("the digit is published");
+        assert_eq!(digit.leg, ParticipantLabel::A);
+        assert_eq!(digit.digit, forge_dtmf::DtmfDigit::Five);
+        assert_eq!(digit.method, forge_dtmf::DtmfMethod::Rfc2833);
+        assert!(
+            digits.try_recv().is_err(),
+            "published once, not per end packet"
+        );
+
+        let mut buf = [0u8; 64];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), sink_b.recv_from(&mut buf))
+                .await
+                .is_err(),
+            "telephone-event reached a leg that refused it"
+        );
+
+        session.set_rfc2833_relay_to(ParticipantLabel::B, true);
+        let packet = telephone_event_packet(101, 6, 16000, 7, false, 160);
+        ForwardingEngine::handle_rtp_packet(&session, &sockets, &pa, &pb, packet, a_addr).await;
+        let (len, _) = tokio::time::timeout(Duration::from_secs(1), sink_b.recv_from(&mut buf))
+            .await
+            .expect("relayed once allowed")
+            .unwrap();
+        assert_eq!(buf[1] & 0x7f, 101);
+        assert_eq!(buf[12], 7, "{:?}", &buf[..len]);
+    }
+
+    /// A digit sent to a leg goes out as telephone-event at the payload
+    /// type that leg negotiated.
+    #[tokio::test]
+    async fn send_dtmf_plays_telephone_event_to_one_leg() {
+        let session = make_rtcp_test_session(41900, None).await;
+        session.set_telephone_event_pt_b(96);
+
+        let sink_a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sink_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (sockets, pa, pb) = (
+            session.sockets().clone(),
+            session.participant_a().clone(),
+            session.participant_b().clone(),
+        );
+        pa.write().await.remote_addr = Some(sink_a.local_addr().unwrap());
+        pb.write().await.remote_addr = Some(sink_b.local_addr().unwrap());
+
+        session
+            .send_dtmf(ParticipantLabel::B, forge_dtmf::DtmfDigit::Nine, 100)
+            .await
+            .unwrap();
+        ForwardingEngine::drain_scheduled_playout(&session, &sockets, &pa, &pb).await;
+
+        let mut buf = [0u8; 64];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(1), sink_b.recv_from(&mut buf))
+            .await
+            .expect("leg B hears the digit")
+            .unwrap();
+        assert_eq!(buf[1] & 0x7f, 96, "at leg B's payload type");
+        assert_eq!(buf[12], 9, "{:?}", &buf[..len]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), sink_a.recv_from(&mut buf))
+                .await
+                .is_err(),
+            "leg A was not sent the digit"
+        );
     }
 
     async fn make_rtcp_test_session(

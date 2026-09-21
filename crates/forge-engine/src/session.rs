@@ -3331,22 +3331,31 @@ pub(crate) enum RecordingSide {
     B,
 }
 
-/// Minimal mixer that pairs recent frames from each leg before writing to recordings.
+/// Mixer that holds each leg's audio until the other's has arrived, so a
+/// recording has the two of them together.
 ///
 /// # Purpose
 ///
 /// In two-party calls, RTP packets arrive independently from each participant. To create
-/// a proper stereo recording where both sides can be heard together, we need to mix the
-/// audio streams. This mixer buffers one frame at a time and combines it with the next
-/// frame from the opposite side.
+/// a recording where both sides can be heard together, we need to mix the
+/// audio streams. This mixer keeps a queue per side and writes a frame once
+/// both sides have one.
 ///
 /// # Buffering Strategy
 ///
-/// - When a frame arrives, if there's no buffered frame, store it
-/// - When a frame arrives and a frame from the **opposite** side is buffered, mix them
-/// - When a frame arrives and a frame from the **same** side is buffered, flush the old
-///   frame and buffer the new one
-/// - Frames older than 100ms are automatically flushed to prevent unbounded buffering
+/// - A frame is written as soon as both sides have one
+/// - A side is written on its own only once the other side has been quiet
+///   for [`QUIET`] — half a second
+/// - A side that holds more than [`MAX_HELD`] frames is written anyway, so
+///   a leg whose packets stop being delivered cannot grow the mix
+///
+/// The wait is on the clock rather than on how many frames each side has,
+/// because a loaded node does not hand the recorder the two directions
+/// evenly: it hands it a burst from one leg and then a burst from the
+/// other a few hundred milliseconds later. A mixer that wrote whatever it
+/// was holding when the next frame came in would put two people who talked
+/// over each other into the recording one after the other. A recording is
+/// not live, so waiting out that gap costs nothing.
 ///
 /// # Mixing Algorithm
 ///
@@ -3356,44 +3365,71 @@ pub(crate) enum RecordingSide {
 /// - When only one side is active, pass through unchanged
 ///
 /// This approach preserves silence while properly mixing overlapping speech.
-#[derive(Default)]
 pub(crate) struct RecordingMixer {
-    /// Buffered frame: (side, samples, timestamp)
-    pending: Option<(RecordingSide, Vec<i16>, Instant)>,
+    /// Participant A's audio, not yet written.
+    a: VecDeque<i16>,
+    /// Participant B's audio, not yet written.
+    b: VecDeque<i16>,
+    /// When each side last delivered audio — the recording's start until
+    /// that side has delivered any.
+    last_a: Instant,
+    last_b: Instant,
+    /// How many samples go in one written frame, taken from the first
+    /// frame pushed (a leg's packet, whatever its codec decodes to).
+    frame: usize,
 }
 
-/// Maximum age for buffered frame before auto-flush (100ms)
-const STALE_FRAME_THRESHOLD: Duration = Duration::from_millis(100);
+/// How long one side must have been quiet before the other is written
+/// against silence (500ms)
+const QUIET: Duration = Duration::from_millis(500);
+
+/// The most frames one side may hold while it waits for the other
+const MAX_HELD: usize = 100;
 
 /// Amplitude threshold for considering a sample "active" (helps distinguish silence from speech)
 const AMPLITUDE_THRESHOLD: i16 = 10;
 
+impl Default for RecordingMixer {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            a: VecDeque::new(),
+            b: VecDeque::new(),
+            last_a: now,
+            last_b: now,
+            frame: 0,
+        }
+    }
+}
+
 impl RecordingMixer {
-    /// Clear any buffered frame.
+    /// Drop whatever is held.
     ///
     /// Called when starting a new recording to ensure clean state.
     pub fn reset(&mut self) {
-        self.pending = None;
+        *self = Self::default();
     }
 
-    /// Flush any buffered frame to the recorder.
+    /// Write what is still held to the recorder, the two sides mixed.
     ///
-    /// Called when stopping a recording to ensure the last frame is written.
-    /// Write errors are silently ignored since the recording is ending anyway.
+    /// Called when stopping a recording to ensure the last of the call is
+    /// written. Write errors are silently ignored since the recording is
+    /// ending anyway.
     pub fn flush(&mut self, recorder: &forge_recorder::AudioRecorder) {
-        if let Some((_, samples, _)) = self.pending.take() {
-            let _ = recorder.write_samples(&samples);
+        let rest = self.a.len().max(self.b.len());
+        if rest > 0 {
+            let _ = recorder.write_samples(&self.take(rest));
         }
     }
 
-    /// Process incoming audio samples, mixing with buffered frames when appropriate.
+    /// Process incoming audio samples, mixing them with the other side's.
     ///
     /// # Behavior
     ///
-    /// 1. **No buffered frame**: Store the incoming frame
-    /// 2. **Buffered frame from opposite side**: Mix them together and write
-    /// 3. **Buffered frame from same side**: Flush buffered frame, store new one
-    /// 4. **Stale buffered frame (>100ms)**: Flush it, then store new frame
+    /// The frame joins its side's queue, and everything that can now be
+    /// written is: a frame once both sides have one, or one side on its
+    /// own once the other has been quiet for [`QUIET`] or it holds
+    /// [`MAX_HELD`] frames.
     ///
     /// # Parameters
     ///
@@ -3413,51 +3449,64 @@ impl RecordingMixer {
         samples: &[i16],
         recorder: &forge_recorder::AudioRecorder,
     ) {
+        for frame in self.push_at(side, samples, Instant::now()) {
+            if let Err(e) = recorder.write_samples(&frame) {
+                tracing::warn!(
+                    call_id = %call_id.0,
+                    "Failed to write samples to recorder: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    /// `push` without a recorder: the frames it would write, in order.
+    fn push_at(&mut self, side: RecordingSide, samples: &[i16], now: Instant) -> Vec<Vec<i16>> {
         if samples.is_empty() {
-            return;
+            return Vec::new();
         }
-
-        let now = Instant::now();
-
-        if let Some((pending_side, pending_samples, timestamp)) = self.pending.take() {
-            // Check if buffered frame is stale and auto-flush
-            let age = now.duration_since(timestamp);
-            if age > STALE_FRAME_THRESHOLD {
-                if let Err(e) = recorder.write_samples(&pending_samples) {
-                    tracing::warn!(
-                        call_id = %call_id.0,
-                        age_ms = age.as_millis(),
-                        "Failed to write stale frame to recorder: {}",
-                        e
-                    );
-                }
-                // Buffer the new frame since the old one was stale
-                self.pending = Some((side, samples.to_vec(), now));
-                return;
+        if self.frame == 0 {
+            self.frame = samples.len();
+        }
+        match side {
+            RecordingSide::A => {
+                self.a.extend(samples);
+                self.last_a = now;
             }
+            RecordingSide::B => {
+                self.b.extend(samples);
+                self.last_b = now;
+            }
+        }
+        self.ready(now)
+    }
 
-            if pending_side != side {
-                let mixed = Self::mix_frames(&pending_samples, samples);
-                if let Err(e) = recorder.write_samples(&mixed) {
-                    tracing::warn!(
-                        call_id = %call_id.0,
-                        "Failed to write mixed samples to recorder: {}",
-                        e
-                    );
-                }
+    /// Everything that can be written now.
+    fn ready(&mut self, now: Instant) -> Vec<Vec<i16>> {
+        let frame = self.frame;
+        let mut out = Vec::new();
+        loop {
+            let (a, b) = (self.a.len(), self.b.len());
+            let quiet = |since: Instant, held: usize| {
+                now.saturating_duration_since(since) >= QUIET || held >= MAX_HELD * frame
+            };
+            let both = a >= frame && b >= frame;
+            let a_alone = a >= frame && quiet(self.last_b, a);
+            let b_alone = b >= frame && quiet(self.last_a, b);
+            if both || a_alone || b_alone {
+                out.push(self.take(frame));
             } else {
-                if let Err(e) = recorder.write_samples(&pending_samples) {
-                    tracing::warn!(
-                        call_id = %call_id.0,
-                        "Failed to write samples to recorder: {}",
-                        e
-                    );
-                }
-                self.pending = Some((side, samples.to_vec(), now));
+                return out;
             }
-        } else {
-            self.pending = Some((side, samples.to_vec(), now));
         }
+    }
+
+    /// The next `n` samples of each side, mixed. A side with nothing left
+    /// contributes silence.
+    fn take(&mut self, n: usize) -> Vec<i16> {
+        let a: Vec<i16> = self.a.drain(..n.min(self.a.len())).collect();
+        let b: Vec<i16> = self.b.drain(..n.min(self.b.len())).collect();
+        Self::mix_frames(&a, &b)
     }
 
     /// Mix two audio frames together using amplitude-aware averaging.
@@ -3669,6 +3718,80 @@ impl Drop for PortAllocationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// One frame from each side makes one frame of the recording, with
+    /// both of them in it.
+    #[test]
+    fn a_frame_is_written_once_both_sides_have_one() {
+        let t0 = Instant::now();
+        let mut mix = RecordingMixer::default();
+        assert!(
+            mix.push_at(RecordingSide::A, &[100; 160], t0).is_empty(),
+            "waits for the other side"
+        );
+        let out = mix.push_at(RecordingSide::B, &[24; 160], t0 + ms(20));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], vec![62; 160], "both active, so averaged");
+    }
+
+    /// A leg that sends nothing does not hold the recording back — but it
+    /// is given the quiet window first.
+    #[test]
+    fn one_side_alone_is_written_once_the_other_has_been_quiet() {
+        let t0 = Instant::now();
+        let mut mix = RecordingMixer::default();
+        let mut held = 0;
+        for i in 0..5 {
+            held += mix
+                .push_at(RecordingSide::A, &[100; 160], t0 + ms(20 * i))
+                .len();
+        }
+        assert_eq!(held, 0, "held while the other side might arrive");
+        let out = mix.push_at(RecordingSide::A, &[100; 160], t0 + ms(520));
+        assert_eq!(out.len(), 6, "written once the other is quiet");
+        assert_eq!(out[0], vec![100; 160], "and passed through, not halved");
+    }
+
+    /// A loaded node hands the recorder a quarter of a second of one leg
+    /// at once and then a quarter of a second of the other. They talked
+    /// over each other, so the recording must have them over each other
+    /// rather than one after the other.
+    #[test]
+    fn a_burst_from_one_leg_is_mixed_with_the_burst_that_follows_it() {
+        let t0 = Instant::now();
+        let mut mix = RecordingMixer::default();
+        let mut out = Vec::new();
+        for burst in 0..4 {
+            let at = t0 + ms(500 * burst);
+            for _ in 0..12 {
+                out.extend(mix.push_at(RecordingSide::A, &[100; 160], at));
+            }
+            for _ in 0..12 {
+                out.extend(mix.push_at(RecordingSide::B, &[24; 160], at + ms(250)));
+            }
+        }
+        assert_eq!(out.len(), 48, "every frame of both bursts is written");
+        let together = out.iter().filter(|f| f[0] == 62).count();
+        assert_eq!(together, out.len(), "and every frame has both of them");
+    }
+
+    /// A leg whose packets stop being delivered cannot grow the mix.
+    #[test]
+    fn one_side_may_not_hold_more_than_its_share() {
+        let t0 = Instant::now();
+        let mut mix = RecordingMixer::default();
+        let mut written = 0;
+        for i in 0..MAX_HELD + 10 {
+            written += mix
+                .push_at(RecordingSide::A, &[100; 160], t0 + ms(i as u64))
+                .len();
+        }
+        assert_eq!(written, 11, "written from the cap on, inside the quiet");
+    }
 
     /// Hold every RTP port in a pool, so every draw collides.
     async fn squat_all(min: u16, max: u16) -> Vec<tokio::net::UdpSocket> {

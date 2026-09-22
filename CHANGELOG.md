@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The embedded siphon-rs moves to **v2026.09.22**, in both places that name
+  it: the `external/siphon-rs` submodule, which the binaries build against
+  by path, and the `sip-sdp` git tag that `forge-sdp` pins. They had drifted
+  apart from the rest of the world — both sat at v2026.09.05 while FCP's own
+  submodule had moved on five releases — and the submodule rule exists so
+  the SIP path and the media path cannot diverge. No crate version bumps:
+  `sip-sdp` is unchanged between the two tags apart from a test file, so this
+  is an internal dependency migration with no public API change.
+
 ## [2026-09-17] — workspace release
 
 **Crate versions:** **forge-engine 0.6.1**. Unchanged: bcg729-sys 0.1.0,

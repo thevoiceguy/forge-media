@@ -587,6 +587,15 @@ impl SessionManager {
         self.port_pool.deallocate(pair).await;
     }
 
+    /// The pool every session's ports come from. A node that opens RTP
+    /// sockets outside its sessions — a queue's agent legs, a prompt
+    /// player — allocates from this same pool, so two allocators never
+    /// hand out one port: with `SO_REUSEADDR` on, both binds succeed and
+    /// the kernel picks which socket a packet reaches.
+    pub fn port_pool(&self) -> Arc<PortPool> {
+        Arc::clone(&self.port_pool)
+    }
+
     /// Get port pool statistics
     pub async fn port_pool_stats(&self) -> (usize, usize) {
         let allocated = self.port_pool.allocated_count().await;
@@ -827,6 +836,22 @@ impl RecoveryCallbacks for SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A port taken from the manager's pool is a port no session gets.
+    #[tokio::test]
+    async fn the_port_pool_is_the_sessions_pool() {
+        let config = SessionManagerConfig {
+            port_pool_config: PortPoolConfig::new(52000, 52100).unwrap(),
+            ..Default::default()
+        };
+        let manager = SessionManager::new(config, None);
+        let (allocated, available) = manager.port_pool_stats().await;
+        assert_eq!((allocated, available), (0, 50));
+        let pair = manager.port_pool().allocate().await.unwrap();
+        assert_eq!(manager.port_pool_stats().await, (1, 49));
+        manager.port_pool().deallocate(pair).await;
+        assert_eq!(manager.port_pool_stats().await, (0, 50));
+    }
 
     #[tokio::test]
     async fn test_session_manager_create() {

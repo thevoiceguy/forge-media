@@ -966,6 +966,54 @@ impl ForwardingEngine {
         let a = participant_a.read().await;
         let b = participant_b.read().await;
 
+        // A packet from exactly where a leg's peer is, is that leg's.
+        if a.remote_addr == Some(source_addr) {
+            return Some((Side::A, Side::B));
+        }
+        if b.remote_addr == Some(source_addr) {
+            return Some((Side::B, Side::A));
+        }
+
+        // A leg told to learn its peer from a named address claims the
+        // first packet from there, even when the other leg's peer shares
+        // the address: the other leg's packets come from its exact
+        // address, checked above, and this one did not. Without this, two
+        // peers on one address — a site and a carrier behind the same
+        // NAT, every node on a loopback — leave the learning leg deaf.
+        let source_ip = source_addr.ip();
+        let a_named_latch = a.remote_addr.is_none()
+            && a.latch_allowed_ips
+                .as_ref()
+                .is_some_and(|allowed| allowed.contains(&source_ip));
+        let b_named_latch = b.remote_addr.is_none()
+            && b.latch_allowed_ips
+                .as_ref()
+                .is_some_and(|allowed| allowed.contains(&source_ip));
+        if a_named_latch {
+            tracing::info!(
+                "Learning remote RTP endpoint for session {} leg A from its named address: {}",
+                call_id.0,
+                source_addr
+            );
+            counter!("forge_rtp_latch_learned_total").increment(1);
+            drop(a);
+            drop(b);
+            participant_a.write().await.remote_addr = Some(source_addr);
+            return Some((Side::A, Side::B));
+        }
+        if b_named_latch {
+            tracing::info!(
+                "Learning remote RTP endpoint for session {} leg B from its named address: {}",
+                call_id.0,
+                source_addr
+            );
+            counter!("forge_rtp_latch_learned_total").increment(1);
+            drop(a);
+            drop(b);
+            participant_b.write().await.remote_addr = Some(source_addr);
+            return Some((Side::B, Side::A));
+        }
+
         let a_ip_match = a
             .remote_addr
             .map(|addr| addr.ip() == source_addr.ip())
@@ -1001,7 +1049,6 @@ impl ForwardingEngine {
             });
         }
 
-        let source_ip = source_addr.ip();
         let a_can_latch = a.remote_addr.is_none()
             && a.latch_allowed_ips
                 .as_ref()
@@ -1982,6 +2029,99 @@ mod tests {
         // Stop forwarding
         session.stop_forwarding().await.unwrap();
         assert_eq!(session.state().await, SessionState::Terminated);
+    }
+
+    /// A session whose A leg is pinned to `a_remote` and whose B leg
+    /// learns its peer from `b_from`, and nothing else.
+    async fn latching_session(a_remote: std::net::SocketAddr, b_from: IpAddr) -> Arc<MediaSession> {
+        let config = PortPoolConfig::new(41000, 42000).unwrap();
+        let port_pool = Arc::new(PortPool::new(config));
+        let session_config = MediaSessionConfig {
+            socket_config: forge_rtp::RtpSocketConfig {
+                bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let session = Arc::new(
+            MediaSession::new(
+                CallId::generate(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                &port_pool,
+                session_config,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        session.participant_a().write().await.remote_addr = Some(a_remote);
+        {
+            let mut b = session.participant_b().write().await;
+            b.remote_addr = None;
+            b.latch_allowed_ips = Some(std::iter::once(b_from).collect());
+        }
+        session
+    }
+
+    /// A leg learning its peer from a named address gets the first packet
+    /// from there, even though the other leg's peer shares the address:
+    /// that leg's packets come from its exact address.
+    #[tokio::test]
+    async fn a_named_latch_claims_its_packets_beside_a_peer_on_the_same_address() {
+        let shared = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let a_remote: std::net::SocketAddr = (shared, 4000).into();
+        let session = latching_session(a_remote, shared).await;
+        let (pa, pb) = (
+            Arc::clone(session.participant_a()),
+            Arc::clone(session.participant_b()),
+        );
+
+        // A's own packet is A's.
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, a_remote).await;
+        assert_eq!(sides, Some((Side::A, Side::B)));
+        assert_eq!(
+            pb.read().await.remote_addr,
+            None,
+            "nothing learned from A's packet"
+        );
+
+        // A packet from the shared address, not from A's port, is B's
+        // first: B learns it.
+        let b_source: std::net::SocketAddr = (shared, 5000).into();
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, b_source).await;
+        assert_eq!(sides, Some((Side::B, Side::A)));
+        assert_eq!(pb.read().await.remote_addr, Some(b_source));
+
+        // Learned, B is exact too; A is still A.
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, b_source).await;
+        assert_eq!(sides, Some((Side::B, Side::A)));
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, a_remote).await;
+        assert_eq!(sides, Some((Side::A, Side::B)));
+    }
+
+    /// A leg that may learn from a named address learns from nowhere
+    /// else: a packet from another address is refused.
+    #[tokio::test]
+    async fn a_named_latch_refuses_another_address() {
+        let a_remote: std::net::SocketAddr = (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4000).into();
+        let session = latching_session(a_remote, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))).await;
+        let (pa, pb) = (
+            Arc::clone(session.participant_a()),
+            Arc::clone(session.participant_b()),
+        );
+        let stranger: std::net::SocketAddr =
+            (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 5000).into();
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, stranger).await;
+        assert_eq!(sides, None);
+        assert_eq!(pb.read().await.remote_addr, None);
+        let from_site: std::net::SocketAddr =
+            (IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 6000).into();
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, from_site).await;
+        assert_eq!(sides, Some((Side::B, Side::A)));
     }
 
     #[test]

@@ -592,6 +592,17 @@ impl ForwardingEngine {
             packet
         };
 
+        // A playback replacing the other leg's audio (hold music) has the
+        // receiver: what the sender says is not relayed meanwhile.
+        let receiver_label = match receiver {
+            Side::A => ParticipantLabel::A,
+            Side::B => ParticipantLabel::B,
+        };
+        if session.relay_suppressed(receiver_label) {
+            counter!("forge_rtp_relay_suppressed_total").increment(1);
+            return;
+        }
+
         // Forward packet to receiver
         let receiver_addr = {
             let (a, b) = (participant_a.read().await, participant_b.read().await);

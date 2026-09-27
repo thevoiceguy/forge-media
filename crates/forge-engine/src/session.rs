@@ -659,6 +659,9 @@ pub(crate) enum ScheduledPlayoutSource {
     MediaBridgeDtmf,
     /// A digit the signalling layer asked for ([`MediaSession::send_dtmf`]).
     SignalledDtmf,
+    /// Audio a [`crate::injection::PlaybackManager`] plays into a leg: a
+    /// prompt, hold music.
+    Injection,
 }
 
 impl ScheduledPlayoutSource {
@@ -668,6 +671,7 @@ impl ScheduledPlayoutSource {
             Self::MediaBridgeAudio => "media_bridge_audio",
             Self::MediaBridgeDtmf => "media_bridge_dtmf",
             Self::SignalledDtmf => "signalled_dtmf",
+            Self::Injection => "injection",
         }
     }
 }
@@ -896,6 +900,12 @@ pub struct MediaSession {
     transcoder_a_to_b: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
     /// Transcoder for B → A direction (optional, created when needed)
     transcoder_b_to_a: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
+    /// Playbacks replacing what the other leg says, per leg: while one
+    /// is above zero the forwarding engine relays nothing toward that leg
+    /// (hold music is heard alone). Counted, so overlapping playbacks
+    /// release in any order.
+    relay_suppressed_a: std::sync::atomic::AtomicU32,
+    relay_suppressed_b: std::sync::atomic::AtomicU32,
     /// SRTP context for participant A (inbound: unprotect A→us, outbound: protect us→A)
     srtp_a: Arc<Mutex<SrtpContext>>,
     /// SRTP context for participant B (inbound: unprotect B→us, outbound: protect us→B)
@@ -1046,6 +1056,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
+            relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             #[cfg(feature = "dtls")]
@@ -1213,6 +1225,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
+            relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             #[cfg(feature = "dtls")]
@@ -1424,6 +1438,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
+            relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             #[cfg(feature = "dtls")]
@@ -2705,6 +2721,36 @@ impl MediaSession {
         &self.srtp_b
     }
 
+    fn relay_suppression(&self, leg: ParticipantLabel) -> &std::sync::atomic::AtomicU32 {
+        match leg {
+            ParticipantLabel::A => &self.relay_suppressed_a,
+            ParticipantLabel::B => &self.relay_suppressed_b,
+        }
+    }
+
+    /// Stop relaying the other leg's audio toward `leg` until a matching
+    /// [`MediaSession::release_relay_to`].
+    pub fn suppress_relay_to(&self, leg: ParticipantLabel) {
+        self.relay_suppression(leg)
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Undo one [`MediaSession::suppress_relay_to`].
+    pub fn release_relay_to(&self, leg: ParticipantLabel) {
+        let _ = self.relay_suppression(leg).fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |n| Some(n.saturating_sub(1)),
+        );
+    }
+
+    /// Whether relayed audio toward `leg` is being held back.
+    pub fn relay_suppressed(&self, leg: ParticipantLabel) -> bool {
+        self.relay_suppression(leg)
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    }
+
     /// DTLS-SRTP leg for participant A. `None` until
     /// [`MediaSession::enable_dtls`]
     /// installs it. The RTP recv loop checks this on every packet and
@@ -3220,6 +3266,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
+            relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             #[cfg(feature = "dtls")]
@@ -4355,6 +4403,27 @@ mod tests {
             .iter()
             .filter(|i| matches!(i.kind, ScheduledPlayoutKind::Audio { .. }))
             .count()
+    }
+
+    #[tokio::test]
+    async fn relay_suppression_is_counted_per_leg() {
+        let session = make_test_session(40010).await;
+        assert!(!session.relay_suppressed(ParticipantLabel::A));
+        session.suppress_relay_to(ParticipantLabel::A);
+        session.suppress_relay_to(ParticipantLabel::A);
+        assert!(session.relay_suppressed(ParticipantLabel::A));
+        assert!(!session.relay_suppressed(ParticipantLabel::B));
+        session.release_relay_to(ParticipantLabel::A);
+        assert!(
+            session.relay_suppressed(ParticipantLabel::A),
+            "one playback still holds it"
+        );
+        session.release_relay_to(ParticipantLabel::A);
+        session.release_relay_to(ParticipantLabel::A);
+        assert!(
+            !session.relay_suppressed(ParticipantLabel::A),
+            "released, and never below zero"
+        );
     }
 
     #[tokio::test]

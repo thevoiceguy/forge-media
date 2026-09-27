@@ -26,7 +26,8 @@ pub use dtls_srtp::{
 pub use forge_dtmf::{DtmfDigit, DtmfMethod};
 pub use forwarding::ForwardingEngine;
 pub use injection::{
-    AudioTarget, MixMode, PlaybackHandle, PlaybackId, PlaybackManager, PlaybackStatus,
+    AudioTarget, MixMode, PlaybackHandle, PlaybackId, PlaybackManager, PlaybackOptions,
+    PlaybackStatus,
 };
 pub use manager::{SessionManager, SessionManagerConfig};
 pub use media_bridge::{

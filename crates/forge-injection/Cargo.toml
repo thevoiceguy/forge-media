@@ -13,7 +13,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 
 # Audio file decoding
-symphonia = { version = "0.5", features = ["all"] }
+symphonia = { version = "0.6", features = ["all"] }
 
 # Resampling
 rubato = "0.15"

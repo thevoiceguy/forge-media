@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **forge-bfcp 0.1.1**: a grouped attribute whose last child's padding was
+  cut short by the group's end was read, but written back with every child
+  padded it no longer fitted its one-octet length, so a parsed message could
+  not be written (`AttributeTooLong`). Such a group is now refused when read
+  (`BadAttributeLength`, the header kept for the reply). Found by the
+  nightly `bfcp_parse` fuzzer on 2026-09-27 and 2026-09-28; the input is
+  kept as a regression test (`tests/fuzz_regressions.rs`).
+
 ### Changed
 
 - The embedded siphon-rs moves to **v2026.09.22**, in both places that name

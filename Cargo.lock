@@ -1735,6 +1735,7 @@ dependencies = [
  "forge-hep",
  "forge-injection",
  "forge-kernel",
+ "forge-mixer",
  "forge-recorder",
  "forge-rtp",
  "forge-transcoder",

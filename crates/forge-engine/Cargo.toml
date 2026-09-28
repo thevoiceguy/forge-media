@@ -17,6 +17,7 @@ forge-transcoder = { path = "../forge-transcoder" }
 forge-ai-stream = { path = "../forge-ai-stream", optional = true }
 forge-recorder = { path = "../forge-recorder" }
 forge-injection = { path = "../forge-injection" }
+forge-mixer = { path = "../forge-mixer" }
 forge-ha = { path = "../forge-ha", optional = true }
 
 # XDP support (Linux only, optional)

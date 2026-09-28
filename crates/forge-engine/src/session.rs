@@ -662,6 +662,9 @@ pub(crate) enum ScheduledPlayoutSource {
     /// Audio a [`crate::injection::PlaybackManager`] plays into a leg: a
     /// prompt, hold music.
     Injection,
+    /// A leg's mix with a supervisor who whispers to it or barges
+    /// ([`crate::party`]).
+    Supervision,
 }
 
 impl ScheduledPlayoutSource {
@@ -672,6 +675,7 @@ impl ScheduledPlayoutSource {
             Self::MediaBridgeDtmf => "media_bridge_dtmf",
             Self::SignalledDtmf => "signalled_dtmf",
             Self::Injection => "injection",
+            Self::Supervision => "supervision",
         }
     }
 }
@@ -967,6 +971,8 @@ pub struct MediaSession {
     pub(crate) recorder: Arc<RwLock<Option<forge_recorder::AudioRecorder>>>,
     /// Small mixer to combine both call legs before writing to the recorder
     pub(crate) recording_mixer: Arc<Mutex<RecordingMixer>>,
+    /// A supervisor who monitors, whispers or barges ([`crate::party`]).
+    party: std::sync::RwLock<Option<Arc<crate::party::Party>>>,
     /// Correlation id for this session's HEP RTCP / RTP-QoS chunks, when
     /// the embedder knows a better one than [`Self::call_id`] — see
     /// [`Self::set_hep_correlation_id`]. Set-once, so the RTCP path reads
@@ -1091,6 +1097,7 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            party: std::sync::RwLock::new(None),
             hep_correlation_id: OnceLock::new(),
         };
 
@@ -1260,6 +1267,7 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            party: std::sync::RwLock::new(None),
             hep_correlation_id: OnceLock::new(),
         };
 
@@ -1471,6 +1479,7 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            party: std::sync::RwLock::new(None),
             hep_correlation_id: OnceLock::new(),
         };
 
@@ -2115,6 +2124,11 @@ impl MediaSession {
         }
 
         *self.state.write().await = SessionState::Terminated;
+
+        // A supervisor's port goes back with the session's.
+        if let Err(e) = self.remove_party().await {
+            tracing::warn!("Failed to remove the supervisor: {}", e);
+        }
 
         // Deallocate ports - guaranteed cleanup
         self.deallocate_ports().await;
@@ -2909,6 +2923,23 @@ impl MediaSession {
         *self.media_bridge_manager.write().await = Some(manager);
     }
 
+    /// The supervisor, if the session has one.
+    pub(crate) fn party(&self) -> Option<Arc<crate::party::Party>> {
+        self.party.read().expect("party slot").clone()
+    }
+
+    pub(crate) fn party_slot(&self) -> &std::sync::RwLock<Option<Arc<crate::party::Party>>> {
+        &self.party
+    }
+
+    pub(crate) fn port_pool(&self) -> &Arc<PortPool> {
+        &self.port_pool
+    }
+
+    pub(crate) fn config(&self) -> &MediaSessionConfig {
+        &self.config
+    }
+
     /// RTP sequencing state for generated audio toward a participant leg.
     pub(crate) fn generated_rtp_state(
         &self,
@@ -3297,6 +3328,7 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            party: std::sync::RwLock::new(None),
             hep_correlation_id: OnceLock::new(),
             relay_rfc2833: AtomicBool::new(false),
             leg_dtmf: LegDtmf::default(),
@@ -3642,7 +3674,7 @@ const PORT_BIND_ATTEMPTS: usize = 5;
 ///
 /// Only `AddrInUse` is retried. Any other bind error returns immediately —
 /// retrying must not paper over a genuine fault.
-async fn allocate_and_bind(
+pub(crate) async fn allocate_and_bind(
     port_pool: &Arc<PortPool>,
     socket_config: RtpSocketConfig,
     min_free_pairs: usize,
@@ -3726,7 +3758,7 @@ async fn release_all(port_pool: &Arc<PortPool>, pairs: Vec<PortPair>) {
     }
 }
 
-struct PortAllocationGuard {
+pub(crate) struct PortAllocationGuard {
     port_pool: Arc<PortPool>,
     ports: PortPair,
     active: bool,
@@ -3741,7 +3773,7 @@ impl PortAllocationGuard {
         }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.active = false;
     }
 }

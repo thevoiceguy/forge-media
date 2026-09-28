@@ -413,6 +413,13 @@ impl ForwardingEngine {
 
         // Process decoded samples (if any)
         if !pcm_samples.is_empty() {
+            // A supervisor hears both legs (`crate::party`).
+            session.feed_party(
+                sender.label(),
+                &pcm_samples,
+                MediaSession::codec_audio_sample_rate(sender_codec.codec, sender_codec.clock_rate),
+            );
+
             // Audio tap for call recording (ALWAYS record if recorder is active)
             if let Some(recorder) = session.recorder.read().await.as_ref() {
                 let recording_side = match sender {
@@ -2478,6 +2485,178 @@ mod tests {
                 .is_err(),
             "leg A was not sent the digit"
         );
+    }
+
+    /// A 20 ms PCMU packet of one loud, steady sample.
+    fn loud_pcmu(seq: u16, ssrc: u32) -> bytes::Bytes {
+        let payload: Vec<u8> =
+            std::iter::repeat_n(forge_codecs::g711::encode_ulaw(8000), 160).collect();
+        forge_rtp::RtpPacket::build(
+            0,
+            seq,
+            u32::from(seq) * 160,
+            ssrc,
+            bytes::Bytes::from(payload),
+            false,
+        )
+        .to_bytes()
+        .freeze()
+    }
+
+    /// How loud a PCMU payload is: its mean absolute sample.
+    fn loudness(packet: &[u8]) -> i32 {
+        let payload = &packet[12..];
+        if payload.is_empty() {
+            return 0;
+        }
+        payload
+            .iter()
+            .map(|&b| (forge_codecs::g711::decode_ulaw(b) as i32).abs())
+            .sum::<i32>()
+            / payload.len() as i32
+    }
+
+    /// Wait for a loud packet on `sink`, draining the session's scheduled
+    /// playout as the forwarding loop would while waiting.
+    async fn heard_loud(
+        session: &Arc<MediaSession>,
+        sink: &tokio::net::UdpSocket,
+        within: Duration,
+    ) -> bool {
+        let (sockets, pa, pb) = (
+            session.sockets().clone(),
+            session.participant_a().clone(),
+            session.participant_b().clone(),
+        );
+        let deadline = tokio::time::Instant::now() + within;
+        let mut buf = [0u8; 512];
+        while tokio::time::Instant::now() < deadline {
+            ForwardingEngine::drain_scheduled_playout(session, &sockets, &pa, &pb).await;
+            if let Ok(Ok((len, _))) =
+                tokio::time::timeout(Duration::from_millis(20), sink.recv_from(&mut buf)).await
+            {
+                if len > 12 && loudness(&buf[..len]) > 2000 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// A supervisor (`crate::party`): monitoring hears leg A and is heard
+    /// by nobody; a whisper to B is heard by B alone, with B's relay
+    /// replaced by its mix; a barge is heard by both; removing the
+    /// supervisor gives the relay back.
+    #[tokio::test]
+    async fn a_supervisor_monitors_whispers_and_barges() {
+        use forge_mixer::{CallParty, SupervisionMode};
+        let session = make_rtcp_test_session(42100, None).await;
+        let sink_a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sink_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let supervisor = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (sockets, pa, pb) = (
+            session.sockets().clone(),
+            session.participant_a().clone(),
+            session.participant_b().clone(),
+        );
+        let a_addr = sink_a.local_addr().unwrap();
+        pa.write().await.remote_addr = Some(a_addr);
+        pb.write().await.remote_addr = Some(sink_b.local_addr().unwrap());
+
+        let ports = session.add_party(SupervisionMode::Monitor).await.unwrap();
+        assert!(
+            session.add_party(SupervisionMode::Monitor).await.is_err(),
+            "one supervisor at a time"
+        );
+        session
+            .connect_party(
+                supervisor.local_addr().unwrap(),
+                forge_core::AudioCodec::PCMU,
+                0,
+            )
+            .unwrap();
+        assert!(!session.relay_suppressed(ParticipantLabel::A));
+        assert!(!session.relay_suppressed(ParticipantLabel::B));
+
+        // Monitor: A speaks, the supervisor hears it.
+        let speak_a = {
+            let session = Arc::clone(&session);
+            let (sockets, pa, pb) = (sockets.clone(), pa.clone(), pb.clone());
+            tokio::spawn(async move {
+                for seq in 0..200u16 {
+                    let packet = forge_rtp::RtpPacket::parse(loud_pcmu(seq, 0xA)).unwrap();
+                    ForwardingEngine::handle_rtp_packet(
+                        &session, &sockets, &pa, &pb, packet, a_addr,
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        };
+        let mut buf = [0u8; 512];
+        let mut heard = false;
+        for _ in 0..50 {
+            let (len, from) =
+                tokio::time::timeout(Duration::from_secs(1), supervisor.recv_from(&mut buf))
+                    .await
+                    .expect("the supervisor is sent audio")
+                    .unwrap();
+            assert_eq!(
+                from.port(),
+                ports.rtp_port,
+                "from the supervisor's own port"
+            );
+            if loudness(&buf[..len]) > 2000 {
+                heard = true;
+                break;
+            }
+        }
+        assert!(heard, "the supervisor hears leg A");
+        speak_a.abort();
+
+        // Whisper to B: the supervisor speaks; B hears it, A does not.
+        session
+            .set_party_mode(SupervisionMode::Whisper(CallParty::B))
+            .unwrap();
+        assert!(session.relay_suppressed(ParticipantLabel::B));
+        assert!(!session.relay_suppressed(ParticipantLabel::A));
+        let party_addr: std::net::SocketAddr =
+            format!("127.0.0.1:{}", ports.rtp_port).parse().unwrap();
+        let speak_supervisor = {
+            // From another port at the same address: the supervisor is
+            // latched to where they send from.
+            tokio::spawn(async move {
+                let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                for seq in 0..200u16 {
+                    let _ = socket.send_to(&loud_pcmu(seq, 0x5), party_addr).await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        };
+        assert!(
+            heard_loud(&session, &sink_b, Duration::from_secs(2)).await,
+            "the coached leg hears the supervisor"
+        );
+        assert!(
+            !heard_loud(&session, &sink_a, Duration::from_millis(500)).await,
+            "the far leg never hears a whisper"
+        );
+
+        // Barge: both legs hear the supervisor.
+        session.set_party_mode(SupervisionMode::Barge).unwrap();
+        assert!(session.relay_suppressed(ParticipantLabel::A));
+        assert!(
+            heard_loud(&session, &sink_a, Duration::from_secs(2)).await,
+            "a barge is heard by leg A"
+        );
+        speak_supervisor.abort();
+
+        // Gone: the relay is the legs' own again, the port back.
+        session.remove_party().await.unwrap();
+        assert!(!session.relay_suppressed(ParticipantLabel::A));
+        assert!(!session.relay_suppressed(ParticipantLabel::B));
+        assert!(session.party_ports().is_none());
+        assert!(session.party_mode().is_none());
     }
 
     async fn make_rtcp_test_session(

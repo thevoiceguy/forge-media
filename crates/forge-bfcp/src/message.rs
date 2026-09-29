@@ -1078,6 +1078,16 @@ fn parse_attributes(
                 }
             }
         };
+        // A group whose last child's padding was cut short is read, but
+        // written back with every child padded it may no longer fit its
+        // one-octet length: refused, so what is read can always be
+        // answered and relayed as read.
+        if !attribute.fits() {
+            return Err(ParseError::new(
+                ParseErrorKind::BadAttributeLength(attr_type),
+                Some(echo),
+            ));
+        }
         out.push(attribute);
         // On to the next four-octet boundary; the last attribute's
         // padding may be cut short by the message's end.
@@ -1114,6 +1124,40 @@ mod tests {
         );
         assert_eq!(bytes.len(), 28);
         assert_eq!(Message::parse(&bytes).unwrap(), m);
+    }
+
+    /// Found by the nightly fuzzer (2026-09-27): a group of 253 octets
+    /// whose last child is unpadded is read, and written back padded it
+    /// would be 256 — past its length octet. It is refused when read, as a
+    /// bad attribute length, with the header kept for the reply.
+    #[test]
+    fn a_group_that_cannot_be_written_back_is_refused() {
+        let mut children = Vec::new();
+        // Sixty-two padded four-octet children, then one of two octets
+        // (unpadded): 248 + 2 = 250 of children, 253 with the group's
+        // header and id — and 252 + 4 = 256 once written back.
+        for _ in 0..62 {
+            children.extend_from_slice(&[0x05, 4, 0, 1]); // FLOOR-ID
+        }
+        children.extend_from_slice(&[0x33, 2]); // an unknown attribute, empty
+        let mut group = vec![(attr_type::FLOOR_REQUEST_INFORMATION << 1) | 1, 0, 0, 7];
+        group.extend_from_slice(&children);
+        group[1] = group.len() as u8;
+        assert_eq!(group.len(), 254);
+        let mut payload = group.clone();
+        while payload.len() % 4 != 0 {
+            payload.push(0);
+        }
+        let mut data = vec![0x40, Primitive::FloorRequest.as_u8()];
+        data.extend_from_slice(&((payload.len() / 4) as u16).to_be_bytes());
+        data.extend_from_slice(&[0, 0, 0, 1, 0, 2, 0, 3]);
+        data.extend_from_slice(&payload);
+        let err = Message::parse(&data).expect_err("a group that cannot be written back");
+        assert_eq!(
+            err.kind,
+            ParseErrorKind::BadAttributeLength(attr_type::FLOOR_REQUEST_INFORMATION)
+        );
+        assert!(err.echo.is_some(), "the header is kept for the reply");
     }
 
     #[test]

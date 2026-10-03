@@ -227,6 +227,12 @@ pub struct TransportConfig {
     /// yet trickled) can win. A direct pair is nominated as soon as it is the
     /// best valid one; only relay-first outcomes wait, and never longer than
     /// this. RFC 8445 §8.1.1 leaves the stopping point to the agent.
+    ///
+    /// Two seconds covers a direct check's first retransmission (`rto`) plus
+    /// the hole punch on a slow path: with the peer's packets delayed 400 ms,
+    /// a one-second hold still settled on TURN in every run and two seconds
+    /// went direct in every run. The cost falls only on calls TURN alone can
+    /// carry, which connect up to this much later.
     pub relay_nomination_wait: Duration,
     /// Time allowed for the DTLS handshake once ICE is nominated.
     pub dtls_timeout: Duration,
@@ -271,7 +277,7 @@ impl Default for TransportConfig {
             rto: Duration::from_millis(500),
             max_attempts: 7,
             ice_timeout: Duration::from_secs(30),
-            relay_nomination_wait: Duration::from_secs(1),
+            relay_nomination_wait: Duration::from_secs(2),
             dtls_timeout: Duration::from_secs(15),
             keepalive: Duration::from_millis(2500),
             event_capacity: 512,

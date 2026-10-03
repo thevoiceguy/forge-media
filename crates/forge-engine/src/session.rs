@@ -2751,11 +2751,17 @@ impl MediaSession {
 
     /// Undo one [`MediaSession::suppress_relay_to`].
     pub fn release_relay_to(&self, leg: ParticipantLabel) {
-        let _ = self.relay_suppression(leg).fetch_update(
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-            |n| Some(n.saturating_sub(1)),
-        );
+        // A saturating decrement. A compare-exchange loop rather than `fetch_update`, which Rust 1.99
+        // deprecates in favour of `try_update` — newer than this workspace's rust-version (1.75).
+        use std::sync::atomic::Ordering::SeqCst;
+        let count = self.relay_suppression(leg);
+        let mut current = count.load(SeqCst);
+        while current > 0 {
+            match count.compare_exchange_weak(current, current - 1, SeqCst, SeqCst) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Whether relayed audio toward `leg` is being held back.

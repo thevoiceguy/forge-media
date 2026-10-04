@@ -234,9 +234,9 @@ pub struct TransportConfig {
     /// went direct in every run. The cost falls only on calls TURN alone can
     /// carry, which connect up to this much later.
     pub relay_nomination_wait: Duration,
-    /// Renomination (controlling agent): nominate the first valid pair at once and, when
-    /// it is a relay pair, keep checking higher-priority direct pairs and move the
-    /// session onto the first that succeeds — the call connects as fast as the relay
+    /// Renomination: the controlling agent nominates the first valid pair at once and,
+    /// when it is a relay pair, both agents keep checking higher-priority direct pairs;
+    /// the controlling one moves the session onto the first that succeeds — the call connects as fast as the relay
     /// allows and still ends up direct. When on, `relay_nomination_wait` is not used.
     /// A controlled agent always follows a renomination to a higher-priority pair it has
     /// itself verified, whatever this setting.
@@ -606,14 +606,17 @@ impl Inner {
             .map_or(0, |e| e.priority)
     }
 
-    /// Controlling side, renomination on: a relayed session within the window keeps
-    /// checking direct pairs that would beat it.
+    /// Renomination on: a relayed session within the window keeps checking direct pairs
+    /// that would beat it — on *both* sides. The controlled agent's own checks are what
+    /// open its NAT toward the peer: behind a port-restricted NAT, the controlling
+    /// agent's checks to it only get through once the controlled agent has sent toward
+    /// the controlling one, which it otherwise stops doing once it has followed the first
+    /// nomination. Only the controlling agent re-nominates.
     fn exploring(&self, now: Instant) -> bool {
         let Some(sel) = self.selected else {
             return false;
         };
-        self.role == IceRole::Controlling
-            && self.cfg.renomination
+        self.cfg.renomination
             && self
                 .remotes
                 .iter()
@@ -626,7 +629,10 @@ impl Inner {
     /// Controlling side: once DTLS is up, re-nominate (USE-CANDIDATE) the best direct
     /// pair that beats the relayed one; [`Self::switch_selected`] moves on its response.
     fn consider_renomination(&mut self, now: Instant, out: &mut Outgoing) {
-        if !self.exploring(now) || self.srtp.is_none() || self.remotes.iter().any(|e| e.nominating)
+        if self.role != IceRole::Controlling
+            || !self.exploring(now)
+            || self.srtp.is_none()
+            || self.remotes.iter().any(|e| e.nominating)
         {
             return;
         }

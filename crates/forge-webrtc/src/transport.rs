@@ -234,6 +234,16 @@ pub struct TransportConfig {
     /// went direct in every run. The cost falls only on calls TURN alone can
     /// carry, which connect up to this much later.
     pub relay_nomination_wait: Duration,
+    /// Renomination (controlling agent): nominate the first valid pair at once and, when
+    /// it is a relay pair, keep checking higher-priority direct pairs and move the
+    /// session onto the first that succeeds — the call connects as fast as the relay
+    /// allows and still ends up direct. When on, `relay_nomination_wait` is not used.
+    /// A controlled agent always follows a renomination to a higher-priority pair it has
+    /// itself verified, whatever this setting.
+    pub renomination: bool,
+    /// How long after the first nomination the controlling agent keeps looking for a
+    /// direct pair to move a relayed session onto.
+    pub renomination_window: Duration,
     /// Time allowed for the DTLS handshake once ICE is nominated.
     pub dtls_timeout: Duration,
     /// Keepalive / consent-freshness interval on the nominated pair.
@@ -278,6 +288,8 @@ impl Default for TransportConfig {
             max_attempts: 7,
             ice_timeout: Duration::from_secs(30),
             relay_nomination_wait: Duration::from_secs(2),
+            renomination: true,
+            renomination_window: Duration::from_secs(10),
             dtls_timeout: Duration::from_secs(15),
             keepalive: Duration::from_millis(2500),
             event_capacity: 512,
@@ -341,6 +353,8 @@ struct Inner {
     ice_started_at: Option<Instant>,
     /// When a relay pair first became the best valid pair (controlling side).
     relay_valid_at: Option<Instant>,
+    /// When the first pair was selected (bounds renomination).
+    selected_at: Option<Instant>,
     last_keepalive: Option<Instant>,
 
     cert: Arc<DtlsCertificate>,
@@ -569,12 +583,14 @@ impl Inner {
         if pairs[best].1 == CandidateType::Relay {
             self.relay_valid_at.get_or_insert(now);
         }
-        if let Some(i) = nomination_choice(
-            &pairs,
-            self.relay_valid_at,
-            now,
-            self.cfg.relay_nomination_wait,
-        ) {
+        // With renomination a relay pair is nominated at once and replaced later if a
+        // direct one succeeds; without it, it is held so a direct pair can win first.
+        let wait = if self.cfg.renomination {
+            Duration::ZERO
+        } else {
+            self.cfg.relay_nomination_wait
+        };
+        if let Some(i) = nomination_choice(&pairs, self.relay_valid_at, now, wait) {
             debug!(
                 "nominating {} ({:?})",
                 self.remotes[i].addr, self.remotes[i].cand.typ
@@ -583,11 +599,99 @@ impl Inner {
         }
     }
 
+    fn priority_of(&self, addr: SocketAddr) -> u64 {
+        self.remotes
+            .iter()
+            .find(|e| e.addr == addr)
+            .map_or(0, |e| e.priority)
+    }
+
+    /// Controlling side, renomination on: a relayed session within the window keeps
+    /// checking direct pairs that would beat it.
+    fn exploring(&self, now: Instant) -> bool {
+        let Some(sel) = self.selected else {
+            return false;
+        };
+        self.role == IceRole::Controlling
+            && self.cfg.renomination
+            && self
+                .remotes
+                .iter()
+                .any(|e| e.addr == sel && e.cand.typ == CandidateType::Relay)
+            && self
+                .selected_at
+                .is_some_and(|t| now.duration_since(t) < self.cfg.renomination_window)
+    }
+
+    /// Controlling side: once DTLS is up, re-nominate (USE-CANDIDATE) the best direct
+    /// pair that beats the relayed one; [`Self::switch_selected`] moves on its response.
+    fn consider_renomination(&mut self, now: Instant, out: &mut Outgoing) {
+        if !self.exploring(now) || self.srtp.is_none() || self.remotes.iter().any(|e| e.nominating)
+        {
+            return;
+        }
+        let Some(sel) = self.selected else {
+            return;
+        };
+        let pairs: Vec<(PairState, CandidateType, u64)> = self
+            .remotes
+            .iter()
+            .map(|e| (e.state, e.cand.typ, e.priority))
+            .collect();
+        if let Some(i) = renomination_choice(&pairs, self.priority_of(sel)) {
+            debug!(
+                "renominating {} ({:?}) over the relayed {sel}",
+                self.remotes[i].addr, self.remotes[i].cand.typ
+            );
+            self.send_check(i, true, now, out);
+        }
+    }
+
+    /// Controlled side: the controlling agent nominated `addr` after an earlier pair.
+    /// Follow it only to a higher-priority pair (RFC 8445 §8.1.1 / RFC 5245 §8.1.1.2:
+    /// use the highest-priority nominated pair), so a late retransmission of an older
+    /// nomination never drags the session back.
+    fn follow_renomination(&mut self, addr: SocketAddr, now: Instant) {
+        if let Some(sel) = self.selected {
+            if sel != addr && self.priority_of(addr) > self.priority_of(sel) {
+                self.switch_selected(addr, now);
+            }
+        }
+    }
+
+    /// Move an established session onto `addr`: media, consent keepalives and (once DTLS
+    /// is up) DTLS alerts go there from now on. SRTP keys are unchanged, and inbound media
+    /// is accepted from any known remote, so a peer that has not switched yet is not cut off.
+    fn switch_selected(&mut self, addr: SocketAddr, now: Instant) {
+        let Some(old) = self.selected else {
+            return;
+        };
+        if old == addr {
+            return;
+        }
+        self.selected = Some(addr);
+        self.last_keepalive = Some(now);
+        if self.srtp.is_some() {
+            self.dtls_peer = Some(addr);
+        }
+        for e in &mut self.remotes {
+            if e.addr == addr {
+                e.nominated = true;
+            }
+        }
+        info!("ICE renominated {old} → {addr}");
+        self.emit(TransportEvent::IceConnected {
+            local: self.local_addr,
+            remote: addr,
+        });
+    }
+
     fn select(&mut self, addr: SocketAddr, now: Instant, out: &mut Outgoing) {
         if self.selected.is_some() {
             return;
         }
         self.selected = Some(addr);
+        self.selected_at = Some(now);
         self.last_keepalive = Some(now);
         for e in &mut self.remotes {
             if e.addr == addr {
@@ -626,7 +730,8 @@ impl Inner {
 
         // --- ICE
         if self.remote_creds.is_some() && self.state() != ConnectionState::Failed {
-            if self.selected.is_none() {
+            let exploring = self.exploring(now);
+            if self.selected.is_none() || exploring || self.remotes.iter().any(|e| e.triggered) {
                 // Retransmit or fail in-progress checks.
                 for i in 0..self.remotes.len() {
                     let e = &self.remotes[i];
@@ -653,19 +758,31 @@ impl Inner {
                         out.push((e.last_request.clone(), e.addr));
                     }
                 }
-                // One new check per tick: triggered first, then by priority.
+                // One new check per tick: triggered first, then by priority — after a
+                // selection, only direct pairs that would beat a relayed one (renomination).
+                let floor = self.selected.map(|a| self.priority_of(a));
                 let next = self
                     .remotes
                     .iter()
                     .position(|e| e.triggered && e.state != PairState::InProgress)
                     .or_else(|| {
-                        self.remotes
-                            .iter()
-                            .position(|e| matches!(e.state, PairState::Waiting | PairState::Frozen))
+                        self.remotes.iter().position(|e| {
+                            matches!(e.state, PairState::Waiting | PairState::Frozen)
+                                && match floor {
+                                    None => true,
+                                    Some(p) => {
+                                        exploring
+                                            && e.cand.typ != CandidateType::Relay
+                                            && e.priority > p
+                                    }
+                                }
+                        })
                     });
                 if let Some(i) = next {
                     self.send_check(i, false, now, &mut out);
                 }
+            }
+            if self.selected.is_none() {
                 // A nomination held for a relay pair is released once a direct pair
                 // wins or the wait runs out.
                 self.consider_nomination(now, &mut out);
@@ -675,6 +792,8 @@ impl Inner {
                     }
                 }
             } else if let Some(addr) = self.selected {
+                self.consider_renomination(now, &mut out);
+                let addr = self.selected.unwrap_or(addr);
                 let due = self
                     .last_keepalive
                     .map(|t| now.duration_since(t) >= self.cfg.keepalive)
@@ -786,8 +905,12 @@ impl Inner {
                 }
                 match e.state {
                     PairState::Succeeded => {
-                        if e.nominated && self.selected.is_none() {
-                            self.select(from, now, out);
+                        if e.nominated {
+                            if self.selected.is_none() {
+                                self.select(from, now, out);
+                            } else {
+                                self.follow_renomination(from, now);
+                            }
                         }
                     }
                     PairState::InProgress => {}
@@ -848,7 +971,7 @@ impl Inner {
                     return;
                 }
                 let e = &mut self.remotes[i];
-                if self.selected.is_some() {
+                if self.selected == Some(e.addr) {
                     // Keepalive / consent response.
                     e.tx_id = None;
                     return;
@@ -863,16 +986,26 @@ impl Inner {
                 match self.role {
                     IceRole::Controlling => {
                         if was_nominating {
-                            self.select(addr, now, out);
-                        } else {
+                            if self.selected.is_none() {
+                                self.select(addr, now, out);
+                            } else {
+                                self.switch_selected(addr, now);
+                            }
+                        } else if self.selected.is_none() {
                             // Regular nomination (RFC 8445 §8.1.1) of the best valid pair — not
                             // simply the first one to succeed; see `nomination_choice`.
                             self.consider_nomination(now, out);
+                        } else {
+                            self.consider_renomination(now, out);
                         }
                     }
                     IceRole::Controlled => {
                         if nominated {
-                            self.select(addr, now, out);
+                            if self.selected.is_none() {
+                                self.select(addr, now, out);
+                            } else {
+                                self.follow_renomination(addr, now);
+                            }
                         }
                     }
                 }
@@ -1294,6 +1427,7 @@ impl Transport {
             selected: None,
             ice_started_at: None,
             relay_valid_at: None,
+            selected_at: None,
             last_keepalive: None,
             cert,
             dtls_role: None,
@@ -1820,6 +1954,53 @@ fn nomination_choice(
     }
     let held_since = relay_valid_at.unwrap_or(now);
     (now.duration_since(held_since) >= wait).then_some(best)
+}
+
+/// Which direct pair, if any, the controlling agent re-nominates over a relayed
+/// session: the highest-priority pair that succeeded, is not a relay pair, and beats
+/// the selected pair's priority. `pairs` is `(state, remote type, pair priority)` in
+/// priority order (highest first).
+fn renomination_choice(
+    pairs: &[(PairState, CandidateType, u64)],
+    selected_priority: u64,
+) -> Option<usize> {
+    pairs.iter().position(|(st, typ, prio)| {
+        *st == PairState::Succeeded && *typ != CandidateType::Relay && *prio > selected_priority
+    })
+}
+
+#[cfg(test)]
+mod renomination_tests {
+    use super::*;
+
+    #[test]
+    fn the_best_direct_pair_that_succeeded_replaces_the_relay() {
+        let pairs = [
+            (PairState::InProgress, CandidateType::Host, 300),
+            (PairState::Succeeded, CandidateType::ServerReflexive, 200),
+            (PairState::Succeeded, CandidateType::Relay, 10),
+        ];
+        assert_eq!(renomination_choice(&pairs, 10), Some(1));
+    }
+
+    #[test]
+    fn nothing_replaces_the_relay_until_a_direct_pair_succeeds() {
+        let pairs = [
+            (PairState::Waiting, CandidateType::ServerReflexive, 200),
+            (PairState::Failed, CandidateType::Host, 150),
+            (PairState::Succeeded, CandidateType::Relay, 10),
+        ];
+        assert_eq!(renomination_choice(&pairs, 10), None);
+    }
+
+    #[test]
+    fn a_pair_no_better_than_the_selected_one_is_not_chosen() {
+        let pairs = [
+            (PairState::Succeeded, CandidateType::ServerReflexive, 10),
+            (PairState::Succeeded, CandidateType::Relay, 10),
+        ];
+        assert_eq!(renomination_choice(&pairs, 10), None);
+    }
 }
 
 #[cfg(test)]

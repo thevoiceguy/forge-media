@@ -222,6 +222,18 @@ pub struct TransportConfig {
     pub max_attempts: u8,
     /// Time allowed from the first remote description to a nominated pair.
     pub ice_timeout: Duration,
+    /// How long the controlling agent holds a nomination when the best valid
+    /// pair is a relay pair, so that a direct pair still being checked (or not
+    /// yet trickled) can win. A direct pair is nominated as soon as it is the
+    /// best valid one; only relay-first outcomes wait, and never longer than
+    /// this. RFC 8445 §8.1.1 leaves the stopping point to the agent.
+    ///
+    /// Two seconds covers a direct check's first retransmission (`rto`) plus
+    /// the hole punch on a slow path: with the peer's packets delayed 400 ms,
+    /// a one-second hold still settled on TURN in every run and two seconds
+    /// went direct in every run. The cost falls only on calls TURN alone can
+    /// carry, which connect up to this much later.
+    pub relay_nomination_wait: Duration,
     /// Time allowed for the DTLS handshake once ICE is nominated.
     pub dtls_timeout: Duration,
     /// Keepalive / consent-freshness interval on the nominated pair.
@@ -265,6 +277,7 @@ impl Default for TransportConfig {
             rto: Duration::from_millis(500),
             max_attempts: 7,
             ice_timeout: Duration::from_secs(30),
+            relay_nomination_wait: Duration::from_secs(2),
             dtls_timeout: Duration::from_secs(15),
             keepalive: Duration::from_millis(2500),
             event_capacity: 512,
@@ -326,6 +339,8 @@ struct Inner {
     remotes: Vec<RemoteEntry>,
     selected: Option<SocketAddr>,
     ice_started_at: Option<Instant>,
+    /// When a relay pair first became the best valid pair (controlling side).
+    relay_valid_at: Option<Instant>,
     last_keepalive: Option<Instant>,
 
     cert: Arc<DtlsCertificate>,
@@ -538,6 +553,36 @@ impl Inner {
         out.push((bytes, e.addr));
     }
 
+    /// Controlling side: nominate the best valid pair once [`nomination_choice`] says so.
+    fn consider_nomination(&mut self, now: Instant, out: &mut Outgoing) {
+        if self.role != IceRole::Controlling
+            || self.selected.is_some()
+            || self.remotes.iter().any(|e| e.nominating)
+        {
+            return;
+        }
+        let pairs: Vec<(PairState, CandidateType)> =
+            self.remotes.iter().map(|e| (e.state, e.cand.typ)).collect();
+        let Some(best) = pairs.iter().position(|(st, _)| *st == PairState::Succeeded) else {
+            return;
+        };
+        if pairs[best].1 == CandidateType::Relay {
+            self.relay_valid_at.get_or_insert(now);
+        }
+        if let Some(i) = nomination_choice(
+            &pairs,
+            self.relay_valid_at,
+            now,
+            self.cfg.relay_nomination_wait,
+        ) {
+            debug!(
+                "nominating {} ({:?})",
+                self.remotes[i].addr, self.remotes[i].cand.typ
+            );
+            self.send_check(i, true, now, out);
+        }
+    }
+
     fn select(&mut self, addr: SocketAddr, now: Instant, out: &mut Outgoing) {
         if self.selected.is_some() {
             return;
@@ -621,6 +666,9 @@ impl Inner {
                 if let Some(i) = next {
                     self.send_check(i, false, now, &mut out);
                 }
+                // A nomination held for a relay pair is released once a direct pair
+                // wins or the wait runs out.
+                self.consider_nomination(now, &mut out);
                 if let Some(started) = self.ice_started_at {
                     if now.duration_since(started) > self.cfg.ice_timeout {
                         self.fail("ICE timeout: no candidate pair was nominated");
@@ -816,10 +864,10 @@ impl Inner {
                     IceRole::Controlling => {
                         if was_nominating {
                             self.select(addr, now, out);
-                        } else if !self.remotes.iter().any(|e| e.nominating) {
-                            // Regular nomination of the first valid pair
-                            // (RFC 8445 §8.1.1): re-check with USE-CANDIDATE.
-                            self.send_check(i, true, now, out);
+                        } else {
+                            // Regular nomination (RFC 8445 §8.1.1) of the best valid pair — not
+                            // simply the first one to succeed; see `nomination_choice`.
+                            self.consider_nomination(now, out);
                         }
                     }
                     IceRole::Controlled => {
@@ -1245,6 +1293,7 @@ impl Transport {
             remotes: Vec::new(),
             selected: None,
             ice_started_at: None,
+            relay_valid_at: None,
             last_keepalive: None,
             cert,
             dtls_role: None,
@@ -1744,6 +1793,99 @@ async fn resolve_stun_server(uri: &str) -> Result<SocketAddr> {
     addrs
         .next()
         .ok_or_else(|| WebRtcError::IceError(format!("{hostport} resolved to nothing")))
+}
+
+/// Which pair the controlling agent nominates now, if any.
+///
+/// `pairs` is the checklist in priority order (highest first), as
+/// `(state, remote candidate type)`. The best valid pair is the first that
+/// succeeded. A direct pair is nominated at once. A relay pair is held for
+/// `wait` from `relay_valid_at` (when a relay pair first became the best valid
+/// one): a relay↔relay check needs no hole punching, so it can succeed before
+/// the direct pairs' checks complete — or before the peer has trickled its
+/// server-reflexive candidate at all — and nominating it then pins the call to
+/// the TURN server although a direct path exists (seen on a carrier NAT, DSIP
+/// WAN Run 3b). RFC 8445 §8.1.1 lets checks continue before nominating.
+fn nomination_choice(
+    pairs: &[(PairState, CandidateType)],
+    relay_valid_at: Option<Instant>,
+    now: Instant,
+    wait: Duration,
+) -> Option<usize> {
+    let best = pairs
+        .iter()
+        .position(|(st, _)| *st == PairState::Succeeded)?;
+    if pairs[best].1 != CandidateType::Relay {
+        return Some(best);
+    }
+    let held_since = relay_valid_at.unwrap_or(now);
+    (now.duration_since(held_since) >= wait).then_some(best)
+}
+
+#[cfg(test)]
+mod nomination_tests {
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn a_direct_pair_is_nominated_as_soon_as_it_is_the_best_valid_one() {
+        let now = Instant::now();
+        let pairs = [
+            (PairState::InProgress, CandidateType::Host), // a private address that may never answer
+            (PairState::Succeeded, CandidateType::ServerReflexive),
+            (PairState::Succeeded, CandidateType::Relay),
+        ];
+        assert_eq!(nomination_choice(&pairs, None, now, WAIT), Some(1));
+    }
+
+    #[test]
+    fn a_relay_pair_waits_for_a_direct_one() {
+        let start = Instant::now();
+        let pairs = [
+            (PairState::Waiting, CandidateType::ServerReflexive), // trickled late, not yet checked
+            (PairState::Succeeded, CandidateType::Relay),
+        ];
+        assert_eq!(nomination_choice(&pairs, Some(start), start, WAIT), None);
+        assert_eq!(
+            nomination_choice(
+                &pairs,
+                Some(start),
+                start + Duration::from_millis(400),
+                WAIT
+            ),
+            None
+        );
+        // the direct pair succeeds within the wait: it is nominated, not the relay
+        let won = [
+            (PairState::Succeeded, CandidateType::ServerReflexive),
+            (PairState::Succeeded, CandidateType::Relay),
+        ];
+        assert_eq!(
+            nomination_choice(&won, Some(start), start + Duration::from_millis(600), WAIT),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn a_relay_pair_is_nominated_when_the_wait_runs_out() {
+        let start = Instant::now();
+        let pairs = [
+            (PairState::Failed, CandidateType::ServerReflexive), // symmetric NAT: no direct path
+            (PairState::Succeeded, CandidateType::Relay),
+        ];
+        assert_eq!(
+            nomination_choice(&pairs, Some(start), start + WAIT, WAIT),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn nothing_is_nominated_before_a_pair_succeeds() {
+        let now = Instant::now();
+        let pairs = [(PairState::InProgress, CandidateType::Relay)];
+        assert_eq!(nomination_choice(&pairs, None, now, WAIT), None);
+    }
 }
 
 #[cfg(test)]

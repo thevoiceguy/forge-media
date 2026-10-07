@@ -18,11 +18,8 @@ socket2 = { workspace = true }
 metrics = { workspace = true }
 rand = { workspace = true }
 
-# Platform-specific dependencies
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-# Crypto for SRTP
+# Crypto for SRTP (every platform: these once sat under the unix-only
+# table below, which left forge-rtp unbuildable on Windows)
 aes = { workspace = true }
 aes-gcm = { workspace = true }
 hmac = { workspace = true }
@@ -38,6 +35,10 @@ openssl-sys = { version = "0.9", optional = true }
 # newer major here is a different trait that openssl's types don't
 # implement. Only bump when rust-openssl does.
 foreign-types = { version = "0.3", optional = true }
+
+# Platform-specific dependencies
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 dtls = ["openssl", "openssl-sys", "foreign-types"]

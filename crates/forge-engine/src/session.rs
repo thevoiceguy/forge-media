@@ -724,7 +724,25 @@ pub(crate) struct ScheduledPlayoutQueue {
     /// pump happened to drain between deliveries" (no marker). DTMF
     /// scheduling does not touch it.
     audio_stream_end: Option<Instant>,
+    /// Each playback's resampler, while the leg's codec runs at another
+    /// rate than the audio handed in: a stream handed over a frame at a
+    /// time is resampled as one, with no step at each frame's edge.
+    resamplers: std::collections::HashMap<Option<String>, PlayoutResampler>,
 }
+
+/// One playback's resampling into a leg: the filter's state, and what it
+/// produced past the last whole frame.
+#[derive(Debug)]
+struct PlayoutResampler {
+    from: u32,
+    to: u32,
+    resampler: forge_resampler::Resampler,
+    carry: Vec<i16>,
+    last_used: Instant,
+}
+
+/// A playback's resampler unused for this long has ended with its playback.
+const PLAYOUT_RESAMPLER_IDLE: Duration = Duration::from_secs(5);
 
 enum StatefulCodec {
     #[cfg(feature = "opus")]
@@ -2367,16 +2385,6 @@ impl MediaSession {
                 ))
             })?;
 
-        let resampled_samples = if sample_rate != audio_sample_rate {
-            crate::forwarding::ForwardingEngine::resample_audio(
-                samples,
-                sample_rate,
-                audio_sample_rate,
-            )
-        } else {
-            samples.to_vec()
-        };
-
         if mode == crate::media_bridge::PlayoutMode::Replace {
             self.clear_scheduled_playout_for_leg(leg, playback_id.as_deref())
                 .await;
@@ -2410,12 +2418,59 @@ impl MediaSession {
         let mut stream_cursor = queue.next_rtp_timestamp.unwrap_or(rtp_cursor_fallback);
         let timestamp_increment = codec_config.clock_rate / 50;
 
-        for (index, chunk) in resampled_samples.chunks(frame_samples).enumerate() {
-            let mut frame = chunk.to_vec();
-            if frame.len() < frame_samples {
-                frame.resize(frame_samples, 0);
-            }
+        // Audio at another rate than the codec's goes through this
+        // playback's own resampler, which carries the stream across calls;
+        // only whole frames leave it, the rest waits for the next call. A
+        // new talkspurt starts the stream again.
+        let frames: Vec<Vec<i16>> = if sample_rate != audio_sample_rate {
+            queue
+                .resamplers
+                .retain(|_, r| now.duration_since(r.last_used) < PLAYOUT_RESAMPLER_IDLE);
+            let fresh = |from, to| -> Result<PlayoutResampler> {
+                Ok(PlayoutResampler {
+                    from,
+                    to,
+                    resampler: forge_resampler::Resampler::new(from, to, 1)
+                        .map_err(|e| ForgeError::Codec(format!("resampler: {e}")))?,
+                    carry: Vec::new(),
+                    last_used: now,
+                })
+            };
+            let stream = match queue.resamplers.remove(&playback_id) {
+                Some(r)
+                    if r.from == sample_rate && r.to == audio_sample_rate && !starts_talkspurt =>
+                {
+                    r
+                }
+                _ => fresh(sample_rate, audio_sample_rate)?,
+            };
+            let mut stream = stream;
+            stream.last_used = now;
+            let resampled = stream
+                .resampler
+                .resample(samples)
+                .map_err(|e| ForgeError::Codec(format!("resample: {e}")))?;
+            stream.carry.extend_from_slice(&resampled);
+            let whole = stream.carry.len() / frame_samples * frame_samples;
+            let frames = stream.carry[..whole]
+                .chunks(frame_samples)
+                .map(<[i16]>::to_vec)
+                .collect();
+            stream.carry.drain(..whole);
+            queue.resamplers.insert(playback_id.clone(), stream);
+            frames
+        } else {
+            samples
+                .chunks(frame_samples)
+                .map(|chunk| {
+                    let mut frame = chunk.to_vec();
+                    frame.resize(frame_samples, 0);
+                    frame
+                })
+                .collect()
+        };
 
+        for (index, frame) in frames.into_iter().enumerate() {
             let timestamp = stream_cursor;
             stream_cursor = stream_cursor.wrapping_add(timestamp_increment);
 
@@ -2580,6 +2635,12 @@ impl MediaSession {
                 .unwrap_or(true)
         });
         let removed = original_len.saturating_sub(queue.items.len());
+        match playback_id {
+            Some(id) => {
+                queue.resamplers.remove(&Some(id.to_string()));
+            }
+            None => queue.resamplers.clear(),
+        }
         Self::recompute_playout_queue_state(&mut queue);
         removed
     }
@@ -4462,6 +4523,73 @@ mod tests {
             !session.relay_suppressed(ParticipantLabel::A),
             "released, and never below zero"
         );
+    }
+
+    /// 8 kHz audio handed over a 20 ms frame at a time, played to a leg
+    /// whose codec runs at 16 kHz (G.722, as a Poly VVX offers first): what
+    /// is queued must be the tone, clean, with no step at each frame's edge.
+    /// Each frame was resampled alone and by straight lines, and every
+    /// prompt to such a phone carried a buzz (FCP's D8).
+    #[tokio::test]
+    async fn audio_framed_at_8k_plays_cleanly_to_a_16k_leg() {
+        let session = make_test_session(40020).await;
+        session
+            .participant_lock(ParticipantLabel::A)
+            .write()
+            .await
+            .codec_config = ParticipantCodecConfig {
+            payload_type: 9,
+            codec: forge_core::AudioCodec::G722,
+            clock_rate: 8000,
+        };
+        let tone: Vec<i16> = (0..8000)
+            .map(|n| {
+                (8000.0 * (2.0 * std::f64::consts::PI * 1000.0 * n as f64 / 8000.0).sin()) as i16
+            })
+            .collect();
+        for frame in tone.chunks(160) {
+            session
+                .schedule_audio_playout(
+                    crate::media_bridge::MediaTarget::A,
+                    8000,
+                    frame,
+                    Some("prompt".to_string()),
+                    crate::media_bridge::PlayoutMode::Append,
+                    ScheduledPlayoutSource::AI,
+                )
+                .await
+                .unwrap();
+        }
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        let played: Vec<i16> = queue
+            .items
+            .iter()
+            .flat_map(|item| match &item.kind {
+                ScheduledPlayoutKind::Audio { samples, .. } => {
+                    assert_eq!(samples.len(), 320, "a whole 20 ms frame at 16 kHz");
+                    samples.clone()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        // One frame in, one out: nothing is lost or padded on the way.
+        assert_eq!(queue.items.len(), 50);
+        // Against the ideal tone at 16 kHz, delayed by the resampler.
+        let delay = forge_resampler::Resampler::new(8000, 16000, 1)
+            .unwrap()
+            .delay_frames() as f64
+            / 8000.0;
+        let ideal = |n: usize| {
+            8000.0 * (2.0 * std::f64::consts::PI * 1000.0 * (n as f64 / 16000.0 - delay)).sin()
+        };
+        let skip = 200;
+        let (mut signal, mut error) = (0.0, 0.0);
+        for (n, &y) in played.iter().enumerate().skip(skip) {
+            signal += ideal(n).powi(2);
+            error += (y as f64 - ideal(n)).powi(2);
+        }
+        let snr = 10.0 * (signal / error).log10();
+        assert!(snr > 50.0, "the tone at 16 kHz: {snr:.1} dB");
     }
 
     #[tokio::test]

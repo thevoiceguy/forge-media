@@ -14,6 +14,7 @@ forge-dtmf = { path = "../forge-dtmf" }
 forge-vad = { path = "../forge-vad" }
 forge-codecs = { path = "../forge-codecs" }
 forge-transcoder = { path = "../forge-transcoder" }
+forge-resampler = { path = "../forge-resampler" }
 forge-ai-stream = { path = "../forge-ai-stream", optional = true }
 forge-recorder = { path = "../forge-recorder" }
 forge-injection = { path = "../forge-injection" }

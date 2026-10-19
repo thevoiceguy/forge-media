@@ -7,7 +7,7 @@ use thiserror::Error;
 
 mod resampler;
 
-pub use resampler::{calculate_output_length, Resampler};
+pub use resampler::{calculate_output_length, resample_all, Resampler};
 
 /// Resampler error types
 #[derive(Error, Debug)]

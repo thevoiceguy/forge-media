@@ -1737,6 +1737,7 @@ dependencies = [
  "forge-kernel",
  "forge-mixer",
  "forge-recorder",
+ "forge-resampler",
  "forge-rtp",
  "forge-transcoder",
  "forge-vad",

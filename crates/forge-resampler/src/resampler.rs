@@ -1,15 +1,32 @@
 //! Audio resampling
 //!
-//! This module provides sample rate conversion for audio streams.
-//! Resampling is necessary when transcoding between codecs with different
-//! sample rates (e.g., G.711 at 8kHz to Opus at 48kHz).
+//! Sample rate conversion for audio streams, needed when transcoding between
+//! codecs with different rates (G.711 at 8 kHz, G.722 at 16 kHz, Opus at 48
+//! kHz) and when playing audio recorded at one rate into a call at another.
 //!
-//! Implementation uses linear interpolation for resampling.
-//! Downsampling applies a simple low-pass FIR filter to reduce aliasing
-//! when the `fir` feature is enabled (default), but it is not a
-//! high-quality resampler.
+//! A band-limited (windowed-sinc) resampler. Each output sample is the input
+//! convolved with a Kaiser-windowed sinc low-pass, cut just below the Nyquist
+//! frequency of the lower of the two rates, so upsampling leaves no images
+//! and downsampling no aliases. It streams: the last input samples are kept
+//! between calls, so audio handed over in 20 ms frames comes out exactly as
+//! if it had been handed over whole — no step at every frame boundary, which
+//! is what the linear interpolation this replaced produced 50 times a second
+//! (heard as a buzz under every prompt played to a G.722 phone). The price is
+//! a constant delay of [`Resampler::delay_frames`] input frames, taken once
+//! at the start of a stream (or after [`Resampler::reset`]); after it, every
+//! input frame yields `dst_rate / src_rate` output frames on average, and
+//! exactly that many when the ratio is an integer.
 
 use crate::{ResamplerError, Result};
+
+/// Zero crossings of the sinc on each side of the centre, at the cutoff.
+const ZERO_CROSSINGS: f64 = 16.0;
+/// Kaiser window shape: about 80 dB of stopband attenuation.
+const KAISER_BETA: f64 = 8.0;
+/// Fraction of the lower Nyquist frequency the passband keeps.
+const ROLLOFF: f64 = 0.92;
+/// Table resolution: kernel values per input sample of distance.
+const TABLE_STEPS: usize = 512;
 
 /// Audio resampler for sample rate conversion
 pub struct Resampler {
@@ -19,17 +36,32 @@ pub struct Resampler {
     dst_rate: u32,
     /// Number of channels (1 = mono, 2 = stereo)
     channels: u16,
-    /// Fractional position for interpolation
-    position: f64,
-    /// Low-pass filter taps (used during downsampling)
-    #[cfg(feature = "fir")]
-    fir_taps: Vec<f64>,
-    /// Low-pass filter ring buffer state (per channel)
-    #[cfg(feature = "fir")]
-    fir_state: Vec<f64>,
-    /// Ring buffer position for FIR filtering
-    #[cfg(feature = "fir")]
-    fir_pos: usize,
+    /// Where the next output falls, in frames of the working buffer
+    /// (history followed by the new input), counted exactly in units of
+    /// `1 / unit` frame: whole outputs per frame stay whole, with no drift.
+    position: u64,
+    /// Units per input frame: the destination rate (over their divisor).
+    unit: u64,
+    /// Units per output frame: the source rate (over their divisor).
+    step: u64,
+    /// Taps on each side of the centre.
+    half: usize,
+    /// The kernel, one side, at `TABLE_STEPS` points per frame of distance,
+    /// from the centre out to `half` (plus one guard point).
+    table: Vec<f64>,
+    /// The last `2 * half` input frames, interleaved, oldest first.
+    history: Vec<f64>,
+}
+
+impl std::fmt::Debug for Resampler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resampler")
+            .field("src_rate", &self.src_rate)
+            .field("dst_rate", &self.dst_rate)
+            .field("channels", &self.channels)
+            .field("taps", &(2 * self.half))
+            .finish()
+    }
 }
 
 impl Resampler {
@@ -52,27 +84,28 @@ impl Resampler {
             ));
         }
 
-        #[cfg(feature = "fir")]
-        let fir_taps = if src_rate > dst_rate {
-            design_fir_lowpass(src_rate, dst_rate, 31)
-        } else {
-            Vec::new()
-        };
-        #[cfg(feature = "fir")]
-        let fir_state = vec![0.0; fir_taps.len() * channels as usize];
+        // The cutoff, in cycles per input sample (doubled: the sinc's
+        // argument scale). Downsampling lowers it to the output's Nyquist.
+        let scale = ROLLOFF * (dst_rate as f64 / src_rate as f64).min(1.0);
+        let half = (ZERO_CROSSINGS / scale).ceil() as usize;
+        let table = (0..=(half + 1) * TABLE_STEPS)
+            .map(|i| kernel(i as f64 / TABLE_STEPS as f64, scale, half as f64))
+            .collect();
 
-        Ok(Self {
+        let divisor = gcd(src_rate as u64, dst_rate as u64);
+        let mut resampler = Self {
             src_rate,
             dst_rate,
             channels,
-            position: 0.0,
-            #[cfg(feature = "fir")]
-            fir_taps,
-            #[cfg(feature = "fir")]
-            fir_state,
-            #[cfg(feature = "fir")]
-            fir_pos: 0,
-        })
+            position: 0,
+            unit: dst_rate as u64 / divisor,
+            step: src_rate as u64 / divisor,
+            half,
+            table,
+            history: Vec::new(),
+        };
+        resampler.reset();
+        Ok(resampler)
     }
 
     /// Resample audio data
@@ -83,8 +116,8 @@ impl Resampler {
     /// # Returns
     /// Resampled PCM samples at the destination sample rate
     pub fn resample(&mut self, input: &[i16]) -> Result<Vec<i16>> {
-        // Validate input length
-        if input.len() % self.channels as usize != 0 {
+        let channels = self.channels as usize;
+        if input.len() % channels != 0 {
             return Err(ResamplerError::InvalidFormat(
                 "Input length must be multiple of channel count".to_string(),
             ));
@@ -99,76 +132,77 @@ impl Resampler {
             return Ok(input.to_vec());
         }
 
-        // Calculate ratio and output length
-        let ratio = self.src_rate as f64 / self.dst_rate as f64;
-        let input_frames = input.len() / self.channels as usize;
-        let remaining_input = (input_frames as f64 - self.position).max(0.0);
-        let output_frames = (remaining_input / ratio).ceil() as usize;
-        let mut output = Vec::with_capacity(output_frames * self.channels as usize);
+        let half = self.half;
+        let mut buffer = std::mem::take(&mut self.history);
+        buffer.extend(input.iter().map(|&s| s as f64));
+        let frames = buffer.len() / channels;
+        let input_frames = input.len() / channels;
 
-        #[cfg(feature = "fir")]
-        let filtered_input: Option<Vec<i16>>;
-        #[cfg(feature = "fir")]
-        let input_slice = if self.src_rate > self.dst_rate {
-            // Apply simple low-pass FIR filter before downsampling to reduce aliasing.
-            filtered_input = Some(self.low_pass_filter(input));
-            filtered_input
-                .as_ref()
-                .expect("filtered_input set")
-                .as_slice()
-        } else {
-            input
-        };
-        #[cfg(not(feature = "fir"))]
-        let input_slice = input;
-
-        // Process each output frame based on current fractional position
-        while self.position < input_frames as f64 {
-            // Get the current integer and fractional position
-            let idx = self.position as usize;
-            let frac = self.position - idx as f64;
-
-            // For each channel, interpolate between current and next sample
-            for ch in 0..self.channels as usize {
-                let current_idx = idx * self.channels as usize + ch;
-                let current = input_slice[current_idx];
-
-                // Get next sample for interpolation
-                let next = if idx + 1 < input_frames {
-                    input_slice[current_idx + self.channels as usize]
-                } else {
-                    current
-                };
-
-                // Linear interpolation with clamping to prevent overflow clicks
-                let interpolated = current as f64 + (next as f64 - current as f64) * frac;
-                let clamped = interpolated.round().clamp(i16::MIN as f64, i16::MAX as f64);
-                let sample = clamped as i16;
-
-                output.push(sample);
+        let mut output = Vec::with_capacity(
+            (input_frames * self.unit as usize / self.step as usize + 1) * channels,
+        );
+        // An output centred at `position` needs `half` frames after it.
+        while (self.position / self.unit) as usize + half < frames {
+            let centre = (self.position / self.unit) as usize;
+            let frac = (self.position % self.unit) as f64 / self.unit as f64;
+            let first = centre + 1 - half;
+            let mut acc = [0.0f64; 2];
+            let mut norm = 0.0;
+            for k in 0..2 * half {
+                let frame = first + k;
+                let distance = (frame as f64 - centre as f64 - frac).abs();
+                let weight = self.weight(distance);
+                norm += weight;
+                for (ch, acc) in acc.iter_mut().enumerate().take(channels) {
+                    *acc += weight * buffer[frame * channels + ch];
+                }
             }
-
-            // Advance position
-            self.position += ratio;
+            for acc in acc.iter().take(channels) {
+                // Normalised per output: the gain is exactly 1 at DC
+                // whatever the fractional phase, so the level never ripples.
+                let sample = (acc / norm).round().clamp(i16::MIN as f64, i16::MAX as f64);
+                output.push(sample as i16);
+            }
+            self.position += self.step;
         }
 
-        // Adjust position for next call (carry over fractional part)
-        self.position -= input_frames as f64;
-        if self.position < 0.0 {
-            self.position = 0.0;
-        }
+        // Keep the last `2 * half` frames; outputs are placed against them.
+        let keep = 2 * half;
+        let dropped = frames - keep;
+        self.history = buffer.split_off(dropped * channels);
+        self.position -= dropped as u64 * self.unit;
 
         Ok(output)
     }
 
-    /// Reset resampler state
-    pub fn reset(&mut self) {
-        self.position = 0.0;
-        #[cfg(feature = "fir")]
-        if !self.fir_state.is_empty() {
-            self.fir_state.fill(0.0);
-            self.fir_pos = 0;
+    /// The kernel at `distance` input frames from an output's centre.
+    fn weight(&self, distance: f64) -> f64 {
+        let at = distance * TABLE_STEPS as f64;
+        let i = at as usize;
+        if i + 1 >= self.table.len() {
+            return 0.0;
         }
+        let frac = at - i as f64;
+        self.table[i] + (self.table[i + 1] - self.table[i]) * frac
+    }
+
+    /// Input frames between an input sample and the output it is centred
+    /// on: the stream's delay.
+    pub fn delay_frames(&self) -> usize {
+        if self.src_rate == self.dst_rate {
+            0
+        } else {
+            self.half
+        }
+    }
+
+    /// Reset resampler state: the next call starts a new stream.
+    pub fn reset(&mut self) {
+        // Silence before the stream, so the first outputs have history.
+        self.history = vec![0.0; 2 * self.half * self.channels as usize];
+        // The first output is centred on the newest silent frame before the
+        // stream's first sample shifted back by the delay: `half` frames in.
+        self.position = self.half as u64 * self.unit;
     }
 
     /// Get source sample rate
@@ -190,64 +224,79 @@ impl Resampler {
     pub fn needs_resampling(&self) -> bool {
         self.src_rate != self.dst_rate
     }
+}
 
-    #[cfg(feature = "fir")]
-    fn low_pass_filter(&mut self, input: &[i16]) -> Vec<i16> {
-        if self.fir_taps.is_empty() {
-            return input.to_vec();
-        }
-        let mut filtered = Vec::with_capacity(input.len());
-        let taps_len = self.fir_taps.len();
-        for frame in input.chunks_exact(self.channels as usize) {
-            for (ch, &sample) in frame.iter().enumerate() {
-                let x = sample as f64;
-                let base = ch * taps_len;
-                self.fir_state[base + self.fir_pos] = x;
+/// The windowed-sinc low-pass at `distance` frames: `scale` is the cutoff
+/// relative to the input's Nyquist, `half` the window's half-width.
+fn kernel(distance: f64, scale: f64, half: f64) -> f64 {
+    if distance >= half {
+        return 0.0;
+    }
+    let x = distance * scale;
+    let sinc = if x == 0.0 {
+        1.0
+    } else {
+        let pix = std::f64::consts::PI * x;
+        pix.sin() / pix
+    };
+    let r = distance / half;
+    let window = bessel_i0(KAISER_BETA * (1.0 - r * r).sqrt()) / bessel_i0(KAISER_BETA);
+    scale * sinc * window
+}
 
-                let mut acc = 0.0;
-                for (k, &tap) in self.fir_taps.iter().enumerate() {
-                    let idx = (self.fir_pos + taps_len - k) % taps_len;
-                    acc += tap * self.fir_state[base + idx];
-                }
-                // Clamp to prevent overflow clicks
-                let clamped = acc.round().clamp(i16::MIN as f64, i16::MAX as f64);
-                filtered.push(clamped as i16);
-            }
-            self.fir_pos = (self.fir_pos + 1) % taps_len;
-        }
-        filtered
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
     }
 }
 
-#[cfg(feature = "fir")]
-fn design_fir_lowpass(src_rate: u32, dst_rate: u32, taps_len: usize) -> Vec<f64> {
-    let len = if taps_len % 2 == 0 {
-        taps_len + 1
-    } else {
-        taps_len
-    };
-    let cutoff = 0.45 * dst_rate as f64 / src_rate as f64;
-    let m = (len - 1) as f64 / 2.0;
-    let mut taps = Vec::with_capacity(len);
-    for n in 0..len {
-        let x = n as f64 - m;
-        let sinc = if x == 0.0 {
-            1.0
-        } else {
-            let pix = std::f64::consts::PI * x;
-            (pix.sin()) / pix
-        };
-        let window = 0.54 - 0.46 * (2.0 * std::f64::consts::PI * n as f64 / (len - 1) as f64).cos();
-        let tap = 2.0 * cutoff * sinc * window;
-        taps.push(tap);
-    }
-    let sum: f64 = taps.iter().sum();
-    if sum != 0.0 {
-        for tap in &mut taps {
-            *tap /= sum;
+/// The modified Bessel function of the first kind, order 0 (its series).
+fn bessel_i0(x: f64) -> f64 {
+    let mut sum = 1.0;
+    let mut term = 1.0;
+    let half_x = x / 2.0;
+    for k in 1..50 {
+        term *= (half_x / k as f64).powi(2);
+        sum += term;
+        if term < sum * 1e-12 {
+            break;
         }
     }
-    taps
+    sum
+}
+
+/// Resample a whole buffer at once — a recording, a prompt — with the
+/// stream's delay taken out and its tail flushed: the output starts with the
+/// input's first sample and lasts as long. Audio that arrives in pieces goes
+/// through one [`Resampler`] kept for the stream instead.
+pub fn resample_all(
+    input: &[i16],
+    src_rate: u32,
+    dst_rate: u32,
+    channels: u16,
+) -> Result<Vec<i16>> {
+    let mut resampler = Resampler::new(src_rate, dst_rate, channels)?;
+    if !resampler.needs_resampling() {
+        return Ok(input.to_vec());
+    }
+    let ch = channels as usize;
+    if input.len() % ch != 0 {
+        return Err(ResamplerError::InvalidFormat(
+            "Input length must be multiple of channel count".to_string(),
+        ));
+    }
+    let (unit, step) = (resampler.unit, resampler.step);
+    // The first output centred exactly on the input's first sample (which
+    // follows `2 * half` frames of silence), and as many as the input's
+    // length calls for: the tail is flushed with silence after it.
+    resampler.position = 2 * resampler.half as u64 * unit;
+    let want = (input.len() as u64 / ch as u64 * unit).div_ceil(step) as usize;
+    let mut padded = input.to_vec();
+    padded.resize(input.len() + (resampler.half + 1) * ch, 0);
+    let out = resampler.resample(&padded)?;
+    Ok(out.into_iter().take(want * ch).collect())
 }
 
 /// Calculate the expected output length for a given input length
@@ -268,6 +317,34 @@ pub fn calculate_output_length(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::PI;
+
+    fn tone(freq: f64, rate: u32, seconds: f64, amplitude: f64) -> Vec<i16> {
+        (0..(rate as f64 * seconds) as usize)
+            .map(|n| (amplitude * (2.0 * PI * freq * n as f64 / rate as f64).sin()).round() as i16)
+            .collect()
+    }
+
+    fn rms(samples: impl Iterator<Item = f64>) -> f64 {
+        let (sum, n) = samples.fold((0.0, 0usize), |(s, n), x| (s + x * x, n + 1));
+        (sum / n.max(1) as f64).sqrt()
+    }
+
+    /// The output against the ideal tone at the output rate, delayed by the
+    /// resampler's delay: signal-to-error in dB, the start skipped.
+    fn snr_db(out: &[i16], freq: f64, amplitude: f64, src: u32, dst: u32, delay: usize) -> f64 {
+        let delay_s = delay as f64 / src as f64;
+        let skip = (2.0 * delay_s * dst as f64) as usize + 8;
+        let ideal =
+            |n: usize| amplitude * (2.0 * PI * freq * (n as f64 / dst as f64 - delay_s)).sin();
+        let error = rms(out
+            .iter()
+            .enumerate()
+            .skip(skip)
+            .map(|(n, &y)| y as f64 - ideal(n)));
+        let signal = rms((skip..out.len()).map(ideal));
+        20.0 * (signal / error).log10()
+    }
 
     #[test]
     fn test_resampler_create() {
@@ -276,12 +353,15 @@ mod tests {
         assert_eq!(resampler.dst_rate(), 16000);
         assert_eq!(resampler.channels(), 1);
         assert!(resampler.needs_resampling());
+        assert!(Resampler::new(0, 8000, 1).is_err());
+        assert!(Resampler::new(8000, 16000, 3).is_err());
     }
 
     #[test]
     fn test_resampler_no_resampling() {
         let mut resampler = Resampler::new(48000, 48000, 1).unwrap();
         assert!(!resampler.needs_resampling());
+        assert_eq!(resampler.delay_frames(), 0);
 
         let input = vec![100i16, 200, 300, 400];
         let output = resampler.resample(&input).unwrap();
@@ -289,158 +369,134 @@ mod tests {
     }
 
     #[test]
-    fn test_resampler_upsample_2x() {
-        let mut resampler = Resampler::new(8000, 16000, 1).unwrap();
-
-        // Input: 4 samples at 8kHz
-        let input = vec![0i16, 100, 200, 100];
-
-        // Output should be ~8 samples at 16kHz (2x upsampling)
-        let output = resampler.resample(&input).unwrap();
-
-        // Check output length is approximately 2x input
-        assert!(output.len() >= 7 && output.len() <= 9);
-
-        // First sample should be close to first input
-        assert!((output[0] - input[0]).abs() < 10);
-    }
-
-    #[test]
-    fn test_resampler_downsample_2x() {
-        let mut resampler = Resampler::new(16000, 8000, 1).unwrap();
-
-        // Input: 8 samples at 16kHz
-        let input = vec![0i16, 50, 100, 150, 200, 150, 100, 50];
-
-        // Output should be ~4 samples at 8kHz (2x downsampling)
-        let output = resampler.resample(&input).unwrap();
-
-        // Check output length is approximately half input
-        assert!(output.len() >= 3 && output.len() <= 5);
-    }
-
-    #[test]
-    fn test_resampler_8k_to_48k() {
-        let mut resampler = Resampler::new(8000, 48000, 1).unwrap();
-
-        // Input: 80 samples (10ms at 8kHz)
-        let input = vec![1000i16; 80];
-
-        // Output should be 480 samples (10ms at 48kHz)
-        let output = resampler.resample(&input).unwrap();
-
-        // Check output length (should be 6x input, approximately)
-        assert!(output.len() >= 470 && output.len() <= 490);
-
-        // All samples should be close to 1000
-        for &sample in &output {
-            assert!((sample - 1000).abs() < 50);
+    fn a_frame_in_gives_the_frame_out_at_an_integer_ratio() {
+        // 20 ms frames, as a call hands them over.
+        let mut up = Resampler::new(8000, 16000, 1).unwrap();
+        let mut down = Resampler::new(48000, 8000, 1).unwrap();
+        for _ in 0..10 {
+            assert_eq!(up.resample(&[1000; 160]).unwrap().len(), 320);
+            assert_eq!(down.resample(&[1000; 960]).unwrap().len(), 160);
         }
     }
 
     #[test]
-    fn test_resampler_48k_to_8k() {
-        let mut resampler = Resampler::new(48000, 8000, 1).unwrap();
+    fn audio_handed_over_in_frames_is_resampled_as_if_whole() {
+        // The linear interpolation this replaced stepped at every frame:
+        // a buzz at 50 Hz under a 20 ms-framed stream.
+        for (src, dst) in [(8000, 16000), (16000, 8000), (22050, 8000), (8000, 48000)] {
+            let input = tone(440.0, src, 0.5, 8000.0);
+            let whole = Resampler::new(src, dst, 1)
+                .unwrap()
+                .resample(&input)
+                .unwrap();
+            let mut framed = Resampler::new(src, dst, 1).unwrap();
+            let chunked: Vec<i16> = input
+                .chunks(src as usize / 50)
+                .flat_map(|c| framed.resample(c).unwrap())
+                .collect();
+            assert_eq!(whole, chunked, "{src} -> {dst}");
+        }
+    }
 
-        // Input: 480 samples (10ms at 48kHz)
-        let input = vec![1000i16; 480];
+    #[test]
+    fn a_tone_upsampled_is_clean() {
+        let resampler = Resampler::new(8000, 16000, 1).unwrap();
+        let delay = resampler.delay_frames();
+        let mut resampler = resampler;
+        let input = tone(1000.0, 8000, 1.0, 10000.0);
+        let out: Vec<i16> = input
+            .chunks(160)
+            .flat_map(|c| resampler.resample(c).unwrap())
+            .collect();
+        let snr = snr_db(&out, 1000.0, 10000.0, 8000, 16000, delay);
+        assert!(snr > 60.0, "8 kHz -> 16 kHz, 1 kHz tone: {snr:.1} dB");
+    }
 
-        // Output should be 80 samples (10ms at 8kHz)
-        let output = resampler.resample(&input).unwrap();
+    #[test]
+    fn a_tone_downsampled_is_clean() {
+        for (src, dst) in [(16000, 8000), (48000, 8000), (22050, 8000), (48000, 16000)] {
+            let resampler = Resampler::new(src, dst, 1).unwrap();
+            let delay = resampler.delay_frames();
+            let mut resampler = resampler;
+            let out = resampler
+                .resample(&tone(1000.0, src, 1.0, 10000.0))
+                .unwrap();
+            let snr = snr_db(&out, 1000.0, 10000.0, src, dst, delay);
+            assert!(snr > 55.0, "{src} -> {dst}, 1 kHz tone: {snr:.1} dB");
+        }
+    }
 
-        // Check output length (should be input/6, approximately)
-        assert!(output.len() >= 75 && output.len() <= 85);
+    #[test]
+    fn what_the_lower_rate_cannot_carry_is_removed() {
+        // 6 kHz at 16 kHz has no place at 8 kHz: a resampler that passed it
+        // would fold it down to 2 kHz.
+        let mut resampler = Resampler::new(16000, 8000, 1).unwrap();
+        let out = resampler
+            .resample(&tone(6000.0, 16000, 1.0, 10000.0))
+            .unwrap();
+        let level = rms(out.iter().skip(200).map(|&y| y as f64));
+        let input_level = 10000.0 / 2f64.sqrt();
+        let db = 20.0 * (level / input_level).log10();
+        assert!(db < -50.0, "an alias at {db:.1} dB");
+    }
 
-        // When downsampling with FIR filter, first few samples are affected by
-        // startup transient (filter ring buffer initializes with zeros).
-        // Skip first 5 samples and check the rest are close to 1000.
-        for &sample in output.iter().skip(5) {
-            assert!((sample - 1000).abs() < 50);
+    #[test]
+    fn a_level_is_kept() {
+        let mut resampler = Resampler::new(8000, 48000, 1).unwrap();
+        let skip = 2 * resampler.delay_frames() * 6;
+        let output = resampler.resample(&[1000i16; 800]).unwrap();
+        assert_eq!(output.len(), 4800);
+        for &sample in output.iter().skip(skip) {
+            assert!((sample - 1000).abs() <= 1, "{sample}");
         }
     }
 
     #[test]
     fn test_resampler_stereo() {
         let mut resampler = Resampler::new(8000, 16000, 2).unwrap();
-
-        // Input: 4 frames (8 samples, 2 channels interleaved)
-        let input = vec![100i16, 200, 150, 250, 200, 300, 250, 350];
-
+        let left = tone(500.0, 8000, 0.2, 8000.0);
+        let input: Vec<i16> = left.iter().flat_map(|&l| [l, -l]).collect();
         let output = resampler.resample(&input).unwrap();
-
-        // Output should have even length (stereo)
-        assert_eq!(output.len() % 2, 0);
-
-        // Should be approximately 2x length
-        assert!(output.len() >= 14 && output.len() <= 18);
+        assert_eq!(output.len(), 2 * 2 * left.len());
+        for pair in output.chunks(2) {
+            assert!((pair[0] as i32 + pair[1] as i32).abs() <= 1, "{pair:?}");
+        }
     }
 
     #[test]
     fn test_resampler_reset() {
         let mut resampler = Resampler::new(8000, 16000, 1).unwrap();
-
-        let input = vec![100i16, 200, 300];
-        let _ = resampler.resample(&input).unwrap();
-
-        // Reset should clear state
+        let first = resampler
+            .resample(&tone(1000.0, 8000, 0.1, 8000.0))
+            .unwrap();
         resampler.reset();
-        assert_eq!(resampler.position, 0.0);
+        let again = resampler
+            .resample(&tone(1000.0, 8000, 0.1, 8000.0))
+            .unwrap();
+        assert_eq!(first, again, "a reset starts a new stream");
     }
 
     #[test]
-    fn test_resampler_streaming_consistency() {
-        let input = vec![1000i16; 480];
-
-        let mut full_resampler = Resampler::new(48000, 8000, 1).unwrap();
-        let full_output = full_resampler.resample(&input).unwrap();
-
-        let mut chunked_resampler = Resampler::new(48000, 8000, 1).unwrap();
-        let first = chunked_resampler.resample(&input[..240]).unwrap();
-        let second = chunked_resampler.resample(&input[240..]).unwrap();
-
-        let mut combined = Vec::new();
-        combined.extend(first);
-        combined.extend(second);
-
-        assert_eq!(combined, full_output);
+    fn a_whole_buffer_comes_out_aligned_and_complete() {
+        for (src, dst) in [(22050, 8000), (8000, 16000), (48000, 8000), (16000, 8000)] {
+            let input = tone(500.0, src, 0.3, 8000.0);
+            let out = resample_all(&input, src, dst, 1).unwrap();
+            let want = calculate_output_length(input.len(), src, dst, 1);
+            assert!(
+                out.len().abs_diff(want) <= 1,
+                "{src} -> {dst}: {} vs {want}",
+                out.len()
+            );
+            // No delay: the tone starts where it started.
+            let snr = snr_db(&out, 500.0, 8000.0, src, dst, 0);
+            assert!(snr > 50.0, "{src} -> {dst}: {snr:.1} dB");
+        }
     }
 
     #[test]
     fn test_calculate_output_length() {
-        // 80 samples at 8kHz -> 480 samples at 48kHz (6x)
-        let output_len = calculate_output_length(80, 8000, 48000, 1);
-        assert!(output_len >= 470 && output_len <= 490);
-
-        // 480 samples at 48kHz -> 80 samples at 8kHz (1/6x)
-        let output_len = calculate_output_length(480, 48000, 8000, 1);
-        assert!(output_len >= 75 && output_len <= 85);
-    }
-
-    #[test]
-    fn test_calculate_output_length_invalid() {
-        assert_eq!(calculate_output_length(10, 0, 8000, 1), 0);
-        assert_eq!(calculate_output_length(10, 48000, 0, 1), 0);
-        assert_eq!(calculate_output_length(10, 48000, 8000, 0), 0);
-    }
-
-    #[test]
-    fn test_resampler_invalid_sample_rate() {
-        assert!(Resampler::new(0, 48000, 1).is_err());
-        assert!(Resampler::new(8000, 0, 1).is_err());
-    }
-
-    #[test]
-    fn test_resampler_invalid_channels() {
-        assert!(Resampler::new(8000, 48000, 0).is_err());
-        assert!(Resampler::new(8000, 48000, 3).is_err());
-    }
-
-    #[test]
-    fn test_resampler_invalid_input() {
-        let mut resampler = Resampler::new(8000, 48000, 2).unwrap();
-
-        // Odd number of samples for stereo should fail
-        let input = vec![100i16, 200, 300];
-        assert!(resampler.resample(&input).is_err());
+        assert_eq!(calculate_output_length(160, 8000, 16000, 1), 320);
+        assert_eq!(calculate_output_length(960, 48000, 8000, 1), 160);
+        assert_eq!(calculate_output_length(320, 8000, 16000, 2), 640);
     }
 }

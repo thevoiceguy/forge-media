@@ -219,7 +219,7 @@ impl OpenAIConnector {
             }
         });
 
-        ws.send(Message::Text(msg.to_string()))
+        ws.send(Message::Text(msg.to_string().into()))
             .await
             .map_err(|e: tungstenite::Error| {
                 AIStreamError::Connection(format!("Failed to send DTMF event: {}", e))
@@ -230,7 +230,7 @@ impl OpenAIConnector {
             "type": "response.create"
         });
 
-        ws.send(Message::Text(response_msg.to_string()))
+        ws.send(Message::Text(response_msg.to_string().into()))
             .await
             .map_err(|e: tungstenite::Error| {
                 AIStreamError::Connection(format!("Failed to trigger AI response: {}", e))
@@ -360,7 +360,7 @@ impl AIConnector for OpenAIConnector {
             "audio": audio_b64
         });
 
-        ws.send(Message::Text(msg.to_string()))
+        ws.send(Message::Text(msg.to_string().into()))
             .await
             .map_err(|e: tungstenite::Error| {
                 AIStreamError::Connection(format!("Failed to send audio: {}", e))
@@ -418,7 +418,7 @@ impl AIConnector for OpenAIConnector {
             }
         });
 
-        ws.send(Message::Text(msg.to_string()))
+        ws.send(Message::Text(msg.to_string().into()))
             .await
             .map_err(|e: tungstenite::Error| {
                 AIStreamError::Connection(format!("Failed to send function response: {}", e))
@@ -438,7 +438,7 @@ impl AIConnector for OpenAIConnector {
             "type": "response.cancel"
         });
 
-        ws.send(Message::Text(msg.to_string()))
+        ws.send(Message::Text(msg.to_string().into()))
             .await
             .map_err(|e: tungstenite::Error| {
                 AIStreamError::Connection(format!("Failed to send interrupt: {}", e))
@@ -483,7 +483,7 @@ impl AIConnector for OpenAIConnector {
                 "session": session,
             });
 
-            ws.send(Message::Text(msg.to_string()))
+            ws.send(Message::Text(msg.to_string().into()))
                 .await
                 .map_err(|e: tungstenite::Error| {
                     AIStreamError::Connection(format!("Failed to update session config: {}", e))

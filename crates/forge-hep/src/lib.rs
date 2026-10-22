@@ -24,7 +24,9 @@
 //! [`ForgeHepEmitter`] holds deployment-wide config (capture ID,
 //! optional shared password) and forwards [`hep_rs::HepPacket`]s
 //! through the supplied sink. Per-call code passes the correlation
-//! ID (typically the SIP Call-ID) at the emit call site.
+//! ID (typically the SIP Call-ID) at the emit call site; forge-engine
+//! passes `MediaSession::hep_correlation_id()`, which the embedder sets
+//! to the SIP Call-ID (falling back to the session's call id).
 //!
 //! Without an emitter installed, [`forge_hep()`] returns `None` —
 //! the recommended `if let Some(...)` guard at hook sites is a

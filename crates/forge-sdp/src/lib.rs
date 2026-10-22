@@ -53,8 +53,9 @@ pub use ice::{IceAttributesExt, IceCandidateParams, MediaIceAttributesExt};
 // Re-export DTLS attribute helpers
 pub use dtls::{DtlsAttributesExt, DtlsSetup, MediaDtlsAttributesExt};
 pub use video::{
-    active_video, answer_direction, answer_video, choose_video_codec, direction_of, reject_section,
-    H264Fmtp, RtcpFeedbackAttr, VideoAttributesExt,
+    active_video, answer_direction, answer_video, choose_video_codec, contents, direction_of,
+    is_slides, label, reject_section, set_content, set_label, video_sections, Content, H264Fmtp,
+    RtcpFeedbackAttr, VideoAttributesExt, VideoSections,
 };
 
 /// Forge-specific SDP error types

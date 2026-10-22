@@ -288,9 +288,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.16.3"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ec6fb3fe69024a75fa7e1bfb48aa6cf59706a101658ea01bfd33b2b248a038f"
+checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -298,14 +298,15 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.40.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f50037ee5e1e41e7b8f9d161680a725bd1626cb6f8c7e901f91f942850852fe7"
+checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
 dependencies = [
  "cc",
  "cmake",
  "dunce",
  "fs_extra",
+ "pkg-config",
 ]
 
 [[package]]
@@ -502,6 +503,24 @@ dependencies = [
  "shlex",
  "syn 2.0.119",
  "which 4.4.2",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.70.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
+dependencies = [
+ "bitflags 2.11.1",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.10.5",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1363,7 +1382,7 @@ version = "5.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26ecdc636a02003406cc821aa9d703c888a966a3fd9bbdae9f7cf27d71720147"
 dependencies = [
- "bindgen",
+ "bindgen 0.68.1",
  "pkg-config",
 ]
 
@@ -1488,6 +1507,20 @@ name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+
+[[package]]
+name = "ffmpeg-sys-next"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9e9c75ebd4463de9d8998fb134ba26347fe5faee62fabf0a4b4d41bd500b4ad"
+dependencies = [
+ "bindgen 0.70.1",
+ "cc",
+ "libc",
+ "num_cpus",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "filetime"
@@ -1616,6 +1649,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-bfcp"
+version = "0.1.1"
+dependencies = [
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "forge-codecs"
 version = "0.2.0"
 dependencies = [
@@ -1629,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference"
-version = "0.4.0"
+version = "0.14.1"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1637,9 +1678,13 @@ dependencies = [
  "forge-engine",
  "forge-mixer",
  "forge-recorder",
+ "forge-rtp",
+ "forge-sdp",
+ "forge-video",
  "hound",
  "metrics",
  "parking_lot",
+ "rand 0.10.2",
  "serde",
  "tempfile",
  "thiserror 2.0.20",
@@ -1675,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "forge-engine"
-version = "0.5.1"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1690,7 +1735,9 @@ dependencies = [
  "forge-hep",
  "forge-injection",
  "forge-kernel",
+ "forge-mixer",
  "forge-recorder",
+ "forge-resampler",
  "forge-rtp",
  "forge-transcoder",
  "forge-vad",
@@ -1815,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mixer"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1826,6 +1873,14 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "forge-mp4"
+version = "0.1.1"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1855,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.4.0"
+version = "0.7.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1881,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "forge-sdp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1889,7 +1944,7 @@ dependencies = [
  "forge-ice",
  "forge-rtp",
  "rand 0.10.2",
- "sip-sdp 0.3.1 (git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.03)",
+ "sip-sdp 0.3.2 (git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22)",
  "smol_str",
  "thiserror 2.0.20",
 ]
@@ -1907,7 +1962,7 @@ dependencies = [
  "serde_json",
  "sip-core",
  "sip-parse",
- "sip-sdp 0.3.1",
+ "sip-sdp 0.3.2",
  "sip-transport",
  "sip-uas",
  "thiserror 2.0.20",
@@ -1995,7 +2050,7 @@ dependencies = [
 
 [[package]]
 name = "forge-video"
-version = "0.1.0"
+version = "0.6.1"
 dependencies = [
  "bytes",
  "forge-core",
@@ -2007,15 +2062,16 @@ dependencies = [
 
 [[package]]
 name = "forge-video-codecs"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
- "bindgen",
+ "bindgen 0.68.1",
  "bytes",
  "dav1d",
  "env-libvpx-sys",
  "forge-core",
  "forge-rtp",
  "forge-video",
+ "forge-video-hw",
  "openh264",
  "pkg-config",
  "thiserror 2.0.20",
@@ -2023,8 +2079,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-video-hw"
+version = "0.2.1"
+dependencies = [
+ "bytes",
+ "ffmpeg-sys-next",
+ "forge-conference",
+ "forge-core",
+ "forge-mixer",
+ "forge-rtp",
+ "forge-video",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "forge-webm"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "forge-webrtc"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -3173,6 +3254,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
+]
+
+[[package]]
 name = "num_enum"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4034,9 +4125,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.36"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c665f33d38cea657d9614f766881e4d510e0eda4239891eea56b4cadcf01801b"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -4079,9 +4170,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -4387,7 +4478,7 @@ dependencies = [
 
 [[package]]
 name = "sip-core"
-version = "0.7.7"
+version = "0.7.8"
 dependencies = [
  "bytes",
  "httpdate",
@@ -4436,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "sip-parse"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "httpdate",
@@ -4461,7 +4552,7 @@ dependencies = [
 
 [[package]]
 name = "sip-sdp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "nom 7.1.3",
  "smol_str",
@@ -4469,8 +4560,8 @@ dependencies = [
 
 [[package]]
 name = "sip-sdp"
-version = "0.3.1"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.03#0bed4fd3d9a3c99da4860effd61402a30f0c4842"
+version = "0.3.2"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
 dependencies = [
  "nom 7.1.3",
  "smol_str",
@@ -4478,7 +4569,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transaction"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4535,7 +4626,7 @@ dependencies = [
  "sip-core",
  "sip-dialog",
  "sip-parse",
- "sip-sdp 0.3.1",
+ "sip-sdp 0.3.2",
  "sip-transaction",
  "sip-transport",
  "smol_str",

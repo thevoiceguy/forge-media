@@ -2,6 +2,14 @@
 //!
 //! This module provides audio injection capabilities for media sessions,
 //! allowing audio sources (files, TTS, tones) to be played into active calls.
+//!
+//! A playback reads its source a 20 ms frame at a time and hands each frame
+//! to the session's scheduled playout, which encodes it in the target leg's
+//! negotiated codec (resampling from the source's rate), protects it with
+//! the leg's SRTP and sends it on the leg's own RTP stream. A looped
+//! playback starts its source again at the end (hold music); a `Replace`
+//! playback holds back the other leg's relayed audio toward its target
+//! while it runs, so it is heard alone.
 
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -12,7 +20,7 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::{mpsc, oneshot, RwLock};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Unique identifier for a playback session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +59,30 @@ pub enum MixMode {
     Replace,
     /// Lower existing audio volume during injection (ducking)
     Duck,
+}
+
+/// How a playback runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackOptions {
+    pub target: AudioTarget,
+    pub mix_mode: MixMode,
+    /// Start the source again at its end, until stopped.
+    pub looped: bool,
+}
+
+impl PlaybackOptions {
+    pub fn new(target: AudioTarget, mix_mode: MixMode) -> Self {
+        Self {
+            target,
+            mix_mode,
+            looped: false,
+        }
+    }
+
+    pub fn looped(mut self) -> Self {
+        self.looped = true;
+        self
+    }
 }
 
 /// Playback completion status
@@ -110,17 +142,10 @@ struct PlaybackInternal {
     id: PlaybackId,
     call_id: CallId,
     source: Box<dyn AudioSource>,
-    target: AudioTarget,
-    mix_mode: MixMode,
+    options: PlaybackOptions,
     active: AtomicBool,
     stop_rx: mpsc::UnboundedReceiver<()>,
     completion_tx: Option<oneshot::Sender<PlaybackStatus>>,
-    /// RTP sequence number (increments per packet)
-    rtp_seq: u16,
-    /// RTP timestamp (increments by samples per packet)
-    rtp_timestamp: u32,
-    /// RTP SSRC (randomly generated per playback)
-    rtp_ssrc: u32,
 }
 
 /// Manages active audio playbacks for sessions
@@ -160,6 +185,18 @@ impl PlaybackManager {
         target: AudioTarget,
         mix_mode: MixMode,
     ) -> Result<PlaybackHandle> {
+        self.start_playback_with(call_id, source, PlaybackOptions::new(target, mix_mode))
+            .await
+    }
+
+    /// Start a new playback with its options (a looped one plays until
+    /// stopped).
+    pub async fn start_playback_with(
+        &self,
+        call_id: CallId,
+        source: Box<dyn AudioSource>,
+        options: PlaybackOptions,
+    ) -> Result<PlaybackHandle> {
         let id = PlaybackId::new();
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         let (completion_tx, completion_rx) = oneshot::channel();
@@ -167,38 +204,27 @@ impl PlaybackManager {
         info!(
             call_id = %call_id,
             playback_id = %id,
-            target = ?target,
-            mix_mode = ?mix_mode,
+            target = ?options.target,
+            mix_mode = ?options.mix_mode,
+            looped = options.looped,
             "Starting audio playback"
         );
-
-        // Generate random RTP parameters for this playback
-        let rtp_ssrc = rand::random::<u32>();
-        let rtp_seq = rand::random::<u16>();
-        let rtp_timestamp = rand::random::<u32>();
 
         let internal = PlaybackInternal {
             id,
             call_id: call_id.clone(),
             source,
-            target,
-            mix_mode,
+            options,
             active: AtomicBool::new(true),
             stop_rx,
             completion_tx: Some(completion_tx),
-            rtp_seq,
-            rtp_timestamp,
-            rtp_ssrc,
         };
 
         let internal = Arc::new(RwLock::new(internal));
         self.playback_state.insert(id, Arc::clone(&internal));
 
         // Add to call's playback list
-        self.playbacks
-            .entry(call_id.clone())
-            .or_insert_with(Vec::new)
-            .push(id);
+        self.playbacks.entry(call_id.clone()).or_default().push(id);
 
         let handle = PlaybackHandle {
             id,
@@ -247,17 +273,58 @@ impl PlaybackManager {
             .unwrap_or(0)
     }
 
-    /// Run the playback loop
+    /// The session a playback plays into, if it is still there.
+    fn session(&self, call_id: &CallId) -> Option<Arc<crate::session::MediaSession>> {
+        self.session_manager.as_ref()?.get_session(call_id)
+    }
+
+    /// Run the playback loop: a frame every 20 ms into the session's
+    /// scheduled playout.
     async fn run_playback(&self, internal: Arc<RwLock<PlaybackInternal>>) -> Result<()> {
-        let (id, call_id) = {
+        use crate::media_bridge::{MediaTarget, PlayoutMode};
+        use crate::session::{ParticipantLabel, ScheduledPlayoutSource};
+
+        let (id, call_id, options, sample_rate, channels) = {
             let guard = internal.read().await;
-            (guard.id, guard.call_id.clone())
+            (
+                guard.id,
+                guard.call_id.clone(),
+                guard.options,
+                guard.source.sample_rate().max(1),
+                guard.source.channels().max(1),
+            )
+        };
+        let media_target = match options.target {
+            AudioTarget::ParticipantA => MediaTarget::A,
+            AudioTarget::ParticipantB => MediaTarget::B,
+            AudioTarget::Both => MediaTarget::Both,
+        };
+        let legs: Vec<ParticipantLabel> = [ParticipantLabel::A, ParticipantLabel::B]
+            .into_iter()
+            .filter(|leg| media_target.includes(*leg))
+            .collect();
+        let tag = id.to_string();
+
+        info!(playback_id = %id, call_id = %call_id, sample_rate, channels, "Playback task started");
+
+        // Heard alone: the other leg's relayed audio is held back.
+        let suppressed = if options.mix_mode == MixMode::Replace {
+            self.session(&call_id).map(|session| {
+                for leg in &legs {
+                    session.suppress_relay_to(*leg);
+                }
+                session
+            })
+        } else {
+            None
         };
 
-        info!(playback_id = %id, call_id = %call_id, "Playback task started");
+        let frame_len = (sample_rate as usize / 50).max(1) * channels as usize;
+        let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(20));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let status = loop {
-            // Check if stopped
+            ticker.tick().await;
             {
                 let mut guard = internal.write().await;
                 if let Ok(()) = guard.stop_rx.try_recv() {
@@ -270,54 +337,86 @@ impl PlaybackManager {
                 }
             }
 
-            // Read next frame from source
-            let frame_result = {
+            let frame = {
                 let mut guard = internal.write().await;
-                guard.source.read_frame(160) // 20ms at 8kHz (standard for G.711)
+                guard.source.read_frame(frame_len)
             };
-
-            match frame_result {
-                Ok(frame) => {
-                    debug!(
-                        playback_id = %id,
-                        samples = frame.len(),
-                        "Read audio frame"
-                    );
-
-                    // Send RTP packet(s) for this audio frame
-                    if let Err(e) = self.send_audio_frame(&internal, &frame).await {
-                        error!(playback_id = %id, error = %e, "Failed to send RTP packet");
-                        // Continue playback despite RTP errors
-                    }
-
-                    // Simulate playback timing (20ms per frame)
-                    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-                }
-                Err(e) => {
-                    // Check if source is finished
-                    let is_finished = {
-                        let guard = internal.read().await;
-                        guard.source.is_finished()
-                    };
-
-                    if is_finished {
-                        // Send silence frames to flush the receiver's jitter buffer.
-                        // Without these, the phone applies PLC (Packet Loss Concealment)
-                        // which fades out the last audio instead of stopping cleanly.
-                        let silence_frame = vec![0i16; 160]; // 20ms silence
-                        for _ in 0..3 {
-                            let _ = self.send_audio_frame(&internal, &silence_frame).await;
-                            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            match frame {
+                Ok(frame) if !frame.is_empty() => {
+                    let mono = downmix(&frame, channels);
+                    match self.session(&call_id) {
+                        Some(session) => {
+                            if let Err(e) = session
+                                .schedule_audio_playout(
+                                    media_target,
+                                    sample_rate,
+                                    &mono,
+                                    Some(tag.clone()),
+                                    PlayoutMode::Append,
+                                    ScheduledPlayoutSource::Injection,
+                                )
+                                .await
+                            {
+                                warn!(playback_id = %id, error = %e, "Failed to schedule a playback frame");
+                            }
                         }
+                        None if self.session_manager.is_some() => {
+                            info!(playback_id = %id, "The session is gone; playback ends");
+                            break PlaybackStatus::Stopped;
+                        }
+                        None => {}
+                    }
+                }
+                result => {
+                    let finished = {
+                        let guard = internal.read().await;
+                        guard.source.is_finished() || result.is_ok()
+                    };
+                    if finished && options.looped {
+                        let reset = {
+                            let mut guard = internal.write().await;
+                            guard.source.reset()
+                        };
+                        match reset {
+                            Ok(()) => {
+                                debug!(playback_id = %id, "Playback looped");
+                                continue;
+                            }
+                            Err(e) => {
+                                error!(playback_id = %id, error = %e, "A looped source cannot start again");
+                                break PlaybackStatus::Failed(e.to_string());
+                            }
+                        }
+                    }
+                    if finished {
+                        // What is queued is still being sent: let it go
+                        // before the playback reports it is done.
+                        tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
                         info!(playback_id = %id, "Playback completed");
                         break PlaybackStatus::Completed;
-                    } else {
-                        error!(playback_id = %id, error = %e, "Failed to read audio frame");
-                        break PlaybackStatus::Failed(e.to_string());
                     }
+                    let e = match result {
+                        Err(e) => e.to_string(),
+                        Ok(_) => "empty frame".to_string(),
+                    };
+                    error!(playback_id = %id, error = %e, "Failed to read audio frame");
+                    break PlaybackStatus::Failed(e);
                 }
             }
         };
+
+        if matches!(status, PlaybackStatus::Stopped) {
+            if let Some(session) = self.session(&call_id) {
+                session
+                    .clear_scheduled_playout(Some(media_target), Some(&tag))
+                    .await;
+            }
+        }
+        if let Some(session) = suppressed {
+            for leg in &legs {
+                session.release_relay_to(*leg);
+            }
+        }
 
         // Extract completion_tx from internal state before cleanup
         let completion_tx = {
@@ -333,7 +432,7 @@ impl PlaybackManager {
 
         // Send completion status to waiting handle
         if let Some(tx) = completion_tx {
-            if let Err(_) = tx.send(status.clone()) {
+            if tx.send(status.clone()).is_err() {
                 debug!(playback_id = %id, "Failed to send completion status - receiver dropped");
             }
         }
@@ -342,187 +441,16 @@ impl PlaybackManager {
 
         Ok(())
     }
-
-    /// Send an audio frame as RTP packet(s)
-    async fn send_audio_frame(
-        &self,
-        internal: &Arc<RwLock<PlaybackInternal>>,
-        frame: &[i16],
-    ) -> Result<()> {
-        use bytes::Bytes;
-
-        debug!("send_audio_frame called, frame samples: {}", frame.len());
-
-        // Get playback state
-        let (call_id, target, rtp_seq, rtp_timestamp, rtp_ssrc) = {
-            let guard = internal.read().await;
-            (
-                guard.call_id.clone(),
-                guard.target,
-                guard.rtp_seq,
-                guard.rtp_timestamp,
-                guard.rtp_ssrc,
-            )
-        };
-
-        debug!(
-            call_id = %call_id,
-            target = ?target,
-            rtp_seq = rtp_seq,
-            rtp_timestamp = rtp_timestamp,
-            rtp_ssrc = rtp_ssrc,
-            "Got playback state"
-        );
-
-        // Get session manager
-        let session_manager = self
-            .session_manager
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Session manager not set"))?;
-
-        debug!("Session manager is set");
-
-        // Get session
-        let session = session_manager
-            .get_session(&call_id)
-            .ok_or_else(|| anyhow::anyhow!("Session not found for call {}", call_id.0))?;
-
-        debug!(call_id = %call_id, "Got session");
-
-        // Convert i16 PCM samples to u8 G.711 µ-law (payload type 0)
-        // For simplicity, assume the audio source provides 8kHz mono PCM
-        // In production, this should handle sample rate conversion and proper encoding
-        let payload = pcm_to_ulaw(frame);
-
-        // Create RTP packet
-        // Payload type 0 = PCMU (G.711 µ-law)
-        let packet = forge_rtp::rtp::RtpPacket::build(
-            0,             // payload_type: PCMU
-            rtp_seq,       // sequence number
-            rtp_timestamp, // timestamp
-            rtp_ssrc,      // SSRC
-            Bytes::from(payload),
-            false, // marker: false for continuous audio
-        );
-
-        // Serialize to bytes
-        let packet_bytes = packet.to_bytes();
-
-        // Get RTP sockets from session
-        let sockets = session.sockets();
-
-        // Determine which participant(s) to send to based on target
-        let send_to_a = matches!(target, AudioTarget::ParticipantA | AudioTarget::Both);
-        let send_to_b = matches!(target, AudioTarget::ParticipantB | AudioTarget::Both);
-
-        // Get participant endpoints
-        let participant_a = session.participant_a();
-        let participant_b = session.participant_b();
-
-        let addr_a = if send_to_a {
-            participant_a.read().await.remote_addr
-        } else {
-            None
-        };
-
-        let addr_b = if send_to_b {
-            participant_b.read().await.remote_addr
-        } else {
-            None
-        };
-
-        debug!(
-            addr_a = ?addr_a,
-            addr_b = ?addr_b,
-            packet_size = packet_bytes.len(),
-            "Prepared to send RTP packets"
-        );
-
-        // Send RTP packets to target participant(s)
-        if let Some(addr) = addr_a {
-            debug!("Sending RTP packet to participant A at {}", addr);
-            if let Err(e) = sockets.send_rtp_to(&packet_bytes, addr).await {
-                error!("Failed to send RTP to participant A at {}: {}", addr, e);
-            } else {
-                debug!("Successfully sent RTP to participant A at {}", addr);
-            }
-        } else {
-            debug!("No address for participant A, skipping send");
-        }
-
-        if let Some(addr) = addr_b {
-            debug!("Sending RTP packet to participant B at {}", addr);
-            if let Err(e) = sockets.send_rtp_to(&packet_bytes, addr).await {
-                error!("Failed to send RTP to participant B at {}: {}", addr, e);
-            } else {
-                debug!("Successfully sent RTP to participant B at {}", addr);
-            }
-        } else {
-            debug!("No address for participant B, skipping send");
-        }
-
-        // Update RTP state (increment seq and timestamp)
-        {
-            let mut guard = internal.write().await;
-            guard.rtp_seq = guard.rtp_seq.wrapping_add(1);
-            // Timestamp increments by number of samples at the codec sample rate
-            // For G.711 at 8kHz: 160 samples for 20ms
-            guard.rtp_timestamp = guard.rtp_timestamp.wrapping_add(frame.len() as u32);
-        }
-
-        debug!("RTP packet sent successfully");
-        Ok(())
-    }
 }
 
-/// Convert PCM i16 samples to G.711 µ-law encoding
-///
-/// This implements the ITU-T G.711 µ-law compression algorithm.
-/// Reference: ITU-T Recommendation G.711 (1988)
-fn pcm_to_ulaw(samples: &[i16]) -> Vec<u8> {
-    const BIAS: i16 = 0x84; // 132 in decimal
-    const CLIP: i16 = 32635;
-
+/// Interleaved samples as mono: the channels of each frame averaged.
+fn downmix(samples: &[i16], channels: u8) -> Vec<i16> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
     samples
-        .iter()
-        .map(|&sample| {
-            // Get sign and magnitude
-            let sign = if sample < 0 { 0x80 } else { 0x00 };
-            let mut magnitude = sample.abs().min(CLIP) as i16;
-
-            // Add bias
-            magnitude = magnitude + BIAS;
-
-            // Find segment (exponent) by finding the position of the highest set bit
-            let exponent = if magnitude < 256 {
-                0
-            } else if magnitude < 512 {
-                1
-            } else if magnitude < 1024 {
-                2
-            } else if magnitude < 2048 {
-                3
-            } else if magnitude < 4096 {
-                4
-            } else if magnitude < 8192 {
-                5
-            } else if magnitude < 16384 {
-                6
-            } else {
-                7
-            };
-
-            // Extract mantissa (4 bits after the segment bit)
-            let mantissa = if exponent == 0 {
-                (magnitude >> 4) & 0x0F
-            } else {
-                (magnitude >> (exponent + 3)) & 0x0F
-            };
-
-            // Combine sign, exponent, and mantissa, then invert all bits
-            let encoded = sign | (exponent << 4) | (mantissa as u8);
-            encoded ^ 0xFF
-        })
+        .chunks(channels as usize)
+        .map(|frame| (frame.iter().map(|&s| s as i32).sum::<i32>() / frame.len() as i32) as i16)
         .collect()
 }
 
@@ -568,6 +496,94 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         assert_eq!(manager.active_playback_count(&call_id), 0);
+    }
+
+    /// A source of `frames` frames that can start again.
+    struct Finite {
+        frames: usize,
+        read: usize,
+        resets: Arc<AtomicU64>,
+    }
+
+    impl AudioSource for Finite {
+        fn read_frame(&mut self, n: usize) -> forge_injection::Result<forge_core::AudioFrame> {
+            if self.read >= self.frames {
+                return Err(forge_injection::InjectionError::Internal("end".into()));
+            }
+            self.read += 1;
+            Ok(vec![100; n])
+        }
+        fn sample_rate(&self) -> u32 {
+            8000
+        }
+        fn channels(&self) -> u8 {
+            1
+        }
+        fn is_finished(&self) -> bool {
+            self.read >= self.frames
+        }
+        fn reset(&mut self) -> forge_injection::Result<()> {
+            self.read = 0;
+            self.resets.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_looped_playback_starts_its_source_again_until_stopped() {
+        let manager = PlaybackManager::new();
+        let call_id = CallId::generate();
+        let resets = Arc::new(AtomicU64::new(0));
+        let source = Box::new(Finite {
+            frames: 2,
+            read: 0,
+            resets: Arc::clone(&resets),
+        });
+        let handle = manager
+            .start_playback_with(
+                call_id.clone(),
+                source,
+                PlaybackOptions::new(AudioTarget::ParticipantA, MixMode::Replace).looped(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        assert!(
+            resets.load(Ordering::SeqCst) >= 2,
+            "the source never looped"
+        );
+        assert_eq!(manager.active_playback_count(&call_id), 1);
+        handle.stop().await.unwrap();
+        assert!(matches!(
+            handle.wait_completion().await.unwrap(),
+            PlaybackStatus::Stopped
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_playback_that_is_not_looped_completes() {
+        let manager = PlaybackManager::new();
+        let resets = Arc::new(AtomicU64::new(0));
+        let source = Box::new(Finite {
+            frames: 2,
+            read: 0,
+            resets: Arc::clone(&resets),
+        });
+        let handle = manager
+            .start_playback(CallId::generate(), source, AudioTarget::Both, MixMode::Mix)
+            .await
+            .unwrap();
+        assert!(matches!(
+            handle.wait_completion().await.unwrap(),
+            PlaybackStatus::Completed
+        ));
+        assert_eq!(resets.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stereo_is_averaged_to_mono() {
+        assert_eq!(downmix(&[100, 300, -200, 200], 2), vec![200, 0]);
+        assert_eq!(downmix(&[1, 2, 3], 1), vec![1, 2, 3]);
     }
 
     #[tokio::test]

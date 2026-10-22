@@ -5,9 +5,11 @@
 use thiserror::Error;
 
 mod mixer;
+pub mod supervision;
 
 pub use forge_core::AudioFormat;
 pub use mixer::{AudioMixer, MixerOptions, ParticipantId, ParticipantMetadata, ParticipantState};
+pub use supervision::{CallParty, SupervisionFrame, SupervisionMix, SupervisionMode, Voice};
 
 /// Mixer error types
 #[derive(Error, Debug)]

@@ -1,0 +1,28 @@
+[package]
+name = "forge-video-hw"
+version = "0.2.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GPU video for forge-video over FFmpeg's hardware device contexts: NVDEC decoders, NVENC encoders, a CUDA scaler, device-resident frames"
+
+[dependencies]
+forge-core = { path = "../forge-core" }
+forge-rtp = { path = "../forge-rtp" }
+forge-video = { path = "../forge-video" }
+
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Raw bindings, generated at build time against the FFmpeg the machine
+# has (pkg-config, or FFMPEG_DIR). avutil comes with them; avcodec for
+# the codecs, avfilter for scale_cuda.
+ffmpeg-sys-next = { version = "7.1", default-features = false, features = ["avcodec", "avfilter"] }
+
+[dev-dependencies]
+forge-conference = { path = "../forge-conference" }
+forge-mixer = { path = "../forge-mixer" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

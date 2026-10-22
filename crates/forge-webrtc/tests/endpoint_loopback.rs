@@ -2,52 +2,16 @@
 //! directions, DTLS in both roles, SRTP both ways, then a re-offer on the
 //! same transport. This is the contract the DSIP native endpoint relies on.
 
+mod common;
+
 use std::time::Duration;
 
 use bytes::Bytes;
+use common::*;
 use forge_webrtc::{
     ConnectionState, Direction, PeerConfig, PeerConnection, PeerEvent, SignalingState, WebRtcError,
 };
 use tokio::sync::mpsc;
-
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "forge_webrtc=debug,forge_ice=info".into()),
-        )
-        .with_test_writer()
-        .try_init();
-}
-
-/// Forward trickled candidates from `events` into `peer_tx` and report the
-/// first `Connected`/`Failed`; keep forwarding RTP afterwards.
-fn pump(
-    mut events: mpsc::Receiver<PeerEvent>,
-    name: &'static str,
-) -> (
-    mpsc::UnboundedReceiver<forge_webrtc::IceCandidate>,
-    mpsc::UnboundedReceiver<PeerEvent>,
-) {
-    let (cand_tx, cand_rx) = mpsc::unbounded_channel();
-    let (ev_tx, ev_rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        while let Some(ev) = events.recv().await {
-            match ev {
-                PeerEvent::LocalCandidate(c) => {
-                    let _ = cand_tx.send(c);
-                }
-                other => {
-                    if matches!(other, PeerEvent::Failed(_)) {
-                        eprintln!("{name}: {other:?}");
-                    }
-                    let _ = ev_tx.send(other);
-                }
-            }
-        }
-    });
-    (cand_rx, ev_rx)
-}
 
 async fn connect_pair() -> (
     PeerConnection,
@@ -55,69 +19,14 @@ async fn connect_pair() -> (
     mpsc::UnboundedReceiver<PeerEvent>,
     mpsc::UnboundedReceiver<PeerEvent>,
 ) {
-    let mut caller = PeerConnection::new(vec![]).await.unwrap();
-    let mut callee = PeerConnection::with_config(PeerConfig {
-        direction: Direction::SendRecv,
-        ..PeerConfig::default()
-    })
+    connect_pair_with(
+        PeerConfig::default(),
+        PeerConfig {
+            direction: Direction::SendRecv,
+            ..PeerConfig::default()
+        },
+    )
     .await
-    .unwrap();
-
-    let offer = caller.create_offer().await.unwrap();
-    assert!(offer.contains("a=setup:actpass"));
-    let (mut caller_cands, caller_events) = pump(caller.take_events().unwrap(), "caller");
-
-    callee.set_remote_offer(&offer).await.unwrap();
-    assert_eq!(callee.signaling_state(), SignalingState::HaveRemoteOffer);
-    let answer = callee.create_answer().await.unwrap();
-    assert!(answer.contains("a=setup:active"), "{answer}");
-    assert_eq!(callee.signaling_state(), SignalingState::Stable);
-    let (mut callee_cands, callee_events) = pump(callee.take_events().unwrap(), "callee");
-
-    caller.set_remote_answer(&answer).await.unwrap();
-    assert_eq!(caller.signaling_state(), SignalingState::Stable);
-
-    // Trickle until both are connected.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        tokio::select! {
-            Some(c) = caller_cands.recv() => callee.add_ice_candidate(c).await.unwrap(),
-            Some(c) = callee_cands.recv() => caller.add_ice_candidate(c).await.unwrap(),
-            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
-        }
-        if caller.get_state() == ConnectionState::Connected
-            && callee.get_state() == ConnectionState::Connected
-        {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "not connected: caller={:?} callee={:?}",
-            caller.get_state(),
-            callee.get_state()
-        );
-        assert_ne!(caller.get_state(), ConnectionState::Failed);
-        assert_ne!(callee.get_state(), ConnectionState::Failed);
-    }
-    (caller, callee, caller_events, callee_events)
-}
-
-async fn expect_rtp(
-    events: &mut mpsc::UnboundedReceiver<PeerEvent>,
-    payload: &[u8],
-) -> forge_rtp::RtpPacket {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let ev = tokio::time::timeout_at(deadline, events.recv())
-            .await
-            .expect("timed out waiting for RTP")
-            .expect("events closed");
-        if let PeerEvent::Rtp(pkt) = ev {
-            if pkt.payload.as_ref() == payload {
-                return pkt;
-            }
-        }
-    }
 }
 
 #[tokio::test]

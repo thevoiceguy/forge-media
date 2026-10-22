@@ -9,13 +9,32 @@
 //!
 //! [`Compositor`] is the trait every device implements; [`HostCompositor`]
 //! is the CPU reference. A device compositor must draw the same layouts
-//! within a PSNR tolerance (checked with [`crate::metrics::psnr_luma`]).
+//! within a PSNR tolerance (checked with [`crate::metrics::psnr_luma`]
+//! over the scenes in [`crate::parity`]). So that it can, the chrome is
+//! one piece of code for every compositor: [`tile_geometry`] says where
+//! the ring, the picture and the name band go, [`draw_chrome_under`]
+//! paints what lies under the picture and [`draw_band`] what lies over
+//! it — a device compositor paints those into host planes and uploads
+//! them, and scales and overlays only the pictures on the device.
 
 use crate::codec::CodecError;
 use crate::font;
 use crate::frame::{HostFrame, MediaDevice, Resolution, VideoFrame};
 use crate::layout::{Layout, Rect};
-use crate::scale;
+use crate::scale::{self, ScaleMode};
+
+/// What a tile shows: a person, or a shared screen.
+///
+/// A content tile is drawn plain — no border, no name band, no avatar,
+/// shrunk with a box filter so text survives — because it is a picture
+/// of a document, not of a participant, and every pixel of chrome on it
+/// is a pixel of the document lost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum TileKind {
+    #[default]
+    Camera,
+    Content,
+}
 
 /// One participant as the compositor sees it.
 #[derive(Debug, Clone)]
@@ -30,6 +49,9 @@ pub struct TileSource<'a> {
     pub frame: Option<&'a VideoFrame>,
     pub speaking: bool,
     pub muted: bool,
+    /// A camera (labelled, bordered, an avatar when there is no frame)
+    /// or shared content (the picture alone).
+    pub kind: TileKind,
 }
 
 /// Colours in Y/U/V, limited range.
@@ -132,68 +154,162 @@ impl HostCompositor {
 
     fn draw_tile(&mut self, src: &TileSource<'_>, frame: Option<&HostFrame>, rect: Rect) {
         let t = self.theme;
-        let border = t.border_px.min(rect.w / 8).min(rect.h / 8);
+        let g = tile_geometry(rect, src.kind, &t);
         let canvas = self.canvas_mut();
-        // Border ring: bright when speaking, tile colour otherwise.
-        if src.speaking {
-            scale::fill(
-                canvas,
-                rect,
-                t.speaking_border.0,
-                t.speaking_border.1,
-                t.speaking_border.2,
-            );
-        } else {
-            scale::fill(canvas, rect, t.tile.0, t.tile.1, t.tile.2);
+        let picture = frame.map(|f| f.resolution());
+        draw_chrome_under(canvas, src, &g, picture, &t);
+        if let Some(frame) = frame {
+            let r = g.picture(frame.resolution());
+            let mode = match src.kind {
+                TileKind::Camera => ScaleMode::Bilinear,
+                TileKind::Content => ScaleMode::Box,
+            };
+            scale::scale_into_with(canvas, r, frame, mode);
         }
-        let inner = rect.inset(border).even();
-        if inner.is_empty() {
-            return;
+        draw_band(canvas, src, &g, &t);
+    }
+}
+
+/// Where the parts of one tile go. The same numbers on every device:
+/// the host draws them, a device compositor uploads what it drew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileGeometry {
+    pub kind: TileKind,
+    /// The whole tile. For a camera the ring around `inner` is what
+    /// shows of it; a content tile has no ring and `inner` is `rect`.
+    pub rect: Rect,
+    /// The picture area: letterboxed picture or avatar for a camera,
+    /// the document for content.
+    pub inner: Rect,
+    /// The name band along the bottom of `inner`, when one fits (never
+    /// on content).
+    pub band: Option<Rect>,
+    /// The bitmap font scale of the label.
+    pub label_scale: u32,
+}
+
+impl TileGeometry {
+    /// Where a picture of `size` lands: the largest rectangle of its
+    /// aspect ratio in `inner`, centred.
+    pub fn picture(&self, size: Resolution) -> Rect {
+        scale::fit(self.inner, size.width, size.height)
+    }
+}
+
+/// The geometry of a tile of `kind` in `rect`.
+pub fn tile_geometry(rect: Rect, kind: TileKind, theme: &Theme) -> TileGeometry {
+    if kind == TileKind::Content {
+        return TileGeometry {
+            kind,
+            rect,
+            inner: rect,
+            band: None,
+            label_scale: 1,
+        };
+    }
+    let border = theme.border_px.min(rect.w / 8).min(rect.h / 8);
+    let inner = rect.inset(border).even();
+    let label_scale = (inner.h / 90).clamp(1, 4);
+    // Even height so the band reaches the tile's bottom edge exactly.
+    let band_h = ((font::text_height(label_scale) + 4 * label_scale).min(inner.h / 3) + 1) & !1;
+    let band = if inner.is_empty()
+        || band_h < font::text_height(1) + 2
+        || inner.w < font::text_width("A", 1) + 4
+    {
+        None
+    } else {
+        Some(Rect::new(inner.x, inner.y + inner.h - band_h, inner.w, band_h).even())
+    };
+    TileGeometry {
+        kind,
+        rect,
+        inner,
+        band,
+        label_scale,
+    }
+}
+
+/// Paint what lies under the picture: the ring (bright when speaking),
+/// the bars a letterboxed picture of `picture`'s size leaves in
+/// `inner`, or the avatar when there is no picture. Content gets the
+/// background where the document does not reach.
+pub fn draw_chrome_under(
+    dst: &mut HostFrame,
+    src: &TileSource<'_>,
+    g: &TileGeometry,
+    picture: Option<Resolution>,
+    t: &Theme,
+) {
+    if g.kind == TileKind::Content {
+        // The document, and nothing on top of it. Without a frame
+        // there is nothing to say either: the room falls back to
+        // its cameras before it draws an empty content tile, so
+        // this is only ever a tick's worth of background.
+        let covered = picture.map(|p| g.picture(p) == g.rect).unwrap_or(false);
+        if !covered {
+            scale::fill(dst, g.rect, t.background.0, t.background.1, t.background.2);
         }
-        match frame {
-            Some(frame) => scale::letterbox(canvas, inner, frame, t.bars),
-            None => {
-                scale::fill(canvas, inner, t.tile.0, t.tile.1, t.tile.2);
-                let avatar = Rect::new(inner.x, inner.y, inner.w, inner.h * 3 / 4);
-                let ini = font::initials(src.name);
-                let max_scale = (inner.h / 20).max(2);
-                font::draw_centered(canvas, avatar, &ini, max_scale, t.avatar_text);
+        return;
+    }
+    // Border ring: bright when speaking, tile colour otherwise.
+    let ring = if src.speaking {
+        t.speaking_border
+    } else {
+        t.tile
+    };
+    scale::fill(dst, g.rect, ring.0, ring.1, ring.2);
+    if g.inner.is_empty() {
+        return;
+    }
+    match picture {
+        Some(p) => {
+            if g.picture(p) != g.inner {
+                scale::fill(dst, g.inner, t.bars.0, t.bars.1, t.bars.2);
             }
         }
-        self.draw_label(src, inner);
+        None => {
+            scale::fill(dst, g.inner, t.tile.0, t.tile.1, t.tile.2);
+            let avatar = Rect::new(g.inner.x, g.inner.y, g.inner.w, g.inner.h * 3 / 4);
+            let ini = font::initials(src.name);
+            let max_scale = (g.inner.h / 20).max(2);
+            font::draw_centered(dst, avatar, &ini, max_scale, t.avatar_text);
+        }
     }
+}
 
-    /// Name (and mute mark) on a dark band along the bottom of the tile.
-    fn draw_label(&mut self, src: &TileSource<'_>, inner: Rect) {
-        let t = self.theme;
-        let scale = (inner.h / 90).clamp(1, 4);
-        // Even height so the band reaches the tile's bottom edge exactly.
-        let band_h = ((font::text_height(scale) + 4 * scale).min(inner.h / 3) + 1) & !1;
-        if band_h < font::text_height(1) + 2 || inner.w < font::text_width("A", 1) + 4 {
-            return;
-        }
-        let band = Rect::new(inner.x, inner.y + inner.h - band_h, inner.w, band_h).even();
-        let canvas = self.canvas_mut();
-        scale::fill(canvas, band, t.label_band, 128, 128);
-        let mut text = String::new();
-        if src.muted {
-            text.push_str("[M] ");
-        }
-        text.push_str(src.name);
-        // Trim to what fits.
-        let mut chars: Vec<char> = text.chars().collect();
-        let max_w = band.w.saturating_sub(4 * scale);
-        while !chars.is_empty()
-            && font::text_width(&chars.iter().collect::<String>(), scale) > max_w
-        {
-            chars.pop();
-        }
-        let text: String = chars.into_iter().collect();
-        if !text.is_empty() {
-            let x = band.x + 2 * scale;
-            let y = band.y + (band.h - font::text_height(scale)) / 2;
-            font::draw_text(canvas, x, y, &text, scale, t.label_text);
-        }
+/// The label as it is drawn: the mute mark, the name, cut to what the
+/// band holds. Empty when nothing fits (or the tile has no band).
+pub fn label_text(src: &TileSource<'_>, g: &TileGeometry) -> String {
+    let Some(band) = g.band else {
+        return String::new();
+    };
+    let mut text = String::new();
+    if src.muted {
+        text.push_str("[M] ");
+    }
+    text.push_str(src.name);
+    let mut chars: Vec<char> = text.chars().collect();
+    let max_w = band.w.saturating_sub(4 * g.label_scale);
+    while !chars.is_empty()
+        && font::text_width(&chars.iter().collect::<String>(), g.label_scale) > max_w
+    {
+        chars.pop();
+    }
+    chars.into_iter().collect()
+}
+
+/// Paint the name band over the bottom of the picture: a dark band
+/// with the label. Nothing when the tile has no band.
+pub fn draw_band(dst: &mut HostFrame, src: &TileSource<'_>, g: &TileGeometry, t: &Theme) {
+    let Some(band) = g.band else {
+        return;
+    };
+    scale::fill(dst, band, t.label_band, 128, 128);
+    let text = label_text(src, g);
+    if !text.is_empty() {
+        let x = band.x + 2 * g.label_scale;
+        let y = band.y + (band.h - font::text_height(g.label_scale)) / 2;
+        font::draw_text(dst, x, y, &text, g.label_scale, t.label_text);
     }
 }
 
@@ -272,6 +388,14 @@ mod tests {
             frame,
             speaking,
             muted: false,
+            kind: TileKind::Camera,
+        }
+    }
+
+    fn content<'a>(frame: Option<&'a VideoFrame>) -> TileSource<'a> {
+        TileSource {
+            kind: TileKind::Content,
+            ..src("screen", frame, true)
         }
     }
 
@@ -347,6 +471,57 @@ mod tests {
             .unwrap();
         // PiP corner holds b's picture (with a label band below it).
         assert_eq!(c.host_canvas().luma(112, 56), 200);
+    }
+
+    #[test]
+    fn a_content_tile_is_the_picture_alone_and_a_presentation_puts_it_first() {
+        // A shared screen at 4:3 into a 16:9 room, "speaking" and all: no
+        // border, no band, bars in the background colour, and the picture
+        // right up to the rectangle's edge.
+        let doc = solid(120, 90, 200);
+        let mut c = HostCompositor::new(320, 180, Layout::Spotlight);
+        c.render(&[content(Some(&doc))], 0).unwrap();
+        let canvas = c.host_canvas();
+        let t = Theme::default();
+        assert_eq!(canvas.luma(160, 90), 200, "the document");
+        assert_eq!(canvas.luma(160, 1), 200, "up to the top edge: no border");
+        assert_eq!(canvas.luma(160, 178), 200, "and the bottom: no label band");
+        assert_eq!(
+            canvas.luma(10, 90),
+            t.background.0,
+            "pillar bars, in the background colour"
+        );
+        assert_ne!(
+            canvas.luma(1, 90),
+            t.speaking_border.0,
+            "no speaking ring on a document"
+        );
+
+        // In a presentation the content takes the main region and the
+        // cameras the strip, chrome and all.
+        let cam = solid(64, 36, 100);
+        let mut p = HostCompositor::new(320, 180, Layout::Presentation).with_theme(flat());
+        p.render(
+            &[
+                content(Some(&doc)),
+                src("Bob", Some(&cam), false),
+                src("Cy", None, false),
+            ],
+            1,
+        )
+        .unwrap();
+        let canvas = p.host_canvas();
+        assert_eq!(canvas.luma(120, 90), 200, "content in the main region");
+        assert_eq!(canvas.luma(280, 40), 100, "bob in the strip");
+        assert_eq!(
+            canvas.luma(280, 130),
+            t.tile.0,
+            "cy's avatar tile below him"
+        );
+        // No frame yet: background, and nothing drawn on it.
+        let mut e = HostCompositor::new(64, 36, Layout::Spotlight);
+        e.render(&[content(None)], 2).unwrap();
+        assert!(e.host_canvas().y.iter().all(|&y| y == t.background.0));
     }
 
     #[test]

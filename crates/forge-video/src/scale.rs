@@ -86,6 +86,62 @@ pub fn scale_plane(
     }
 }
 
+/// Area-averaging (box filter) downscale of one plane into a rectangle
+/// of the destination plane: every destination sample is the mean of the
+/// source samples it covers. Bilinear sampling skips most of a source
+/// that is being shrunk by more than two, which turns the thin strokes
+/// of text into noise; averaging keeps them as grey, which reads. Only
+/// for shrinking — when either axis grows this falls back to bilinear,
+/// which is right for that.
+#[allow(clippy::too_many_arguments)]
+pub fn box_plane(
+    src: &[u8],
+    sstride: usize,
+    sw: usize,
+    sh: usize,
+    dst: &mut [u8],
+    dstride: usize,
+    dx: usize,
+    dy: usize,
+    dw: usize,
+    dh: usize,
+) {
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return;
+    }
+    if dw > sw || dh > sh {
+        scale_plane(src, sstride, sw, sh, dst, dstride, dx, dy, dw, dh);
+        return;
+    }
+    for j in 0..dh {
+        let y0 = j * sh / dh;
+        let y1 = ((j + 1) * sh / dh).max(y0 + 1).min(sh);
+        let out = &mut dst[(dy + j) * dstride + dx..(dy + j) * dstride + dx + dw];
+        for (i, o) in out.iter_mut().enumerate() {
+            let x0 = i * sw / dw;
+            let x1 = ((i + 1) * sw / dw).max(x0 + 1).min(sw);
+            let mut sum = 0u32;
+            for row in src[y0 * sstride..y1 * sstride].chunks(sstride) {
+                sum += row[x0..x1].iter().map(|&p| p as u32).sum::<u32>();
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            *o = ((sum + n / 2) / n) as u8;
+        }
+    }
+}
+
+/// How a picture is resampled into a rectangle.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ScaleMode {
+    /// Bilinear: right for cameras and for enlarging anything.
+    #[default]
+    Bilinear,
+    /// Area averaging when shrinking (bilinear when enlarging): right for
+    /// screen content, where a bilinear shrink drops the pixels text is
+    /// made of.
+    Box,
+}
+
 /// Fill a rectangle of the canvas with one colour.
 pub fn fill(dst: &mut HostFrame, r: Rect, y: u8, u: u8, v: u8) {
     let r = r.clip(dst.width, dst.height).even();
@@ -103,11 +159,20 @@ pub fn fill(dst: &mut HostFrame, r: Rect, y: u8, u: u8, v: u8) {
 
 /// Scale the whole source into `r` on the canvas (stretching).
 pub fn scale_into(dst: &mut HostFrame, r: Rect, src: &HostFrame) {
+    scale_into_with(dst, r, src, ScaleMode::Bilinear)
+}
+
+/// [`scale_into`] with a choice of resampling.
+pub fn scale_into_with(dst: &mut HostFrame, r: Rect, src: &HostFrame, mode: ScaleMode) {
     let r = r.clip(dst.width, dst.height).even();
     if r.w == 0 || r.h == 0 {
         return;
     }
-    scale_plane(
+    let plane = match mode {
+        ScaleMode::Bilinear => scale_plane,
+        ScaleMode::Box => box_plane,
+    };
+    plane(
         &src.y,
         src.y_stride,
         src.width as usize,
@@ -120,7 +185,7 @@ pub fn scale_into(dst: &mut HostFrame, r: Rect, src: &HostFrame) {
         r.h as usize,
     );
     for (sp, dp) in [(&src.u, &mut dst.u), (&src.v, &mut dst.v)] {
-        scale_plane(
+        plane(
             sp,
             src.uv_stride,
             (src.width / 2) as usize,
@@ -156,19 +221,50 @@ pub fn fit(r: Rect, src_w: u32, src_h: u32) -> Rect {
 /// Draw `src` letterboxed into `r`: bars in the given colour, the picture
 /// scaled to fit with its aspect ratio kept.
 pub fn letterbox(dst: &mut HostFrame, r: Rect, src: &HostFrame, bar: (u8, u8, u8)) {
+    letterbox_with(dst, r, src, bar, ScaleMode::Bilinear)
+}
+
+/// [`letterbox`] with a choice of resampling.
+pub fn letterbox_with(
+    dst: &mut HostFrame,
+    r: Rect,
+    src: &HostFrame,
+    bar: (u8, u8, u8),
+    mode: ScaleMode,
+) {
     let inner = fit(r, src.width, src.height);
     if inner != r {
         fill(dst, r, bar.0, bar.1, bar.2);
     }
-    scale_into(dst, inner, src);
+    scale_into_with(dst, inner, src, mode);
 }
 
 /// Scale a whole frame to a new size.
 pub fn resize(src: &HostFrame, width: u32, height: u32) -> HostFrame {
+    resize_with(src, width, height, ScaleMode::Bilinear)
+}
+
+/// [`resize`] with a choice of resampling.
+pub fn resize_with(src: &HostFrame, width: u32, height: u32, mode: ScaleMode) -> HostFrame {
     let mut out = HostFrame::black(width, height).with_pts(src.pts);
     let full = Rect::new(0, 0, out.width, out.height);
-    scale_into(&mut out, full, src);
+    scale_into_with(&mut out, full, src, mode);
     out
+}
+
+/// The largest size with `src`'s aspect ratio that fits within `cap`,
+/// even-aligned; `src` itself when it already fits. What a screen
+/// capture larger than the room allows is shrunk to.
+pub fn fit_within(src: Resolution, cap: Resolution) -> Resolution {
+    if src.width <= cap.width && src.height <= cap.height {
+        return src;
+    }
+    let r = fit(
+        Rect::new(0, 0, cap.width, cap.height),
+        src.width,
+        src.height,
+    );
+    Resolution::new(r.w.max(2), r.h.max(2))
 }
 
 #[cfg(test)]
@@ -192,6 +288,59 @@ mod tests {
         assert!(row.windows(2).all(|w| w[0] <= w[1]), "{row:?}");
         assert_eq!(row[0], 0);
         assert_eq!(row[15], 252, "last sample maps to the last source sample");
+    }
+
+    #[test]
+    fn a_box_downscale_keeps_thin_strokes_that_bilinear_drops() {
+        // One-pixel-wide white lines every four pixels on black, shrunk
+        // by four: bilinear lands between the lines and sees black, the
+        // box filter averages each line into its sample.
+        let mut src = HostFrame::black(64, 16);
+        for y in 0..16usize {
+            for x in (0..64usize).step_by(4) {
+                src.y[y * 64 + x] = 255;
+            }
+        }
+        let bilinear = resize(&src, 16, 4);
+        let boxed = resize_with(&src, 16, 4, ScaleMode::Box);
+        assert!(
+            boxed.y.iter().all(|&p| p > 40 && p < 100),
+            "every sample carries a quarter of a line: {:?}",
+            &boxed.y[..16]
+        );
+        assert!(
+            bilinear.y.iter().any(|&p| p == 0 || p == 255),
+            "bilinear either hits a line or misses it"
+        );
+        // Enlarging falls back to bilinear rather than block-replicating.
+        let up = resize_with(&HostFrame::solid(4, 4, 90, 128, 128), 8, 8, ScaleMode::Box);
+        assert!(up.y.iter().all(|&p| p == 90));
+        // Chroma is averaged the same way and a solid stays solid.
+        let solid = resize_with(&HostFrame::solid(32, 32, 77, 60, 200), 8, 8, ScaleMode::Box);
+        assert!(solid.y.iter().all(|&p| p == 77));
+        assert_eq!(solid.chroma(1, 1), (60, 200));
+    }
+
+    #[test]
+    fn fit_within_shrinks_only_what_is_over_the_cap() {
+        let cap = Resolution::new(1920, 1080);
+        assert_eq!(
+            fit_within(Resolution::new(1280, 720), cap),
+            Resolution::new(1280, 720)
+        );
+        assert_eq!(
+            fit_within(Resolution::new(2560, 1440), cap),
+            Resolution::new(1920, 1080)
+        );
+        // 16:10 at 2560×1600: width-bound, height follows the aspect.
+        assert_eq!(
+            fit_within(Resolution::new(2560, 1600), cap),
+            Resolution::new(1728, 1080)
+        );
+        assert_eq!(
+            fit_within(Resolution::new(3840, 2160), cap),
+            Resolution::new(1920, 1080)
+        );
     }
 
     #[test]

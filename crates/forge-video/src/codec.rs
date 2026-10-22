@@ -33,6 +33,22 @@ pub enum CodecError {
     Codec(String),
 }
 
+/// What the pictures are, so an encoder can tune for them.
+///
+/// Every binding has a screen-content mode — OpenH264's usage type,
+/// libvpx's tune-content / screen-content-mode, SVT-AV1's palette and
+/// intra block copy — that trades motion search for the flat regions
+/// and sharp edges of a document. The mixer sets it per flavor: the
+/// content channel is `Screen`, everything else, the composite with a
+/// shared screen in it included, is `Camera`, since most of its pixels
+/// are still faces.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ContentHint {
+    #[default]
+    Camera,
+    Screen,
+}
+
 /// What an encoder is asked to produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderSettings {
@@ -45,6 +61,8 @@ pub struct EncoderSettings {
     pub keyframe_interval: u32,
     /// Codec profile / fmtp as negotiated (normalised as in [`Flavor`]).
     pub profile: String,
+    /// Camera pictures or a shared screen.
+    pub content: ContentHint,
 }
 
 impl EncoderSettings {
@@ -56,7 +74,14 @@ impl EncoderSettings {
             bitrate_kbps: flavor.max_kbps,
             keyframe_interval,
             profile: flavor.profile.clone(),
+            content: ContentHint::Camera,
         }
+    }
+
+    /// The same settings, tuned for a shared screen.
+    pub fn for_screen(mut self) -> Self {
+        self.content = ContentHint::Screen;
+        self
     }
 
     pub fn validate(&self) -> Result<(), CodecError> {
@@ -193,6 +218,27 @@ impl CodecRegistry {
             .collect()
     }
 
+    /// Codecs with a decoder on `device`. A GPU decodes more than it
+    /// encodes (NVDEC has VP8 and VP9, NVENC has neither), so a room on
+    /// one takes its sources from this list and its flavors from
+    /// [`encodable_on`](Self::encodable_on).
+    pub fn decodable_on(&self, device: &MediaDevice) -> Vec<VideoCodec> {
+        VideoCodec::ALL
+            .iter()
+            .copied()
+            .filter(|c| self.decoders.contains_key(&(*c, device.clone())))
+            .collect()
+    }
+
+    /// Codecs with an encoder on `device`.
+    pub fn encodable_on(&self, device: &MediaDevice) -> Vec<VideoCodec> {
+        VideoCodec::ALL
+            .iter()
+            .copied()
+            .filter(|c| self.encoders.contains_key(&(*c, device.clone())))
+            .collect()
+    }
+
     pub fn can_decode(&self, codec: VideoCodec, device: &MediaDevice) -> bool {
         self.decoders.contains_key(&(codec, device.clone()))
     }
@@ -212,6 +258,8 @@ mod tests {
         let s = EncoderSettings::for_flavor(&f, 300);
         assert!(s.validate().is_ok());
         assert_eq!(s.keyframe_interval, 300);
+        assert_eq!(s.content, ContentHint::Camera);
+        assert_eq!(s.clone().for_screen().content, ContentHint::Screen);
         let mut bad = s.clone();
         bad.fps = 0;
         assert!(bad.validate().is_err());

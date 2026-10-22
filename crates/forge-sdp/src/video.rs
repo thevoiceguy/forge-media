@@ -1,5 +1,8 @@
 //! Video in SDP: codec identification, `a=rtcp-fb` feedback attributes
-//! (RFC 4585 §4.2), and H.264 `fmtp` parameters (RFC 6184 §8.1).
+//! (RFC 4585 §4.2), H.264 `fmtp` parameters (RFC 6184 §8.1), the
+//! `a=content` attribute that tells a camera section from a shared
+//! screen (RFC 4796) and the `a=label` a floor control protocol names a
+//! section by (RFC 4574).
 //!
 //! Forge negotiates video it forwards without decoding, so what matters
 //! here is naming the codec, agreeing on the feedback a receiver may send
@@ -148,6 +151,138 @@ impl H264Fmtp {
             None => format!("packetization-mode={}", self.packetization_mode),
         }
     }
+}
+
+/// What a media section carries, per RFC 4796 `a=content`. A section
+/// may name more than one (`a=content:slides,main`); [`contents`] returns
+/// them all and [`is_slides`] answers the question a mixer asks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Content {
+    /// A shared screen, a document, a presentation.
+    Slides,
+    /// The person talking (a second camera on the presenter).
+    Speaker,
+    /// Sign language.
+    Sl,
+    /// The main picture: what a single-section endpoint sends.
+    Main,
+    /// An alternative view of the same.
+    Alt,
+    /// A token this crate does not know.
+    Other(SmolStr),
+}
+
+impl Content {
+    pub fn parse(token: &str) -> Self {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "slides" => Content::Slides,
+            "speaker" => Content::Speaker,
+            "sl" => Content::Sl,
+            "main" => Content::Main,
+            "alt" => Content::Alt,
+            other => Content::Other(SmolStr::new(other)),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Content::Slides => "slides",
+            Content::Speaker => "speaker",
+            Content::Sl => "sl",
+            Content::Main => "main",
+            Content::Alt => "alt",
+            Content::Other(s) => s.as_str(),
+        }
+    }
+}
+
+/// Every `a=content` token on a section, in order; empty when there is
+/// no such attribute, which is what a camera-only endpoint sends.
+pub fn contents(media: &MediaDescription) -> Vec<Content> {
+    media
+        .attributes
+        .iter()
+        .filter_map(|a| match a {
+            Attribute::Value { name, value } if name == "content" => Some(value),
+            _ => None,
+        })
+        .flat_map(|v| v.split(',').map(Content::parse).collect::<Vec<_>>())
+        .collect()
+}
+
+/// Whether a section is a shared screen (`a=content:slides`).
+pub fn is_slides(media: &MediaDescription) -> bool {
+    contents(media).contains(&Content::Slides)
+}
+
+/// Set (or replace) the section's `a=content`.
+pub fn set_content(media: &mut MediaDescription, content: &[Content]) {
+    media
+        .attributes
+        .retain(|a| !matches!(a, Attribute::Value { name, .. } if name == "content"));
+    if content.is_empty() {
+        return;
+    }
+    let value = content
+        .iter()
+        .map(Content::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    media.attributes.push(Attribute::Value {
+        name: SmolStr::new("content"),
+        value: SmolStr::new(value),
+    });
+}
+
+/// The section's `a=label` (RFC 4574), by which BFCP's `a=floorid`
+/// names the media stream a floor controls.
+pub fn label(media: &MediaDescription) -> Option<&str> {
+    media.attributes.iter().find_map(|a| match a {
+        Attribute::Value { name, value } if name == "label" => Some(value.as_str()),
+        _ => None,
+    })
+}
+
+/// Set (or replace) the section's `a=label`.
+pub fn set_label(media: &mut MediaDescription, label: &str) {
+    media
+        .attributes
+        .retain(|a| !matches!(a, Attribute::Value { name, .. } if name == "label"));
+    media.attributes.push(Attribute::Value {
+        name: SmolStr::new("label"),
+        value: SmolStr::new(label),
+    });
+}
+
+/// The video sections of an offer a mixer cares about: the camera and,
+/// when the endpoint can share one, the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct VideoSections<'a> {
+    /// The first active video section that is not `a=content:slides`.
+    pub camera: Option<&'a MediaDescription>,
+    /// The first active video section that is.
+    pub content: Option<&'a MediaDescription>,
+}
+
+/// Sort an SDP's active video sections into a camera and a content
+/// section (RFC 4796). Anything past those two is nobody's business
+/// here and is for the caller to reject.
+pub fn video_sections(sdp: &SessionDescription) -> VideoSections<'_> {
+    let mut out = VideoSections::default();
+    for m in sdp
+        .media
+        .iter()
+        .filter(|m| m.media_type == MediaType::Video && m.port != 0)
+    {
+        if is_slides(m) {
+            if out.content.is_none() {
+                out.content = Some(m);
+            }
+        } else if out.camera.is_none() {
+            out.camera = Some(m);
+        }
+    }
+    out
 }
 
 /// Video-related accessors on a media description.
@@ -337,6 +472,16 @@ pub fn answer_video(
     }
     if let Some(mid) = offer.mid() {
         m.set_mid(mid);
+    }
+    // What the section carries and what a floor controller calls it are
+    // the offerer's to say and the answerer's to repeat (RFC 4796 §5,
+    // RFC 4574 §4).
+    let content = contents(offer);
+    if !content.is_empty() {
+        set_content(&mut m, &content);
+    }
+    if let Some(l) = label(offer) {
+        set_label(&mut m, l);
     }
     if offer
         .attributes
@@ -566,6 +711,75 @@ a=rtcp-fb:97 transport-cc\r\na=mid:1\r\na=rtcp-mux\r\na=sendonly\r\n";
         let r = reject_section(&bare);
         assert_eq!(r.formats, vec![SmolStr::new("0")]);
         assert_eq!(r.mid(), Some("v"));
+    }
+
+    #[test]
+    fn a_shared_screen_is_told_from_a_camera_by_its_content_attribute() {
+        // A room system: audio, a camera, a slides section with a label
+        // for BFCP, and a fourth section nobody wants.
+        let offer = "v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n\
+m=audio 4000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n\
+m=video 4002 RTP/AVPF 96\r\na=rtpmap:96 H264/90000\r\na=content:main\r\na=label:1\r\n\
+m=video 4004 RTP/AVPF 96\r\na=rtpmap:96 H264/90000\r\na=content:slides,main\r\na=label:3\r\n\
+a=sendonly\r\n\
+m=video 4006 RTP/AVPF 96\r\na=rtpmap:96 H264/90000\r\na=content:alt\r\n";
+        let sdp = SessionDescription::from_str(offer).unwrap();
+        let v = video_sections(&sdp);
+        assert_eq!(v.camera.unwrap().port, 4002);
+        assert_eq!(v.content.unwrap().port, 4004);
+        assert_eq!(contents(&sdp.media[1]), vec![Content::Main]);
+        assert_eq!(
+            contents(&sdp.media[2]),
+            vec![Content::Slides, Content::Main]
+        );
+        assert!(is_slides(&sdp.media[2]) && !is_slides(&sdp.media[1]));
+        assert_eq!(label(&sdp.media[2]), Some("3"));
+        assert_eq!(contents(&sdp.media[0]), vec![]);
+        assert_eq!(
+            Content::parse("Whiteboard"),
+            Content::Other("whiteboard".into())
+        );
+
+        // The answer repeats content and label, and the direction rule
+        // still applies: they only send, we only receive.
+        let (info, _) = choose_video_codec(v.content.unwrap(), &[VideoCodec::H264]).unwrap();
+        let a = answer_video(v.content.unwrap(), &info, 7000, "sendrecv");
+        assert!(is_slides(&a));
+        assert_eq!(label(&a), Some("3"));
+        assert_eq!(direction_of(&a), "recvonly");
+        // `active_video` still means the first active section, whatever it carries.
+        assert_eq!(active_video(&sdp).unwrap().port, 4002);
+
+        // A phone with no content attribute at all: camera only.
+        let sdp = SessionDescription::from_str(OFFER).unwrap();
+        let v = video_sections(&sdp);
+        assert!(v.camera.is_some() && v.content.is_none());
+        // A content-only device (no camera): the slides are still found.
+        let only = "v=0\r\no=- 1 1 IN IP4 10.0.0.1\r\ns=-\r\nc=IN IP4 10.0.0.1\r\nt=0 0\r\n\
+m=video 0 RTP/AVP 96\r\n\
+m=video 4004 RTP/AVP 96\r\na=rtpmap:96 VP8/90000\r\na=content:slides\r\n";
+        let sdp = SessionDescription::from_str(only).unwrap();
+        let v = video_sections(&sdp);
+        assert!(v.camera.is_none());
+        assert_eq!(v.content.unwrap().port, 4004);
+
+        // Setting and clearing.
+        let mut m = MediaDescription::video(9);
+        set_content(&mut m, &[Content::Slides]);
+        set_content(&mut m, &[Content::Slides, Content::Alt]);
+        assert_eq!(contents(&m), vec![Content::Slides, Content::Alt]);
+        assert_eq!(
+            m.attributes
+                .iter()
+                .filter(|a| matches!(a, Attribute::Value { name, .. } if name == "content"))
+                .count(),
+            1
+        );
+        set_label(&mut m, "7");
+        set_label(&mut m, "8");
+        assert_eq!(label(&m), Some("8"));
+        set_content(&mut m, &[]);
+        assert!(contents(&m).is_empty());
     }
 
     #[test]

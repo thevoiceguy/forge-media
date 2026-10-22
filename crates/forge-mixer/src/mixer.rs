@@ -109,7 +109,16 @@ pub struct ParticipantMetadata {
     pub is_speaking: bool,
     /// Last time speech was detected (None if never)
     pub last_speech_detected: Option<Instant>,
+    /// Smoothed RMS level of the participant's recent audio, in 16-bit
+    /// PCM units (0 is silence, a loud talker is a few thousand). An
+    /// exponential average over the last few packets, so it ranks who is
+    /// loudest right now without flapping on a single frame; the video
+    /// mixer's active-speaker selection reads it.
+    pub energy: f32,
 }
+
+/// Weight of the newest packet's RMS in `ParticipantBuffer::energy`.
+const ENERGY_SMOOTHING: f32 = 0.33;
 
 /// Audio buffer for a single participant
 struct ParticipantBuffer {
@@ -133,6 +142,8 @@ struct ParticipantBuffer {
     speech_frames: u32,
     /// Consecutive frames below silence threshold
     silence_frames: u32,
+    /// Smoothed RMS energy (see `ParticipantMetadata::energy`)
+    energy: f32,
     /// Maximum buffered samples before dropping oldest data
     max_buffer_samples: usize,
     /// Frame-clock mode: the frame `advance_frame` last took from this
@@ -154,6 +165,7 @@ impl ParticipantBuffer {
             last_speech_detected: None,
             speech_frames: 0,
             silence_frames: 0,
+            energy: 0.0,
             max_buffer_samples,
             frame: None,
         }
@@ -193,6 +205,9 @@ impl ParticipantBuffer {
         } else {
             0.0
         };
+        // Exponential average: a packet's RMS moves the level a third of
+        // the way, so ~5 packets (100 ms at 20 ms) settle it.
+        self.energy += (energy as f32 - self.energy) * ENERGY_SMOOTHING;
 
         // VAD thresholds (tuned for 16-bit PCM)
         const SPEECH_THRESHOLD: f64 = 300.0; // Energy above this = potential speech
@@ -794,6 +809,7 @@ impl AudioMixer {
             packets_received: participant.packets_received,
             is_speaking: participant.is_speaking,
             last_speech_detected: participant.last_speech_detected,
+            energy: participant.energy,
         })
     }
 
@@ -829,6 +845,7 @@ impl AudioMixer {
                 packets_received: entry.value().packets_received,
                 is_speaking: entry.value().is_speaking,
                 last_speech_detected: entry.value().last_speech_detected,
+                energy: entry.value().energy,
             })
             .collect()
     }

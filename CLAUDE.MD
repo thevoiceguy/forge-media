@@ -48,15 +48,17 @@ forge-media/
 │   ├── forge-engine/       # Core engine, sessions, sockets
 │   ├── forge-transcoding/  # Codec implementations
 │   ├── forge-kernel/       # Kernel offload (netfilter/eBPF)
-│   ├── forge-conference/   # Audio conferencing
+│   ├── forge-conference/   # Audio conferencing, and the video room beside it
 │   ├── forge-video/        # Video mixer core: frames, scaling, layouts, compositor, clock, flavors
 │   ├── forge-video-codecs/ # Native video codecs (libvpx, OpenH264, dav1d, SVT-AV1) behind features
+│   ├── forge-video-hw/     # GPU video over FFmpeg device contexts: NVDEC/NVENC codecs, scale_cuda, device frames
 │   ├── forge-recording/    # Recording system
 │   ├── forge-dtmf/         # DTMF detection/generation
 │   ├── forge-transcription/# Real-time transcription
 │   ├── forge-injection/    # Audio injection/TTS
 │   ├── forge-webrtc/       # WebRTC stack
 │   ├── forge-sdp/          # SDP parsing/generation
+│   ├── forge-bfcp/         # BFCP (RFC 8855): codec, a floor server, TCP/UDP transactions
 │   ├── forge-sbc/          # SBC features (proxy, CAC, DoS)
 │   ├── forge-siprec/       # SIPREC SRC & SRS (RFC 7865/7866)
 │   ├── forge-ai-stream/    # Real-time AI streaming

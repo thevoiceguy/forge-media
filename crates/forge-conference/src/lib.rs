@@ -12,12 +12,15 @@ mod dtmf_commands;
 pub mod metrics;
 mod pin_auth;
 mod room_config;
+pub mod video;
 
 pub use ai_manager::{
     AudioMode, ConferenceAIConfig, ConferenceAIManager, ConferenceAIState, AI_PARTICIPANT_ID,
 };
 pub use audio_feedback::{AudioFeedbackPlayer, ConferenceSounds};
-pub use conference::{ConferenceBridge, ConferenceRoom, RoomId, AUDIO_FEEDBACK_PARTICIPANT_ID};
+pub use conference::{
+    ConferenceBridge, ConferenceRoom, MixedFrame, RoomId, AUDIO_FEEDBACK_PARTICIPANT_ID,
+};
 pub use config::{
     AudioConfig, ConferenceConfig, ConfigError, DtmfConfig, HostCommandsConfig,
     ParticipantCommandsConfig, PinRequirements, RecordingConfig, SecurityConfig,
@@ -30,6 +33,11 @@ pub use forge_core::AudioFormat;
 pub use forge_mixer::{ParticipantMetadata, ParticipantState};
 pub use pin_auth::{PinAuthResult, PinAuthenticator};
 pub use room_config::{DtmfCommandBindings, EffectiveRoomConfig, RoomConfig};
+pub use video::{
+    CodecPool, RecordRequest, RecordedFrame, RecordingSink, SubscribeRequest, VideoBackend,
+    VideoParticipantInfo, VideoRecordingInfo, VideoRoom, VideoRoomEvent, VideoRoomSettings,
+    VideoRoomStatus, VideoState, VideoSubscription,
+};
 
 /// Conference error types
 #[derive(Error, Debug)]

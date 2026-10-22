@@ -14,18 +14,30 @@
 //!
 //! All local candidates share the one socket, so the checklist is keyed by
 //! remote transport address rather than by (local, remote) pair.
+//!
+//! Media: one SRTP context serves every stream on the socket (BUNDLE), so
+//! audio and video share keys but keep their own SSRC, sequence space and
+//! rollover counter. Inbound RTP is sorted into audio or video by payload
+//! type from the negotiated map; inbound RTCP is parsed. The transport
+//! keeps RFC 3550 reception statistics per remote SSRC and sends a
+//! compound SR/RR + SDES on [`TransportConfig::rtcp_interval`], and
+//! prefixes the same report to any feedback the owner sends, so every
+//! RTCP packet on the wire is a proper compound (RFC 3550 §6.1).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use forge_ice::candidate::{CandidatePair, CandidateType, PairState};
 use forge_ice::stun::{MessageType, StunMessage, StunServer, StunServerResponse};
 use forge_ice::{IceAgent, IceCandidate, Protocol, TurnClient, TurnInbound, TurnServer};
 use forge_rtp::dtls::{DtlsCertificate, DtlsConnection, DtlsContext, DtlsRole, DtlsState};
-use forge_rtp::{RtpPacket, SrtpContext};
+use forge_rtp::{
+    ReceiverReport, RtcpPacket, RtpPacket, SdesItem, SenderStats, SourceDescription, SourceStats,
+    SrtpContext,
+};
 use parking_lot::Mutex;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -50,16 +62,139 @@ pub enum TransportEvent {
     },
     /// DTLS completed and SRTP keys are installed: media can flow.
     Connected,
-    /// An authenticated, decrypted inbound RTP packet.
+    /// An authenticated, decrypted inbound audio RTP packet (or one whose
+    /// payload type the negotiated map does not know).
     Rtp(RtpPacket),
-    /// An authenticated, decrypted inbound RTCP compound packet.
-    Rtcp(Bytes),
+    /// An authenticated, decrypted inbound video RTP packet from the
+    /// camera's section.
+    VideoRtp(RtpPacket),
+    /// An authenticated, decrypted inbound video RTP packet from the
+    /// shared screen's section (`a=content:slides`), told from the
+    /// camera's by the `sdes:mid` header extension, the section's
+    /// signalled SSRC, or what was learned from earlier packets.
+    ContentRtp(RtpPacket),
+    /// The sub-packets of an authenticated, decrypted inbound RTCP
+    /// compound packet, in order. Sender reports have already updated the
+    /// reception statistics; feedback is the owner's to act on.
+    Rtcp(Vec<RtcpPacket>),
     /// The transport failed; no recovery is attempted (ICE restart is
     /// deliberately unsupported in this version).
     Failed(String),
     /// The transport was closed locally.
     Closed,
 }
+
+/// Which stream a payload type belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    /// The audio section.
+    Audio,
+    /// The video section.
+    Video,
+}
+
+/// One negotiated payload type: which stream it belongs to and its RTP
+/// clock rate, for sorting inbound packets and measuring jitter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayloadMapping {
+    /// The payload type.
+    pub payload_type: u8,
+    /// The stream it belongs to.
+    pub kind: MediaKind,
+    /// Its RTP clock rate in Hz.
+    pub clock_rate: u32,
+}
+
+/// Which of the two video sections a packet or a sender belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VideoStream {
+    /// The camera's section.
+    Camera,
+    /// The shared screen's section (`a=content:slides`).
+    Content,
+}
+
+/// Everything the transport needs to sort inbound RTP: the payload types
+/// and, for the video sections that share them, how to tell the camera's
+/// packets from the screen's.
+#[derive(Debug, Clone, Default)]
+pub struct DemuxConfig {
+    /// Negotiated payload types → stream and clock.
+    pub payload_map: Vec<PayloadMapping>,
+    /// The id of the `sdes:mid` header extension, when negotiated.
+    pub mid_ext: Option<u8>,
+    /// The camera section's `a=mid`.
+    pub video_mid: Option<String>,
+    /// The content section's `a=mid`.
+    pub content_mid: Option<String>,
+    /// The remote's signalled SSRC for the camera's section, if any.
+    pub video_ssrc: Option<u32>,
+    /// The remote's signalled SSRC for the content section, if any.
+    pub content_ssrc: Option<u32>,
+}
+
+/// Sorts a video packet into its section (RFC 8843 §9.2): by the
+/// `sdes:mid` header extension when the packet carries one — and the SSRC
+/// is remembered so the next packets need no extension — else by the
+/// SSRC the remote signalled for each section, else the camera's, the
+/// section every video packet went to before there were two.
+#[derive(Debug, Clone, Default)]
+pub struct VideoDemux {
+    mid_ext: Option<u8>,
+    video_mid: Option<String>,
+    content_mid: Option<String>,
+    video_ssrc: Option<u32>,
+    content_ssrc: Option<u32>,
+    learned: HashMap<u32, VideoStream>,
+}
+
+impl VideoDemux {
+    pub fn new(cfg: &DemuxConfig) -> Self {
+        Self {
+            mid_ext: cfg.mid_ext,
+            video_mid: cfg.video_mid.clone(),
+            content_mid: cfg.content_mid.clone(),
+            video_ssrc: cfg.video_ssrc,
+            content_ssrc: cfg.content_ssrc,
+            learned: HashMap::new(),
+        }
+    }
+
+    /// The section `pkt` belongs to.
+    pub fn stream_of(&mut self, pkt: &RtpPacket) -> VideoStream {
+        let ssrc = pkt.header.ssrc;
+        if let (Some(id), Some(ext)) = (self.mid_ext, pkt.extension.as_ref()) {
+            if let Some(mid) = ext.element(id).and_then(|m| std::str::from_utf8(m).ok()) {
+                let by_mid = if Some(mid) == self.content_mid.as_deref() {
+                    Some(VideoStream::Content)
+                } else if Some(mid) == self.video_mid.as_deref() {
+                    Some(VideoStream::Camera)
+                } else {
+                    None
+                };
+                if let Some(stream) = by_mid {
+                    if self.learned.len() < MAX_SOURCES {
+                        self.learned.insert(ssrc, stream);
+                    }
+                    return stream;
+                }
+            }
+        }
+        if let Some(stream) = self.learned.get(&ssrc) {
+            return *stream;
+        }
+        if Some(ssrc) == self.content_ssrc && Some(ssrc) != self.video_ssrc {
+            VideoStream::Content
+        } else {
+            VideoStream::Camera
+        }
+    }
+}
+
+/// The most remote SSRCs one transport keeps statistics for. A peer has
+/// two (audio and video); the bound stops a misbehaving one from growing
+/// the map.
+const MAX_SOURCES: usize = 32;
 
 /// ICE role (RFC 8445 §6.1.1): the offerer controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,12 +222,39 @@ pub struct TransportConfig {
     pub max_attempts: u8,
     /// Time allowed from the first remote description to a nominated pair.
     pub ice_timeout: Duration,
+    /// How long the controlling agent holds a nomination when the best valid
+    /// pair is a relay pair, so that a direct pair still being checked (or not
+    /// yet trickled) can win. A direct pair is nominated as soon as it is the
+    /// best valid one; only relay-first outcomes wait, and never longer than
+    /// this. RFC 8445 §8.1.1 leaves the stopping point to the agent.
+    ///
+    /// Two seconds covers a direct check's first retransmission (`rto`) plus
+    /// the hole punch on a slow path: with the peer's packets delayed 400 ms,
+    /// a one-second hold still settled on TURN in every run and two seconds
+    /// went direct in every run. The cost falls only on calls TURN alone can
+    /// carry, which connect up to this much later.
+    pub relay_nomination_wait: Duration,
+    /// Renomination: the controlling agent nominates the first valid pair at once and,
+    /// when it is a relay pair, both agents keep checking higher-priority direct pairs;
+    /// the controlling one moves the session onto the first that succeeds — the call connects as fast as the relay
+    /// allows and still ends up direct. When on, `relay_nomination_wait` is not used.
+    /// A controlled agent always follows a renomination to a higher-priority pair it has
+    /// itself verified, whatever this setting.
+    pub renomination: bool,
+    /// How long after the first nomination the controlling agent keeps looking for a
+    /// direct pair to move a relayed session onto.
+    pub renomination_window: Duration,
     /// Time allowed for the DTLS handshake once ICE is nominated.
     pub dtls_timeout: Duration,
     /// Keepalive / consent-freshness interval on the nominated pair.
     pub keepalive: Duration,
     /// Capacity of the event channel.
     pub event_capacity: usize,
+    /// How often a compound SR/RR + SDES goes out once media can flow.
+    /// One second suits a two-party session with a couple of streams
+    /// (RFC 3550 §6.2 would allow more); browsers use our RR for loss-based
+    /// rate control and our SR for lip sync, so it must not be rare.
+    pub rtcp_interval: Duration,
     /// UDP port to bind the ICE socket to; `0` lets the OS choose.
     ///
     /// A WebRTC connection needs exactly one socket (BUNDLE plus
@@ -125,9 +287,13 @@ impl Default for TransportConfig {
             rto: Duration::from_millis(500),
             max_attempts: 7,
             ice_timeout: Duration::from_secs(30),
+            relay_nomination_wait: Duration::from_secs(2),
+            renomination: true,
+            renomination_window: Duration::from_secs(10),
             dtls_timeout: Duration::from_secs(15),
             keepalive: Duration::from_millis(2500),
             event_capacity: 512,
+            rtcp_interval: Duration::from_secs(1),
             local_port: 0,
         }
     }
@@ -185,6 +351,10 @@ struct Inner {
     remotes: Vec<RemoteEntry>,
     selected: Option<SocketAddr>,
     ice_started_at: Option<Instant>,
+    /// When a relay pair first became the best valid pair (controlling side).
+    relay_valid_at: Option<Instant>,
+    /// When the first pair was selected (bounds renomination).
+    selected_at: Option<Instant>,
     last_keepalive: Option<Instant>,
 
     cert: Arc<DtlsCertificate>,
@@ -196,8 +366,24 @@ struct Inner {
     last_dtls_timer: Instant,
 
     srtp: Option<SrtpContext>,
+    /// Our audio SSRC (the one an RR is sent from).
     ssrc: u32,
+    /// Our video SSRC (the camera's section).
+    video_ssrc: u32,
+    /// Our SSRC for the shared screen's section.
+    content_ssrc: u32,
+    /// Audio sequence number (video packets arrive with their own).
     seq: u16,
+    cname: String,
+    /// Negotiated payload types → stream and clock.
+    payload_map: HashMap<u8, (MediaKind, u32)>,
+    /// Which video section an inbound video packet belongs to.
+    demux: VideoDemux,
+    /// Reception statistics per remote SSRC.
+    sources: HashMap<u32, SourceStats>,
+    /// Transmission statistics: `[audio, video, content]`.
+    senders: [SenderStats; 3],
+    last_rtcp: Option<Instant>,
 
     state: Arc<Mutex<ConnectionState>>,
     events: mpsc::Sender<TransportEvent>,
@@ -207,7 +393,13 @@ struct Inner {
 
 impl Inner {
     fn emit(&mut self, ev: TransportEvent) {
-        let is_media = matches!(ev, TransportEvent::Rtp(_) | TransportEvent::Rtcp(_));
+        let is_media = matches!(
+            ev,
+            TransportEvent::Rtp(_)
+                | TransportEvent::VideoRtp(_)
+                | TransportEvent::ContentRtp(_)
+                | TransportEvent::Rtcp(_)
+        );
         if self.events.try_send(ev).is_err() && is_media {
             self.rtp_dropped += 1;
             if self.rtp_dropped == 1 || self.rtp_dropped % 1000 == 0 {
@@ -375,11 +567,137 @@ impl Inner {
         out.push((bytes, e.addr));
     }
 
+    /// Controlling side: nominate the best valid pair once [`nomination_choice`] says so.
+    fn consider_nomination(&mut self, now: Instant, out: &mut Outgoing) {
+        if self.role != IceRole::Controlling
+            || self.selected.is_some()
+            || self.remotes.iter().any(|e| e.nominating)
+        {
+            return;
+        }
+        let pairs: Vec<(PairState, CandidateType)> =
+            self.remotes.iter().map(|e| (e.state, e.cand.typ)).collect();
+        let Some(best) = pairs.iter().position(|(st, _)| *st == PairState::Succeeded) else {
+            return;
+        };
+        if pairs[best].1 == CandidateType::Relay {
+            self.relay_valid_at.get_or_insert(now);
+        }
+        // With renomination a relay pair is nominated at once and replaced later if a
+        // direct one succeeds; without it, it is held so a direct pair can win first.
+        let wait = if self.cfg.renomination {
+            Duration::ZERO
+        } else {
+            self.cfg.relay_nomination_wait
+        };
+        if let Some(i) = nomination_choice(&pairs, self.relay_valid_at, now, wait) {
+            debug!(
+                "nominating {} ({:?})",
+                self.remotes[i].addr, self.remotes[i].cand.typ
+            );
+            self.send_check(i, true, now, out);
+        }
+    }
+
+    fn priority_of(&self, addr: SocketAddr) -> u64 {
+        self.remotes
+            .iter()
+            .find(|e| e.addr == addr)
+            .map_or(0, |e| e.priority)
+    }
+
+    /// Renomination on: a relayed session within the window keeps checking direct pairs
+    /// that would beat it — on *both* sides. The controlled agent's own checks are what
+    /// open its NAT toward the peer: behind a port-restricted NAT, the controlling
+    /// agent's checks to it only get through once the controlled agent has sent toward
+    /// the controlling one, which it otherwise stops doing once it has followed the first
+    /// nomination. Only the controlling agent re-nominates.
+    fn exploring(&self, now: Instant) -> bool {
+        let Some(sel) = self.selected else {
+            return false;
+        };
+        self.cfg.renomination
+            && self
+                .remotes
+                .iter()
+                .any(|e| e.addr == sel && e.cand.typ == CandidateType::Relay)
+            && self
+                .selected_at
+                .is_some_and(|t| now.duration_since(t) < self.cfg.renomination_window)
+    }
+
+    /// Controlling side: once DTLS is up, re-nominate (USE-CANDIDATE) the best direct
+    /// pair that beats the relayed one; [`Self::switch_selected`] moves on its response.
+    fn consider_renomination(&mut self, now: Instant, out: &mut Outgoing) {
+        if self.role != IceRole::Controlling
+            || !self.exploring(now)
+            || self.srtp.is_none()
+            || self.remotes.iter().any(|e| e.nominating)
+        {
+            return;
+        }
+        let Some(sel) = self.selected else {
+            return;
+        };
+        let pairs: Vec<(PairState, CandidateType, u64)> = self
+            .remotes
+            .iter()
+            .map(|e| (e.state, e.cand.typ, e.priority))
+            .collect();
+        if let Some(i) = renomination_choice(&pairs, self.priority_of(sel)) {
+            debug!(
+                "renominating {} ({:?}) over the relayed {sel}",
+                self.remotes[i].addr, self.remotes[i].cand.typ
+            );
+            self.send_check(i, true, now, out);
+        }
+    }
+
+    /// Controlled side: the controlling agent nominated `addr` after an earlier pair.
+    /// Follow it only to a higher-priority pair (RFC 8445 §8.1.1 / RFC 5245 §8.1.1.2:
+    /// use the highest-priority nominated pair), so a late retransmission of an older
+    /// nomination never drags the session back.
+    fn follow_renomination(&mut self, addr: SocketAddr, now: Instant) {
+        if let Some(sel) = self.selected {
+            if sel != addr && self.priority_of(addr) > self.priority_of(sel) {
+                self.switch_selected(addr, now);
+            }
+        }
+    }
+
+    /// Move an established session onto `addr`: media, consent keepalives and (once DTLS
+    /// is up) DTLS alerts go there from now on. SRTP keys are unchanged, and inbound media
+    /// is accepted from any known remote, so a peer that has not switched yet is not cut off.
+    fn switch_selected(&mut self, addr: SocketAddr, now: Instant) {
+        let Some(old) = self.selected else {
+            return;
+        };
+        if old == addr {
+            return;
+        }
+        self.selected = Some(addr);
+        self.last_keepalive = Some(now);
+        if self.srtp.is_some() {
+            self.dtls_peer = Some(addr);
+        }
+        for e in &mut self.remotes {
+            if e.addr == addr {
+                e.nominated = true;
+            }
+        }
+        info!("ICE renominated {old} → {addr}");
+        self.emit(TransportEvent::IceConnected {
+            local: self.local_addr,
+            remote: addr,
+        });
+    }
+
     fn select(&mut self, addr: SocketAddr, now: Instant, out: &mut Outgoing) {
         if self.selected.is_some() {
             return;
         }
         self.selected = Some(addr);
+        self.selected_at = Some(now);
         self.last_keepalive = Some(now);
         for e in &mut self.remotes {
             if e.addr == addr {
@@ -418,7 +736,8 @@ impl Inner {
 
         // --- ICE
         if self.remote_creds.is_some() && self.state() != ConnectionState::Failed {
-            if self.selected.is_none() {
+            let exploring = self.exploring(now);
+            if self.selected.is_none() || exploring || self.remotes.iter().any(|e| e.triggered) {
                 // Retransmit or fail in-progress checks.
                 for i in 0..self.remotes.len() {
                     let e = &self.remotes[i];
@@ -445,25 +764,42 @@ impl Inner {
                         out.push((e.last_request.clone(), e.addr));
                     }
                 }
-                // One new check per tick: triggered first, then by priority.
+                // One new check per tick: triggered first, then by priority — after a
+                // selection, only direct pairs that would beat a relayed one (renomination).
+                let floor = self.selected.map(|a| self.priority_of(a));
                 let next = self
                     .remotes
                     .iter()
                     .position(|e| e.triggered && e.state != PairState::InProgress)
                     .or_else(|| {
-                        self.remotes
-                            .iter()
-                            .position(|e| matches!(e.state, PairState::Waiting | PairState::Frozen))
+                        self.remotes.iter().position(|e| {
+                            matches!(e.state, PairState::Waiting | PairState::Frozen)
+                                && match floor {
+                                    None => true,
+                                    Some(p) => {
+                                        exploring
+                                            && e.cand.typ != CandidateType::Relay
+                                            && e.priority > p
+                                    }
+                                }
+                        })
                     });
                 if let Some(i) = next {
                     self.send_check(i, false, now, &mut out);
                 }
+            }
+            if self.selected.is_none() {
+                // A nomination held for a relay pair is released once a direct pair
+                // wins or the wait runs out.
+                self.consider_nomination(now, &mut out);
                 if let Some(started) = self.ice_started_at {
                     if now.duration_since(started) > self.cfg.ice_timeout {
                         self.fail("ICE timeout: no candidate pair was nominated");
                     }
                 }
             } else if let Some(addr) = self.selected {
+                self.consider_renomination(now, &mut out);
+                let addr = self.selected.unwrap_or(addr);
                 let due = self
                     .last_keepalive
                     .map(|t| now.duration_since(t) >= self.cfg.keepalive)
@@ -499,6 +835,21 @@ impl Inner {
                     if now.duration_since(started) > self.cfg.dtls_timeout {
                         self.fail("DTLS handshake timeout");
                     }
+                }
+            }
+        }
+
+        // --- RTCP reports
+        if self.srtp.is_some() && self.state() == ConnectionState::Connected {
+            let due = self
+                .last_rtcp
+                .map(|t| now.duration_since(t) >= self.cfg.rtcp_interval)
+                .unwrap_or(true);
+            if due {
+                self.last_rtcp = Some(now);
+                match self.protect_rtcp(&[], now) {
+                    Ok(pkt) => out.push(pkt),
+                    Err(e) => debug!("RTCP report: {e}"),
                 }
             }
         }
@@ -560,8 +911,12 @@ impl Inner {
                 }
                 match e.state {
                     PairState::Succeeded => {
-                        if e.nominated && self.selected.is_none() {
-                            self.select(from, now, out);
+                        if e.nominated {
+                            if self.selected.is_none() {
+                                self.select(from, now, out);
+                            } else {
+                                self.follow_renomination(from, now);
+                            }
                         }
                     }
                     PairState::InProgress => {}
@@ -622,7 +977,7 @@ impl Inner {
                     return;
                 }
                 let e = &mut self.remotes[i];
-                if self.selected.is_some() {
+                if self.selected == Some(e.addr) {
                     // Keepalive / consent response.
                     e.tx_id = None;
                     return;
@@ -637,16 +992,26 @@ impl Inner {
                 match self.role {
                     IceRole::Controlling => {
                         if was_nominating {
-                            self.select(addr, now, out);
-                        } else if !self.remotes.iter().any(|e| e.nominating) {
-                            // Regular nomination of the first valid pair
-                            // (RFC 8445 §8.1.1): re-check with USE-CANDIDATE.
-                            self.send_check(i, true, now, out);
+                            if self.selected.is_none() {
+                                self.select(addr, now, out);
+                            } else {
+                                self.switch_selected(addr, now);
+                            }
+                        } else if self.selected.is_none() {
+                            // Regular nomination (RFC 8445 §8.1.1) of the best valid pair — not
+                            // simply the first one to succeed; see `nomination_choice`.
+                            self.consider_nomination(now, out);
+                        } else {
+                            self.consider_renomination(now, out);
                         }
                     }
                     IceRole::Controlled => {
                         if nominated {
-                            self.select(addr, now, out);
+                            if self.selected.is_none() {
+                                self.select(addr, now, out);
+                            } else {
+                                self.follow_renomination(addr, now);
+                            }
                         }
                     }
                 }
@@ -768,28 +1133,190 @@ impl Inner {
     // ------------------------------------------------------------ SRTP
 
     fn handle_srtp(&mut self, data: &[u8], from: SocketAddr) {
-        let Some(srtp) = self.srtp.as_mut() else {
+        if self.srtp.is_none() {
             trace!("SRTP from {from} before keys; dropped");
             return;
-        };
+        }
         if data.len() < 12 {
             return;
         }
+        let now = Instant::now();
         let is_rtcp = (200..=207).contains(&data[1]);
         if is_rtcp {
-            match srtp.unprotect_rtcp(data) {
-                Ok(plain) => self.emit(TransportEvent::Rtcp(Bytes::from(plain))),
-                Err(e) => trace!("SRTCP unprotect failed: {e}"),
+            let plain = match self.srtp.as_mut().map(|s| s.unprotect_rtcp(data)) {
+                Some(Ok(plain)) => plain,
+                Some(Err(e)) => {
+                    trace!("SRTCP unprotect failed: {e}");
+                    return;
+                }
+                None => return,
+            };
+            let packets = RtcpPacket::parse_compound(&plain);
+            if packets.is_empty() {
+                trace!("RTCP from {from} had no parseable sub-packet; dropped");
+                return;
             }
+            for p in &packets {
+                if let RtcpPacket::SenderReport(sr) = p {
+                    if let Some(src) = self.sources.get_mut(&sr.ssrc) {
+                        src.on_sender_report(sr.ntp_timestamp_msw, sr.ntp_timestamp_lsw, now);
+                    }
+                }
+            }
+            self.emit(TransportEvent::Rtcp(packets));
             return;
         }
-        match srtp.unprotect_rtp(data) {
-            Ok(plain) => match RtpPacket::parse(Bytes::from(plain)) {
-                Ok(pkt) => self.emit(TransportEvent::Rtp(pkt)),
-                Err(e) => trace!("RTP parse failed: {e}"),
-            },
-            Err(e) => trace!("SRTP unprotect failed: {e}"),
+        let plain = match self.srtp.as_mut().map(|s| s.unprotect_rtp(data)) {
+            Some(Ok(plain)) => plain,
+            Some(Err(e)) => {
+                trace!("SRTP unprotect failed: {e}");
+                return;
+            }
+            None => return,
+        };
+        let pkt = match RtpPacket::parse(Bytes::from(plain)) {
+            Ok(pkt) => pkt,
+            Err(e) => {
+                trace!("RTP parse failed: {e}");
+                return;
+            }
+        };
+        let (kind, clock) = self
+            .payload_map
+            .get(&pkt.header.payload_type())
+            .copied()
+            .unwrap_or((MediaKind::Audio, 0));
+        if clock > 0 {
+            self.track_source(&pkt, clock, now);
         }
+        let ev = match kind {
+            MediaKind::Audio => TransportEvent::Rtp(pkt),
+            MediaKind::Video => match self.demux.stream_of(&pkt) {
+                VideoStream::Camera => TransportEvent::VideoRtp(pkt),
+                VideoStream::Content => TransportEvent::ContentRtp(pkt),
+            },
+        };
+        self.emit(ev);
+    }
+
+    /// Account an inbound packet in its source's reception statistics.
+    fn track_source(&mut self, pkt: &RtpPacket, clock: u32, now: Instant) {
+        let ssrc = pkt.header.ssrc;
+        if !self.sources.contains_key(&ssrc) {
+            if self.sources.len() >= MAX_SOURCES {
+                return;
+            }
+            self.sources.insert(ssrc, SourceStats::new(ssrc, clock));
+        }
+        if let Some(s) = self.sources.get_mut(&ssrc) {
+            s.on_packet(pkt.header.sequence_number, pkt.header.timestamp, now);
+        }
+    }
+
+    fn peer_addr(&self) -> Result<SocketAddr> {
+        self.selected
+            .or(self.dtls_peer)
+            .ok_or_else(|| WebRtcError::InvalidState("no nominated pair".into()))
+    }
+
+    /// The report every compound RTCP packet starts with (RFC 3550 §6.1):
+    /// an SR for each of our streams that has sent, the first carrying
+    /// the reception report blocks, or an RR when none has; then an SDES
+    /// with our CNAME for each reporting SSRC.
+    fn build_report(&mut self, now: Instant) -> Vec<RtcpPacket> {
+        let mut blocks: Vec<_> = self
+            .sources
+            .values_mut()
+            .filter(|s| s.is_started())
+            .take(31)
+            .map(|s| s.report_block(now))
+            .collect();
+        let mut packets = Vec::with_capacity(3);
+        let mut sdes = SourceDescription::new();
+        let mut any_sender = false;
+        for st in &self.senders {
+            if !st.has_sent() {
+                continue;
+            }
+            let mut sr = st.sender_report(now);
+            if !any_sender {
+                sr.report_blocks = std::mem::take(&mut blocks);
+            }
+            any_sender = true;
+            packets.push(RtcpPacket::SenderReport(sr));
+            sdes.add_chunk(st.ssrc(), vec![SdesItem::new(1, self.cname.clone())]);
+        }
+        if !any_sender {
+            let mut rr = ReceiverReport::new(self.ssrc);
+            rr.report_blocks = blocks;
+            packets.push(RtcpPacket::ReceiverReport(rr));
+            sdes.add_chunk(self.ssrc, vec![SdesItem::new(1, self.cname.clone())]);
+        }
+        packets.push(RtcpPacket::SourceDescription(sdes));
+        packets
+    }
+
+    /// Build and protect one compound RTCP packet: the report, then
+    /// `extra` (feedback the owner is sending).
+    fn protect_rtcp(
+        &mut self,
+        extra: &[RtcpPacket],
+        now: Instant,
+    ) -> Result<(Vec<u8>, SocketAddr)> {
+        let to = self.peer_addr()?;
+        let mut plain = Vec::with_capacity(128);
+        for p in self.build_report(now).iter().chain(extra) {
+            plain.extend_from_slice(&p.to_bytes());
+        }
+        let srtp = self
+            .srtp
+            .as_mut()
+            .ok_or_else(|| WebRtcError::InvalidState("SRTP keys not installed".into()))?;
+        let bytes = srtp
+            .protect_rtcp(&plain)
+            .map_err(|e| WebRtcError::Internal(format!("SRTCP protect: {e}")))?;
+        Ok((bytes, to))
+    }
+
+    /// Protect a pre-built video RTP packet, re-stamped with our SSRC for
+    /// `stream`'s section. The sequence number and timestamp are the
+    /// producer's: a conference room's subscription numbers its own
+    /// packets and answers NACKs from its own cache, so they must reach
+    /// the wire unchanged.
+    fn protect_video(
+        &mut self,
+        packet: Bytes,
+        stream: VideoStream,
+    ) -> Result<(Vec<u8>, SocketAddr)> {
+        if packet.len() < 12 || packet[0] >> 6 != 2 {
+            return Err(WebRtcError::Internal("not an RTP packet".into()));
+        }
+        let to = self.peer_addr()?;
+        let (ssrc, sender) = match stream {
+            VideoStream::Camera => (self.video_ssrc, 1),
+            VideoStream::Content => (self.content_ssrc, 2),
+        };
+        let mut buf = BytesMut::from(packet.as_ref());
+        buf[8..12].copy_from_slice(&ssrc.to_be_bytes());
+        let timestamp = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+        let mut header_len = 12 + (buf[0] & 0x0f) as usize * 4;
+        if buf[0] & 0x10 != 0 && buf.len() >= header_len + 4 {
+            let words = u16::from_be_bytes([buf[header_len + 2], buf[header_len + 3]]) as usize;
+            header_len += 4 + words * 4;
+        }
+        self.senders[sender].on_send(
+            timestamp,
+            buf.len().saturating_sub(header_len),
+            Instant::now(),
+        );
+        let srtp = self
+            .srtp
+            .as_mut()
+            .ok_or_else(|| WebRtcError::InvalidState("SRTP keys not installed".into()))?;
+        let bytes = srtp
+            .protect_rtp(&buf)
+            .map_err(|e| WebRtcError::Internal(format!("SRTP protect: {e}")))?;
+        Ok((bytes, to))
     }
 
     fn protect_rtp(
@@ -799,10 +1326,8 @@ impl Inner {
         timestamp: u32,
         payload: Bytes,
     ) -> Result<(Vec<u8>, SocketAddr)> {
-        let to = self
-            .selected
-            .or(self.dtls_peer)
-            .ok_or_else(|| WebRtcError::InvalidState("no nominated pair".into()))?;
+        let to = self.peer_addr()?;
+        self.senders[0].on_send(timestamp, payload.len(), Instant::now());
         let srtp = self
             .srtp
             .as_mut()
@@ -845,6 +1370,9 @@ impl Transport {
         cfg: TransportConfig,
         cert: Arc<DtlsCertificate>,
         ssrc: u32,
+        video_ssrc: u32,
+        content_ssrc: u32,
+        cname: String,
         state: Arc<Mutex<ConnectionState>>,
     ) -> Result<(Transport, mpsc::Receiver<TransportEvent>)> {
         let mut agent = IceAgent::new(1, cfg.local_port, vec![]);
@@ -904,6 +1432,8 @@ impl Transport {
             remotes: Vec::new(),
             selected: None,
             ice_started_at: None,
+            relay_valid_at: None,
+            selected_at: None,
             last_keepalive: None,
             cert,
             dtls_role: None,
@@ -914,7 +1444,19 @@ impl Transport {
             last_dtls_timer: Instant::now(),
             srtp: None,
             ssrc,
+            video_ssrc,
+            content_ssrc,
             seq: (ssrc >> 16) as u16,
+            cname,
+            payload_map: HashMap::new(),
+            demux: VideoDemux::default(),
+            sources: HashMap::new(),
+            senders: [
+                SenderStats::new(ssrc, 8_000),
+                SenderStats::new(video_ssrc, 90_000),
+                SenderStats::new(content_ssrc, 90_000),
+            ],
+            last_rtcp: None,
             state,
             events,
             closed: false,
@@ -1157,18 +1699,7 @@ impl Transport {
         self.inner.lock().selected
     }
 
-    /// Build, protect and send one RTP packet.
-    pub async fn send_rtp(
-        &self,
-        payload_type: u8,
-        marker: bool,
-        timestamp: u32,
-        payload: Bytes,
-    ) -> Result<()> {
-        let (bytes, to) =
-            self.inner
-                .lock()
-                .protect_rtp(payload_type, marker, timestamp, payload)?;
+    async fn send_to_peer(&self, bytes: Vec<u8>, to: SocketAddr) -> Result<()> {
         let route = self.routes.lock().get(&to).copied();
         match route {
             Some(i) => self.turn[i]
@@ -1184,6 +1715,77 @@ impl Transport {
             }
         }
         Ok(())
+    }
+
+    /// Build, protect and send one audio RTP packet.
+    pub async fn send_rtp(
+        &self,
+        payload_type: u8,
+        marker: bool,
+        timestamp: u32,
+        payload: Bytes,
+    ) -> Result<()> {
+        let (bytes, to) =
+            self.inner
+                .lock()
+                .protect_rtp(payload_type, marker, timestamp, payload)?;
+        self.send_to_peer(bytes, to).await
+    }
+
+    /// Protect and send one pre-built video RTP packet on the camera's
+    /// section, re-stamped with our video SSRC; its sequence number,
+    /// timestamp, payload type and marker are kept.
+    pub async fn send_video(&self, packet: Bytes) -> Result<()> {
+        self.send_video_on(packet, VideoStream::Camera).await
+    }
+
+    /// [`send_video`](Self::send_video) on either video section.
+    pub async fn send_video_on(&self, packet: Bytes, stream: VideoStream) -> Result<()> {
+        let (bytes, to) = self.inner.lock().protect_video(packet, stream)?;
+        self.send_to_peer(bytes, to).await
+    }
+
+    /// Send RTCP: `packets` (feedback, BYE, …) behind the current report
+    /// and SDES so the compound is well-formed, protected as SRTCP.
+    pub async fn send_rtcp(&self, packets: &[RtcpPacket]) -> Result<()> {
+        let (bytes, to) = self.inner.lock().protect_rtcp(packets, Instant::now())?;
+        self.send_to_peer(bytes, to).await
+    }
+
+    /// Install the negotiated payload types — which stream each belongs to
+    /// and its clock rate — and how the two video sections are told apart.
+    /// Replaces the previous configuration; the senders' clocks follow the
+    /// first mapping of their kind.
+    pub fn set_demux(&self, cfg: &DemuxConfig) {
+        let mut g = self.inner.lock();
+        g.payload_map = cfg
+            .payload_map
+            .iter()
+            .map(|m| (m.payload_type, (m.kind, m.clock_rate)))
+            .collect();
+        if let Some(m) = cfg.payload_map.iter().find(|m| m.kind == MediaKind::Audio) {
+            g.senders[0].set_clock_rate(m.clock_rate);
+        }
+        if let Some(m) = cfg.payload_map.iter().find(|m| m.kind == MediaKind::Video) {
+            g.senders[1].set_clock_rate(m.clock_rate);
+            g.senders[2].set_clock_rate(m.clock_rate);
+        }
+        g.demux = VideoDemux::new(cfg);
+    }
+
+    /// Reception statistics for every remote SSRC heard so far.
+    pub fn sources(&self) -> Vec<SourceStats> {
+        self.inner.lock().sources.values().cloned().collect()
+    }
+
+    /// Our video SSRC (the camera's section).
+    pub fn video_ssrc(&self) -> u32 {
+        self.inner.lock().video_ssrc
+    }
+
+    /// Our SSRC for the shared screen's section.
+    pub fn content_ssrc(&self) -> u32 {
+        self.inner.lock().content_ssrc
     }
 
     /// Our sending SSRC.
@@ -1331,4 +1933,199 @@ async fn resolve_stun_server(uri: &str) -> Result<SocketAddr> {
     addrs
         .next()
         .ok_or_else(|| WebRtcError::IceError(format!("{hostport} resolved to nothing")))
+}
+
+/// Which pair the controlling agent nominates now, if any.
+///
+/// `pairs` is the checklist in priority order (highest first), as
+/// `(state, remote candidate type)`. The best valid pair is the first that
+/// succeeded. A direct pair is nominated at once. A relay pair is held for
+/// `wait` from `relay_valid_at` (when a relay pair first became the best valid
+/// one): a relay↔relay check needs no hole punching, so it can succeed before
+/// the direct pairs' checks complete — or before the peer has trickled its
+/// server-reflexive candidate at all — and nominating it then pins the call to
+/// the TURN server although a direct path exists (seen on a carrier NAT, DSIP
+/// WAN Run 3b). RFC 8445 §8.1.1 lets checks continue before nominating.
+fn nomination_choice(
+    pairs: &[(PairState, CandidateType)],
+    relay_valid_at: Option<Instant>,
+    now: Instant,
+    wait: Duration,
+) -> Option<usize> {
+    let best = pairs
+        .iter()
+        .position(|(st, _)| *st == PairState::Succeeded)?;
+    if pairs[best].1 != CandidateType::Relay {
+        return Some(best);
+    }
+    let held_since = relay_valid_at.unwrap_or(now);
+    (now.duration_since(held_since) >= wait).then_some(best)
+}
+
+/// Which direct pair, if any, the controlling agent re-nominates over a relayed
+/// session: the highest-priority pair that succeeded, is not a relay pair, and beats
+/// the selected pair's priority. `pairs` is `(state, remote type, pair priority)` in
+/// priority order (highest first).
+fn renomination_choice(
+    pairs: &[(PairState, CandidateType, u64)],
+    selected_priority: u64,
+) -> Option<usize> {
+    pairs.iter().position(|(st, typ, prio)| {
+        *st == PairState::Succeeded && *typ != CandidateType::Relay && *prio > selected_priority
+    })
+}
+
+#[cfg(test)]
+mod renomination_tests {
+    use super::*;
+
+    #[test]
+    fn the_best_direct_pair_that_succeeded_replaces_the_relay() {
+        let pairs = [
+            (PairState::InProgress, CandidateType::Host, 300),
+            (PairState::Succeeded, CandidateType::ServerReflexive, 200),
+            (PairState::Succeeded, CandidateType::Relay, 10),
+        ];
+        assert_eq!(renomination_choice(&pairs, 10), Some(1));
+    }
+
+    #[test]
+    fn nothing_replaces_the_relay_until_a_direct_pair_succeeds() {
+        let pairs = [
+            (PairState::Waiting, CandidateType::ServerReflexive, 200),
+            (PairState::Failed, CandidateType::Host, 150),
+            (PairState::Succeeded, CandidateType::Relay, 10),
+        ];
+        assert_eq!(renomination_choice(&pairs, 10), None);
+    }
+
+    #[test]
+    fn a_pair_no_better_than_the_selected_one_is_not_chosen() {
+        let pairs = [
+            (PairState::Succeeded, CandidateType::ServerReflexive, 10),
+            (PairState::Succeeded, CandidateType::Relay, 10),
+        ];
+        assert_eq!(renomination_choice(&pairs, 10), None);
+    }
+}
+
+#[cfg(test)]
+mod nomination_tests {
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn a_direct_pair_is_nominated_as_soon_as_it_is_the_best_valid_one() {
+        let now = Instant::now();
+        let pairs = [
+            (PairState::InProgress, CandidateType::Host), // a private address that may never answer
+            (PairState::Succeeded, CandidateType::ServerReflexive),
+            (PairState::Succeeded, CandidateType::Relay),
+        ];
+        assert_eq!(nomination_choice(&pairs, None, now, WAIT), Some(1));
+    }
+
+    #[test]
+    fn a_relay_pair_waits_for_a_direct_one() {
+        let start = Instant::now();
+        let pairs = [
+            (PairState::Waiting, CandidateType::ServerReflexive), // trickled late, not yet checked
+            (PairState::Succeeded, CandidateType::Relay),
+        ];
+        assert_eq!(nomination_choice(&pairs, Some(start), start, WAIT), None);
+        assert_eq!(
+            nomination_choice(
+                &pairs,
+                Some(start),
+                start + Duration::from_millis(400),
+                WAIT
+            ),
+            None
+        );
+        // the direct pair succeeds within the wait: it is nominated, not the relay
+        let won = [
+            (PairState::Succeeded, CandidateType::ServerReflexive),
+            (PairState::Succeeded, CandidateType::Relay),
+        ];
+        assert_eq!(
+            nomination_choice(&won, Some(start), start + Duration::from_millis(600), WAIT),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn a_relay_pair_is_nominated_when_the_wait_runs_out() {
+        let start = Instant::now();
+        let pairs = [
+            (PairState::Failed, CandidateType::ServerReflexive), // symmetric NAT: no direct path
+            (PairState::Succeeded, CandidateType::Relay),
+        ];
+        assert_eq!(
+            nomination_choice(&pairs, Some(start), start + WAIT, WAIT),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn nothing_is_nominated_before_a_pair_succeeds() {
+        let now = Instant::now();
+        let pairs = [(PairState::InProgress, CandidateType::Relay)];
+        assert_eq!(nomination_choice(&pairs, None, now, WAIT), None);
+    }
+}
+
+#[cfg(test)]
+mod demux_tests {
+    use super::*;
+    use forge_rtp::rtp::RtpExtension;
+
+    fn packet(ssrc: u32, mid: Option<&str>) -> RtpPacket {
+        let mut p = RtpPacket::build(96, 1, 0, ssrc, Bytes::from_static(&[1]), true);
+        if let Some(m) = mid {
+            p.extension = Some(RtpExtension::one_byte(&[(4, m.as_bytes())]));
+        }
+        p
+    }
+
+    #[test]
+    fn a_video_packet_is_sorted_by_mid_then_ssrc_then_falls_to_the_camera() {
+        let mut demux = VideoDemux::new(&DemuxConfig {
+            mid_ext: Some(4),
+            video_mid: Some("1".into()),
+            content_mid: Some("2".into()),
+            video_ssrc: Some(0xCA),
+            content_ssrc: Some(0xC0),
+            ..DemuxConfig::default()
+        });
+        // The signalled SSRCs, no extension.
+        assert_eq!(demux.stream_of(&packet(0xCA, None)), VideoStream::Camera);
+        assert_eq!(demux.stream_of(&packet(0xC0, None)), VideoStream::Content);
+        // An SSRC nobody signalled: the camera, as before there were two.
+        assert_eq!(demux.stream_of(&packet(0xFF, None)), VideoStream::Camera);
+        // The extension names the section and is remembered for the SSRC.
+        assert_eq!(
+            demux.stream_of(&packet(0xFF, Some("2"))),
+            VideoStream::Content
+        );
+        assert_eq!(demux.stream_of(&packet(0xFF, None)), VideoStream::Content);
+        // A mid we did not negotiate is ignored; the rest of the rule applies.
+        assert_eq!(
+            demux.stream_of(&packet(0xCA, Some("9"))),
+            VideoStream::Camera
+        );
+        // Without a negotiated extension, an extension on the wire is ignored.
+        let mut plain = VideoDemux::new(&DemuxConfig {
+            content_ssrc: Some(0xC0),
+            ..DemuxConfig::default()
+        });
+        assert_eq!(
+            plain.stream_of(&packet(0xC0, Some("1"))),
+            VideoStream::Content
+        );
+        assert_eq!(
+            plain.stream_of(&packet(0x11, Some("2"))),
+            VideoStream::Camera
+        );
+    }
 }

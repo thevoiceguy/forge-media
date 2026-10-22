@@ -58,6 +58,11 @@ pub enum Layout {
     Spotlight,
     /// The first tile full canvas, the second in the bottom-right corner.
     PictureInPicture,
+    /// A shared screen: the first tile (the content) large, up to five
+    /// cameras in a strip at the right. The geometry of `ActiveSpeaker`
+    /// with a different subject; the compositor draws the first tile
+    /// without chrome when it is content.
+    Presentation,
 }
 
 impl Layout {
@@ -67,6 +72,7 @@ impl Layout {
             "active_speaker" | "speaker" => Some(Layout::ActiveSpeaker),
             "spotlight" => Some(Layout::Spotlight),
             "pip" | "picture_in_picture" => Some(Layout::PictureInPicture),
+            "presentation" => Some(Layout::Presentation),
             _ => None,
         }
     }
@@ -77,6 +83,7 @@ impl Layout {
             Layout::ActiveSpeaker => "active_speaker",
             Layout::Spotlight => "spotlight",
             Layout::PictureInPicture => "pip",
+            Layout::Presentation => "presentation",
         }
     }
 
@@ -88,6 +95,7 @@ impl Layout {
             Layout::ActiveSpeaker => 6,
             Layout::Spotlight => 1,
             Layout::PictureInPicture => 2,
+            Layout::Presentation => 6,
         }
     }
 
@@ -118,7 +126,7 @@ impl Layout {
                 }
                 v
             }
-            Layout::ActiveSpeaker => {
+            Layout::ActiveSpeaker | Layout::Presentation => {
                 if n == 1 {
                     return vec![canvas.even()];
                 }
@@ -215,6 +223,7 @@ mod tests {
             Layout::ActiveSpeaker,
             Layout::Spotlight,
             Layout::PictureInPicture,
+            Layout::Presentation,
         ] {
             for n in 0..=18 {
                 let t = layout.tiles(n, 1280, 720, 4);
@@ -269,5 +278,17 @@ mod tests {
         assert_eq!(Layout::parse("Active-Speaker"), Some(Layout::ActiveSpeaker));
         assert_eq!(Layout::parse("pip").unwrap().name(), "pip");
         assert_eq!(Layout::parse("mosaic"), None);
+        assert_eq!(
+            Layout::parse("presentation").unwrap().name(),
+            "presentation"
+        );
+        // A presentation is an active-speaker arrangement whose subject
+        // is the shared screen: same rectangles, one more of them held
+        // for the content.
+        assert_eq!(
+            Layout::Presentation.tiles(4, 1280, 720, 4),
+            Layout::ActiveSpeaker.tiles(4, 1280, 720, 4)
+        );
+        assert_eq!(Layout::Presentation.capacity(), 6);
     }
 }

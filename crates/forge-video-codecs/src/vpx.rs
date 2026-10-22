@@ -110,6 +110,22 @@ impl VpxEncoder {
                 ),
                 "set cpu-used",
             )?;
+            // A shared screen: flat regions and sharp edges rather than
+            // motion. VP8 has a screen-content mode, VP9 a content tune.
+            if settings.content == forge_video::codec::ContentHint::Screen {
+                let _ = match codec {
+                    VideoCodec::VP9 => ffi::vpx_codec_control_(
+                        &mut ctx,
+                        ffi::vp8e_enc_control_id::VP9E_SET_TUNE_CONTENT as c_int,
+                        ffi::vp9e_tune_content::VP9E_CONTENT_SCREEN as c_int,
+                    ),
+                    _ => ffi::vpx_codec_control_(
+                        &mut ctx,
+                        ffi::vp8e_enc_control_id::VP8E_SET_SCREEN_CONTENT_MODE as c_int,
+                        1 as c_int,
+                    ),
+                };
+            }
             if codec == VideoCodec::VP9 {
                 let _ = ffi::vpx_codec_control_(
                     &mut ctx,

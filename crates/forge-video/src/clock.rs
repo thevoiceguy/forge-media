@@ -1,9 +1,16 @@
 //! The room's video clock.
 //!
 //! Ticks at the room's frame rate; the compositor renders on each tick.
-//! When rendering overruns the tick three times in a row the clock halves
-//! its rate and says so, so an overloaded node degrades to a lower frame
-//! rate rather than falling behind; a quiet stretch lets it climb back.
+//! When rendering overruns the tick three times in a row the room is asked
+//! to shed something, and if it has nothing to shed the clock halves its
+//! rate and says so, so an overloaded node degrades rather than falling
+//! behind; a quiet stretch lets it climb back.
+//!
+//! Halving the rate is the last resort because it is the one everybody in
+//! the room pays: a room overrunning on one expensive composite should
+//! degrade that composite, not everyone's motion (§9). What "something" is
+//! belongs to whoever owns the outputs, so the clock asks a [`LoadShedder`]
+//! and knows nothing about what it gives up.
 
 use std::time::Duration;
 use tokio::time::{interval, Instant, Interval, MissedTickBehavior};
@@ -11,10 +18,41 @@ use tokio::time::{interval, Instant, Interval, MissedTickBehavior};
 /// What a tick reports besides its number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockEvent {
-    /// The rate was halved after three consecutive overruns.
+    /// The rate was halved after three consecutive overruns, there being
+    /// nothing left to shed.
     FpsHalved { from: u32, to: u32 },
     /// The rate was restored one step after a stretch without overruns.
     FpsRestored { from: u32, to: u32 },
+}
+
+/// What the room can give up, asked by the clock before it touches the rate.
+///
+/// Both methods return whether they acted. The clock calls [`shed`](Self::shed)
+/// when it is about to halve, and halves only if the answer is `false`;
+/// recovery unwinds in the opposite order, so [`restore`](Self::restore) is
+/// called only once the rate is back at the room's target — the last thing
+/// given up is the first thing returned.
+pub trait LoadShedder {
+    /// Overloaded: give up one step. `false` when there is nothing left.
+    fn shed(&mut self) -> bool;
+    /// Calm at the full rate: take one step back. `false` when nothing is
+    /// currently shed.
+    fn restore(&mut self) -> bool;
+}
+
+/// A shedder with nothing to shed: the frame rate is the only thing this
+/// clock can give up. What [`VideoClock::done`] uses.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RateOnly;
+
+impl LoadShedder for RateOnly {
+    fn shed(&mut self) -> bool {
+        false
+    }
+
+    fn restore(&mut self) -> bool {
+        false
+    }
 }
 
 /// A frame clock. Not `Sync`: one task owns it.
@@ -87,32 +125,61 @@ impl VideoClock {
         self.tick_no
     }
 
-    /// Report that the tick's work finished. Adjusts the rate; returns an
-    /// event when it changed.
+    /// Report that the tick's work finished, with nothing to shed but the
+    /// rate. Adjusts the rate; returns an event when it changed.
     pub fn done(&mut self) -> Option<ClockEvent> {
+        self.done_with(&mut RateOnly)
+    }
+
+    /// Report that the tick's work finished, offering `shedder` the chance
+    /// to give up something smaller than everyone's frame rate.
+    ///
+    /// Three consecutive overruns ask it to shed; the rate halves only when
+    /// it has nothing left. Ten calm seconds restore the rate a step, and
+    /// once the rate is back at the room's target, ten more give back one
+    /// thing that was shed.
+    pub fn done_with(&mut self, shedder: &mut impl LoadShedder) -> Option<ClockEvent> {
         let started = self.tick_started.take()?;
         let took = started.elapsed();
         if took > self.period() {
             self.overruns_total += 1;
             self.consecutive_overruns += 1;
             self.calm_ticks = 0;
-            if self.consecutive_overruns >= 3 && self.fps > self.min_fps {
-                let from = self.fps;
-                self.fps = (self.fps / 2).max(self.min_fps);
-                self.interval = make_interval(self.fps);
+            if self.consecutive_overruns >= 3 {
+                // Whatever happens now, start counting again: acting on the
+                // same three overruns on every subsequent tick would shed
+                // the room to nothing before the first change had a chance
+                // to show in the timings.
                 self.consecutive_overruns = 0;
-                return Some(ClockEvent::FpsHalved { from, to: self.fps });
+                // Something smaller than everyone's motion, if the room has
+                // one to give.
+                if shedder.shed() {
+                    return None;
+                }
+                if self.fps > self.min_fps {
+                    let from = self.fps;
+                    self.fps = (self.fps / 2).max(self.min_fps);
+                    self.interval = make_interval(self.fps);
+                    return Some(ClockEvent::FpsHalved { from, to: self.fps });
+                }
             }
         } else {
             self.consecutive_overruns = 0;
             self.calm_ticks += 1;
-            // Ten calm seconds at the reduced rate: try the next step up.
-            if self.fps < self.target_fps && self.calm_ticks >= self.fps * 10 {
-                let from = self.fps;
-                self.fps = (self.fps * 2).min(self.target_fps);
-                self.interval = make_interval(self.fps);
-                self.calm_ticks = 0;
-                return Some(ClockEvent::FpsRestored { from, to: self.fps });
+            // Ten calm seconds: undo one step of what the overload cost,
+            // most recent first — the rate, and only once it is whole
+            // again, whatever was shed before it.
+            if self.calm_ticks >= self.fps * 10 {
+                if self.fps < self.target_fps {
+                    let from = self.fps;
+                    self.fps = (self.fps * 2).min(self.target_fps);
+                    self.interval = make_interval(self.fps);
+                    self.calm_ticks = 0;
+                    return Some(ClockEvent::FpsRestored { from, to: self.fps });
+                }
+                if shedder.restore() {
+                    self.calm_ticks = 0;
+                }
             }
         }
         None
@@ -129,6 +196,124 @@ fn make_interval(fps: u32) -> Interval {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shedder with `steps` things to give up, counting what it was asked.
+    #[derive(Default)]
+    struct Counting {
+        available: u32,
+        shed: u32,
+        restored: u32,
+    }
+
+    impl Counting {
+        fn with(available: u32) -> Self {
+            Self {
+                available,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl LoadShedder for Counting {
+        fn shed(&mut self) -> bool {
+            if self.shed >= self.available {
+                return false;
+            }
+            self.shed += 1;
+            true
+        }
+
+        fn restore(&mut self) -> bool {
+            if self.shed == 0 {
+                return false;
+            }
+            self.shed -= 1;
+            self.restored += 1;
+            true
+        }
+    }
+
+    /// Three overruns at a time, as `done_with` counts them.
+    async fn overrun(c: &mut VideoClock, s: &mut Counting, by: Duration) -> Option<ClockEvent> {
+        let mut last = None;
+        for _ in 0..3 {
+            c.tick().await;
+            tokio::time::advance(by).await;
+            last = c.done_with(s);
+        }
+        last
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sheds_before_it_touches_everybody_s_frame_rate() {
+        let mut c = VideoClock::new(30);
+        let mut s = Counting::with(2);
+
+        // Two rounds of overruns: two things shed, rate untouched.
+        assert_eq!(
+            overrun(&mut c, &mut s, Duration::from_millis(50)).await,
+            None
+        );
+        assert_eq!(s.shed, 1);
+        assert_eq!(c.fps(), 30, "the rate is the last resort");
+        assert_eq!(
+            overrun(&mut c, &mut s, Duration::from_millis(50)).await,
+            None
+        );
+        assert_eq!(s.shed, 2);
+        assert_eq!(c.fps(), 30);
+
+        // Nothing left to shed: now the rate halves, as it always did.
+        assert_eq!(
+            overrun(&mut c, &mut s, Duration::from_millis(50)).await,
+            Some(ClockEvent::FpsHalved { from: 30, to: 15 })
+        );
+        assert_eq!(s.shed, 2, "shedding was asked and refused, not skipped");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_takes_the_rate_back_before_what_was_shed() {
+        let mut c = VideoClock::new(30);
+        let mut s = Counting::with(1);
+        // One shed, then the rate halves.
+        overrun(&mut c, &mut s, Duration::from_millis(50)).await;
+        assert_eq!(s.shed, 1);
+        assert_eq!(
+            overrun(&mut c, &mut s, Duration::from_millis(50)).await,
+            Some(ClockEvent::FpsHalved { from: 30, to: 15 })
+        );
+
+        // Calm: the rate comes back first, and nothing is unshed yet.
+        let mut event = None;
+        for _ in 0..(15 * 10) {
+            c.tick().await;
+            if let Some(e) = c.done_with(&mut s) {
+                event = Some(e);
+            }
+        }
+        assert_eq!(event, Some(ClockEvent::FpsRestored { from: 15, to: 30 }));
+        assert_eq!(s.restored, 0, "the rate is given back before the picture");
+
+        // Calm at the full rate: now what was shed comes back.
+        for _ in 0..(30 * 10) {
+            c.tick().await;
+            assert_eq!(c.done_with(&mut s), None);
+        }
+        assert_eq!(s.restored, 1);
+        assert_eq!(s.shed, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_room_with_nothing_shed_stays_at_its_rate_however_calm() {
+        let mut c = VideoClock::new(30);
+        let mut s = Counting::with(0);
+        for _ in 0..(30 * 25) {
+            c.tick().await;
+            assert_eq!(c.done_with(&mut s), None);
+        }
+        assert_eq!(c.fps(), 30);
+        assert_eq!(s.restored, 0);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn ticks_at_the_rate_and_backs_off_after_three_overruns() {

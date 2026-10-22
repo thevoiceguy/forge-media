@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -604,12 +604,67 @@ impl Default for GeneratedRtpState {
     }
 }
 
+/// A digit one leg of the session sent, and which leg sent it.
+///
+/// Published once per digit, when it ends, whether it arrived as RFC 2833
+/// telephone-event or was heard in-band — the shape a signalling layer
+/// needs to carry the digit on to the other leg some other way (SIP INFO,
+/// say) when that leg does not take telephone-event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegDigit {
+    /// The leg the digit came from.
+    pub leg: ParticipantLabel,
+    /// The digit.
+    pub digit: forge_dtmf::DtmfDigit,
+    /// How long it was held, when the sender said.
+    pub duration_ms: Option<u32>,
+    /// How it arrived. A digit heard in-band is already in the audio the
+    /// other leg hears; one sent as telephone-event is not.
+    pub method: forge_dtmf::DtmfMethod,
+}
+
+/// Per-leg DTMF state: the legs telephone-event is not relayed to, and the
+/// stream of digits each leg sends.
+#[derive(Debug)]
+pub(crate) struct LegDtmf {
+    no_relay_to_a: AtomicBool,
+    no_relay_to_b: AtomicBool,
+    digits: tokio::sync::broadcast::Sender<LegDigit>,
+}
+
+impl Default for LegDtmf {
+    fn default() -> Self {
+        Self {
+            no_relay_to_a: AtomicBool::new(false),
+            no_relay_to_b: AtomicBool::new(false),
+            digits: tokio::sync::broadcast::channel(32).0,
+        }
+    }
+}
+
+impl LegDtmf {
+    fn no_relay_to(&self, leg: ParticipantLabel) -> &AtomicBool {
+        match leg {
+            ParticipantLabel::A => &self.no_relay_to_a,
+            ParticipantLabel::B => &self.no_relay_to_b,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScheduledPlayoutSource {
     #[cfg_attr(not(feature = "ai"), allow(dead_code))]
     AI,
     MediaBridgeAudio,
     MediaBridgeDtmf,
+    /// A digit the signalling layer asked for ([`MediaSession::send_dtmf`]).
+    SignalledDtmf,
+    /// Audio a [`crate::injection::PlaybackManager`] plays into a leg: a
+    /// prompt, hold music.
+    Injection,
+    /// A leg's mix with a supervisor who whispers to it or barges
+    /// ([`crate::party`]).
+    Supervision,
 }
 
 impl ScheduledPlayoutSource {
@@ -618,6 +673,9 @@ impl ScheduledPlayoutSource {
             Self::AI => "ai",
             Self::MediaBridgeAudio => "media_bridge_audio",
             Self::MediaBridgeDtmf => "media_bridge_dtmf",
+            Self::SignalledDtmf => "signalled_dtmf",
+            Self::Injection => "injection",
+            Self::Supervision => "supervision",
         }
     }
 }
@@ -666,7 +724,25 @@ pub(crate) struct ScheduledPlayoutQueue {
     /// pump happened to drain between deliveries" (no marker). DTMF
     /// scheduling does not touch it.
     audio_stream_end: Option<Instant>,
+    /// Each playback's resampler, while the leg's codec runs at another
+    /// rate than the audio handed in: a stream handed over a frame at a
+    /// time is resampled as one, with no step at each frame's edge.
+    resamplers: std::collections::HashMap<Option<String>, PlayoutResampler>,
 }
+
+/// One playback's resampling into a leg: the filter's state, and what it
+/// produced past the last whole frame.
+#[derive(Debug)]
+struct PlayoutResampler {
+    from: u32,
+    to: u32,
+    resampler: forge_resampler::Resampler,
+    carry: Vec<i16>,
+    last_used: Instant,
+}
+
+/// A playback's resampler unused for this long has ended with its playback.
+const PLAYOUT_RESAMPLER_IDLE: Duration = Duration::from_secs(5);
 
 enum StatefulCodec {
     #[cfg(feature = "opus")]
@@ -846,6 +922,12 @@ pub struct MediaSession {
     transcoder_a_to_b: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
     /// Transcoder for B → A direction (optional, created when needed)
     transcoder_b_to_a: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
+    /// Playbacks replacing what the other leg says, per leg: while one
+    /// is above zero the forwarding engine relays nothing toward that leg
+    /// (hold music is heard alone). Counted, so overlapping playbacks
+    /// release in any order.
+    relay_suppressed_a: std::sync::atomic::AtomicU32,
+    relay_suppressed_b: std::sync::atomic::AtomicU32,
     /// SRTP context for participant A (inbound: unprotect A→us, outbound: protect us→A)
     srtp_a: Arc<Mutex<SrtpContext>>,
     /// SRTP context for participant B (inbound: unprotect B→us, outbound: protect us→B)
@@ -860,6 +942,9 @@ pub struct MediaSession {
     dtls_b: Arc<Mutex<Option<crate::dtls_srtp::DtlsLeg>>>,
     /// Whether to relay RFC 2833 telephone-event packets to the other leg
     relay_rfc2833: AtomicBool,
+    /// DTMF per leg: where telephone-event is not relayed, and the digits
+    /// each leg sends.
+    leg_dtmf: LegDtmf,
     /// Telephone-event payload type negotiated with participant A (default 101)
     telephone_event_pt_a: AtomicU8,
     /// Telephone-event payload type negotiated with participant B (default 101)
@@ -904,6 +989,13 @@ pub struct MediaSession {
     pub(crate) recorder: Arc<RwLock<Option<forge_recorder::AudioRecorder>>>,
     /// Small mixer to combine both call legs before writing to the recorder
     pub(crate) recording_mixer: Arc<Mutex<RecordingMixer>>,
+    /// A supervisor who monitors, whispers or barges ([`crate::party`]).
+    party: std::sync::RwLock<Option<Arc<crate::party::Party>>>,
+    /// Correlation id for this session's HEP RTCP / RTP-QoS chunks, when
+    /// the embedder knows a better one than [`Self::call_id`] — see
+    /// [`Self::set_hep_correlation_id`]. Set-once, so the RTCP path reads
+    /// it with a single atomic load and no lock.
+    hep_correlation_id: OnceLock<String>,
 }
 
 impl MediaSession {
@@ -988,6 +1080,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
+            relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             #[cfg(feature = "dtls")]
@@ -995,6 +1089,7 @@ impl MediaSession {
             #[cfg(feature = "dtls")]
             dtls_b: Arc::new(Mutex::new(None)),
             relay_rfc2833: AtomicBool::new(false),
+            leg_dtmf: LegDtmf::default(),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -1020,6 +1115,8 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            party: std::sync::RwLock::new(None),
+            hep_correlation_id: OnceLock::new(),
         };
 
         // Publish session created event
@@ -1153,6 +1250,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
+            relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             #[cfg(feature = "dtls")]
@@ -1160,6 +1259,7 @@ impl MediaSession {
             #[cfg(feature = "dtls")]
             dtls_b: Arc::new(Mutex::new(None)),
             relay_rfc2833: AtomicBool::new(false),
+            leg_dtmf: LegDtmf::default(),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -1185,6 +1285,8 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            party: std::sync::RwLock::new(None),
+            hep_correlation_id: OnceLock::new(),
         };
 
         // Publish session created event
@@ -1362,6 +1464,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
+            relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             #[cfg(feature = "dtls")]
@@ -1369,6 +1473,7 @@ impl MediaSession {
             #[cfg(feature = "dtls")]
             dtls_b: Arc::new(Mutex::new(None)),
             relay_rfc2833: AtomicBool::new(false),
+            leg_dtmf: LegDtmf::default(),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
             forwarding_tasks: Arc::new(Mutex::new(Vec::new())),
@@ -1392,6 +1497,8 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            party: std::sync::RwLock::new(None),
+            hep_correlation_id: OnceLock::new(),
         };
 
         // Publish session created event
@@ -1408,6 +1515,32 @@ impl MediaSession {
     /// Get the call ID
     pub fn call_id(&self) -> &CallId {
         &self.call_id
+    }
+
+    /// Set the correlation id this session's HEP RTCP (`0x05`) and
+    /// RTP-QoS chunks carry, in place of [`Self::call_id`].
+    ///
+    /// Homer threads a call's chunks together by correlation id, and its
+    /// call view is keyed by the SIP `Call-ID` — which an embedder's own
+    /// session id usually isn't. Without this, media chunks land under a
+    /// different key from the SIP ladder and never appear beside it
+    /// (siphon-ai #603). Set it as soon as the SIP `Call-ID` is known —
+    /// for an offerer that is after the session exists, since the offer
+    /// is built before the INVITE that names the `Call-ID`. Chunks
+    /// emitted before then keep the session id.
+    ///
+    /// Set-once: returns `false`, leaving the first value, if already set.
+    pub fn set_hep_correlation_id(&self, id: impl Into<String>) -> bool {
+        self.hep_correlation_id.set(id.into()).is_ok()
+    }
+
+    /// The correlation id for this session's HEP chunks: the value given
+    /// to [`Self::set_hep_correlation_id`], else the session's call id.
+    pub fn hep_correlation_id(&self) -> &str {
+        self.hep_correlation_id
+            .get()
+            .map(String::as_str)
+            .unwrap_or(&self.call_id.0)
     }
 
     /// Get the current session state
@@ -2010,6 +2143,11 @@ impl MediaSession {
 
         *self.state.write().await = SessionState::Terminated;
 
+        // A supervisor's port goes back with the session's.
+        if let Err(e) = self.remove_party().await {
+            tracing::warn!("Failed to remove the supervisor: {}", e);
+        }
+
         // Deallocate ports - guaranteed cleanup
         self.deallocate_ports().await;
 
@@ -2247,16 +2385,6 @@ impl MediaSession {
                 ))
             })?;
 
-        let resampled_samples = if sample_rate != audio_sample_rate {
-            crate::forwarding::ForwardingEngine::resample_audio(
-                samples,
-                sample_rate,
-                audio_sample_rate,
-            )
-        } else {
-            samples.to_vec()
-        };
-
         if mode == crate::media_bridge::PlayoutMode::Replace {
             self.clear_scheduled_playout_for_leg(leg, playback_id.as_deref())
                 .await;
@@ -2290,12 +2418,59 @@ impl MediaSession {
         let mut stream_cursor = queue.next_rtp_timestamp.unwrap_or(rtp_cursor_fallback);
         let timestamp_increment = codec_config.clock_rate / 50;
 
-        for (index, chunk) in resampled_samples.chunks(frame_samples).enumerate() {
-            let mut frame = chunk.to_vec();
-            if frame.len() < frame_samples {
-                frame.resize(frame_samples, 0);
-            }
+        // Audio at another rate than the codec's goes through this
+        // playback's own resampler, which carries the stream across calls;
+        // only whole frames leave it, the rest waits for the next call. A
+        // new talkspurt starts the stream again.
+        let frames: Vec<Vec<i16>> = if sample_rate != audio_sample_rate {
+            queue
+                .resamplers
+                .retain(|_, r| now.duration_since(r.last_used) < PLAYOUT_RESAMPLER_IDLE);
+            let fresh = |from, to| -> Result<PlayoutResampler> {
+                Ok(PlayoutResampler {
+                    from,
+                    to,
+                    resampler: forge_resampler::Resampler::new(from, to, 1)
+                        .map_err(|e| ForgeError::Codec(format!("resampler: {e}")))?,
+                    carry: Vec::new(),
+                    last_used: now,
+                })
+            };
+            let stream = match queue.resamplers.remove(&playback_id) {
+                Some(r)
+                    if r.from == sample_rate && r.to == audio_sample_rate && !starts_talkspurt =>
+                {
+                    r
+                }
+                _ => fresh(sample_rate, audio_sample_rate)?,
+            };
+            let mut stream = stream;
+            stream.last_used = now;
+            let resampled = stream
+                .resampler
+                .resample(samples)
+                .map_err(|e| ForgeError::Codec(format!("resample: {e}")))?;
+            stream.carry.extend_from_slice(&resampled);
+            let whole = stream.carry.len() / frame_samples * frame_samples;
+            let frames = stream.carry[..whole]
+                .chunks(frame_samples)
+                .map(<[i16]>::to_vec)
+                .collect();
+            stream.carry.drain(..whole);
+            queue.resamplers.insert(playback_id.clone(), stream);
+            frames
+        } else {
+            samples
+                .chunks(frame_samples)
+                .map(|chunk| {
+                    let mut frame = chunk.to_vec();
+                    frame.resize(frame_samples, 0);
+                    frame
+                })
+                .collect()
+        };
 
+        for (index, frame) in frames.into_iter().enumerate() {
             let timestamp = stream_cursor;
             stream_cursor = stream_cursor.wrapping_add(timestamp_increment);
 
@@ -2460,6 +2635,12 @@ impl MediaSession {
                 .unwrap_or(true)
         });
         let removed = original_len.saturating_sub(queue.items.len());
+        match playback_id {
+            Some(id) => {
+                queue.resamplers.remove(&Some(id.to_string()));
+            }
+            None => queue.resamplers.clear(),
+        }
         Self::recompute_playout_queue_state(&mut queue);
         removed
     }
@@ -2615,6 +2796,42 @@ impl MediaSession {
         &self.srtp_b
     }
 
+    fn relay_suppression(&self, leg: ParticipantLabel) -> &std::sync::atomic::AtomicU32 {
+        match leg {
+            ParticipantLabel::A => &self.relay_suppressed_a,
+            ParticipantLabel::B => &self.relay_suppressed_b,
+        }
+    }
+
+    /// Stop relaying the other leg's audio toward `leg` until a matching
+    /// [`MediaSession::release_relay_to`].
+    pub fn suppress_relay_to(&self, leg: ParticipantLabel) {
+        self.relay_suppression(leg)
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Undo one [`MediaSession::suppress_relay_to`].
+    pub fn release_relay_to(&self, leg: ParticipantLabel) {
+        // A saturating decrement. A compare-exchange loop rather than `fetch_update`, which Rust 1.99
+        // deprecates in favour of `try_update` — newer than this workspace's rust-version (1.75).
+        use std::sync::atomic::Ordering::SeqCst;
+        let count = self.relay_suppression(leg);
+        let mut current = count.load(SeqCst);
+        while current > 0 {
+            match count.compare_exchange_weak(current, current - 1, SeqCst, SeqCst) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Whether relayed audio toward `leg` is being held back.
+    pub fn relay_suppressed(&self, leg: ParticipantLabel) -> bool {
+        self.relay_suppression(leg)
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    }
+
     /// DTLS-SRTP leg for participant A. `None` until
     /// [`MediaSession::enable_dtls`]
     /// installs it. The RTP recv loop checks this on every packet and
@@ -2666,6 +2883,66 @@ impl MediaSession {
         self.relay_rfc2833.store(relay, Ordering::Relaxed);
     }
 
+    /// Whether telephone-event from the other leg is relayed *to* `leg`.
+    ///
+    /// Relay is on for both directions when [`Self::set_relay_rfc2833`]
+    /// turns it on; this turns one direction off, for a leg that did not
+    /// negotiate telephone-event and would be sent a payload type it never
+    /// agreed to. The digits are still detected and published
+    /// ([`Self::subscribe_digits`]), so the caller can carry them on
+    /// another way.
+    pub fn set_rfc2833_relay_to(&self, leg: ParticipantLabel, relay: bool) {
+        self.leg_dtmf
+            .no_relay_to(leg)
+            .store(!relay, Ordering::Relaxed);
+    }
+
+    /// Whether telephone-event from the other leg reaches `leg`.
+    pub fn rfc2833_relayed_to(&self, leg: ParticipantLabel) -> bool {
+        self.relay_rfc2833() && !self.leg_dtmf.no_relay_to(leg).load(Ordering::Relaxed)
+    }
+
+    /// The digits each leg sends, as each one ends ([`LegDigit`]).
+    pub fn subscribe_digits(&self) -> tokio::sync::broadcast::Receiver<LegDigit> {
+        self.leg_dtmf.digits.subscribe()
+    }
+
+    /// Publish a digit `leg` sent, once it has ended.
+    pub(crate) fn publish_leg_digit(&self, leg: ParticipantLabel, event: &forge_dtmf::DtmfEvent) {
+        if event.event_type != forge_dtmf::DtmfEventType::End {
+            return;
+        }
+        // No subscriber is not an error: most sessions have none.
+        let _ = self.leg_dtmf.digits.send(LegDigit {
+            leg,
+            digit: event.digit,
+            duration_ms: event.duration_ms,
+            method: event.method,
+        });
+    }
+
+    /// Send `digit` to `leg` as RFC 2833 telephone-event, at the payload
+    /// type that leg negotiated, behind anything already queued for it.
+    ///
+    /// For a digit that arrived by signalling (SIP INFO) and must reach a
+    /// leg that takes telephone-event.
+    pub async fn send_dtmf(
+        &self,
+        leg: ParticipantLabel,
+        digit: forge_dtmf::DtmfDigit,
+        duration_ms: u32,
+    ) -> Result<()> {
+        self.schedule_dtmf_playout_for_leg(
+            leg,
+            digit,
+            duration_ms,
+            None,
+            crate::media_bridge::PlayoutMode::Append,
+            ScheduledPlayoutSource::SignalledDtmf,
+        )
+        .await
+    }
+
     /// Telephone-event payload type negotiated with participant A
     pub fn telephone_event_pt_a(&self) -> u8 {
         self.telephone_event_pt_a.load(Ordering::Relaxed)
@@ -2711,6 +2988,23 @@ impl MediaSession {
         manager: Arc<crate::media_bridge::MediaBridgeManager>,
     ) {
         *self.media_bridge_manager.write().await = Some(manager);
+    }
+
+    /// The supervisor, if the session has one.
+    pub(crate) fn party(&self) -> Option<Arc<crate::party::Party>> {
+        self.party.read().expect("party slot").clone()
+    }
+
+    pub(crate) fn party_slot(&self) -> &std::sync::RwLock<Option<Arc<crate::party::Party>>> {
+        &self.party
+    }
+
+    pub(crate) fn port_pool(&self) -> &Arc<PortPool> {
+        &self.port_pool
+    }
+
+    pub(crate) fn config(&self) -> &MediaSessionConfig {
+        &self.config
     }
 
     /// RTP sequencing state for generated audio toward a participant leg.
@@ -3070,6 +3364,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
+            relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
             srtp_b: Arc::new(Mutex::new(SrtpContext::new())),
             #[cfg(feature = "dtls")]
@@ -3099,7 +3395,10 @@ impl MediaSession {
             generated_rtp_state_b: Arc::new(Mutex::new(GeneratedRtpState::default())),
             recorder: Arc::new(RwLock::new(None)),
             recording_mixer: Arc::new(Mutex::new(RecordingMixer::default())),
+            party: std::sync::RwLock::new(None),
+            hep_correlation_id: OnceLock::new(),
             relay_rfc2833: AtomicBool::new(false),
+            leg_dtmf: LegDtmf::default(),
             telephone_event_pt_a: AtomicU8::new(101),
             telephone_event_pt_b: AtomicU8::new(101),
         };
@@ -3179,22 +3478,31 @@ pub(crate) enum RecordingSide {
     B,
 }
 
-/// Minimal mixer that pairs recent frames from each leg before writing to recordings.
+/// Mixer that holds each leg's audio until the other's has arrived, so a
+/// recording has the two of them together.
 ///
 /// # Purpose
 ///
 /// In two-party calls, RTP packets arrive independently from each participant. To create
-/// a proper stereo recording where both sides can be heard together, we need to mix the
-/// audio streams. This mixer buffers one frame at a time and combines it with the next
-/// frame from the opposite side.
+/// a recording where both sides can be heard together, we need to mix the
+/// audio streams. This mixer keeps a queue per side and writes a frame once
+/// both sides have one.
 ///
 /// # Buffering Strategy
 ///
-/// - When a frame arrives, if there's no buffered frame, store it
-/// - When a frame arrives and a frame from the **opposite** side is buffered, mix them
-/// - When a frame arrives and a frame from the **same** side is buffered, flush the old
-///   frame and buffer the new one
-/// - Frames older than 100ms are automatically flushed to prevent unbounded buffering
+/// - A frame is written as soon as both sides have one
+/// - A side is written on its own only once the other side has been quiet
+///   for [`QUIET`] — half a second
+/// - A side that holds more than [`MAX_HELD`] frames is written anyway, so
+///   a leg whose packets stop being delivered cannot grow the mix
+///
+/// The wait is on the clock rather than on how many frames each side has,
+/// because a loaded node does not hand the recorder the two directions
+/// evenly: it hands it a burst from one leg and then a burst from the
+/// other a few hundred milliseconds later. A mixer that wrote whatever it
+/// was holding when the next frame came in would put two people who talked
+/// over each other into the recording one after the other. A recording is
+/// not live, so waiting out that gap costs nothing.
 ///
 /// # Mixing Algorithm
 ///
@@ -3204,44 +3512,71 @@ pub(crate) enum RecordingSide {
 /// - When only one side is active, pass through unchanged
 ///
 /// This approach preserves silence while properly mixing overlapping speech.
-#[derive(Default)]
 pub(crate) struct RecordingMixer {
-    /// Buffered frame: (side, samples, timestamp)
-    pending: Option<(RecordingSide, Vec<i16>, Instant)>,
+    /// Participant A's audio, not yet written.
+    a: VecDeque<i16>,
+    /// Participant B's audio, not yet written.
+    b: VecDeque<i16>,
+    /// When each side last delivered audio — the recording's start until
+    /// that side has delivered any.
+    last_a: Instant,
+    last_b: Instant,
+    /// How many samples go in one written frame, taken from the first
+    /// frame pushed (a leg's packet, whatever its codec decodes to).
+    frame: usize,
 }
 
-/// Maximum age for buffered frame before auto-flush (100ms)
-const STALE_FRAME_THRESHOLD: Duration = Duration::from_millis(100);
+/// How long one side must have been quiet before the other is written
+/// against silence (500ms)
+const QUIET: Duration = Duration::from_millis(500);
+
+/// The most frames one side may hold while it waits for the other
+const MAX_HELD: usize = 100;
 
 /// Amplitude threshold for considering a sample "active" (helps distinguish silence from speech)
 const AMPLITUDE_THRESHOLD: i16 = 10;
 
+impl Default for RecordingMixer {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            a: VecDeque::new(),
+            b: VecDeque::new(),
+            last_a: now,
+            last_b: now,
+            frame: 0,
+        }
+    }
+}
+
 impl RecordingMixer {
-    /// Clear any buffered frame.
+    /// Drop whatever is held.
     ///
     /// Called when starting a new recording to ensure clean state.
     pub fn reset(&mut self) {
-        self.pending = None;
+        *self = Self::default();
     }
 
-    /// Flush any buffered frame to the recorder.
+    /// Write what is still held to the recorder, the two sides mixed.
     ///
-    /// Called when stopping a recording to ensure the last frame is written.
-    /// Write errors are silently ignored since the recording is ending anyway.
+    /// Called when stopping a recording to ensure the last of the call is
+    /// written. Write errors are silently ignored since the recording is
+    /// ending anyway.
     pub fn flush(&mut self, recorder: &forge_recorder::AudioRecorder) {
-        if let Some((_, samples, _)) = self.pending.take() {
-            let _ = recorder.write_samples(&samples);
+        let rest = self.a.len().max(self.b.len());
+        if rest > 0 {
+            let _ = recorder.write_samples(&self.take(rest));
         }
     }
 
-    /// Process incoming audio samples, mixing with buffered frames when appropriate.
+    /// Process incoming audio samples, mixing them with the other side's.
     ///
     /// # Behavior
     ///
-    /// 1. **No buffered frame**: Store the incoming frame
-    /// 2. **Buffered frame from opposite side**: Mix them together and write
-    /// 3. **Buffered frame from same side**: Flush buffered frame, store new one
-    /// 4. **Stale buffered frame (>100ms)**: Flush it, then store new frame
+    /// The frame joins its side's queue, and everything that can now be
+    /// written is: a frame once both sides have one, or one side on its
+    /// own once the other has been quiet for [`QUIET`] or it holds
+    /// [`MAX_HELD`] frames.
     ///
     /// # Parameters
     ///
@@ -3261,51 +3596,64 @@ impl RecordingMixer {
         samples: &[i16],
         recorder: &forge_recorder::AudioRecorder,
     ) {
+        for frame in self.push_at(side, samples, Instant::now()) {
+            if let Err(e) = recorder.write_samples(&frame) {
+                tracing::warn!(
+                    call_id = %call_id.0,
+                    "Failed to write samples to recorder: {}",
+                    e
+                );
+            }
+        }
+    }
+
+    /// `push` without a recorder: the frames it would write, in order.
+    fn push_at(&mut self, side: RecordingSide, samples: &[i16], now: Instant) -> Vec<Vec<i16>> {
         if samples.is_empty() {
-            return;
+            return Vec::new();
         }
-
-        let now = Instant::now();
-
-        if let Some((pending_side, pending_samples, timestamp)) = self.pending.take() {
-            // Check if buffered frame is stale and auto-flush
-            let age = now.duration_since(timestamp);
-            if age > STALE_FRAME_THRESHOLD {
-                if let Err(e) = recorder.write_samples(&pending_samples) {
-                    tracing::warn!(
-                        call_id = %call_id.0,
-                        age_ms = age.as_millis(),
-                        "Failed to write stale frame to recorder: {}",
-                        e
-                    );
-                }
-                // Buffer the new frame since the old one was stale
-                self.pending = Some((side, samples.to_vec(), now));
-                return;
+        if self.frame == 0 {
+            self.frame = samples.len();
+        }
+        match side {
+            RecordingSide::A => {
+                self.a.extend(samples);
+                self.last_a = now;
             }
+            RecordingSide::B => {
+                self.b.extend(samples);
+                self.last_b = now;
+            }
+        }
+        self.ready(now)
+    }
 
-            if pending_side != side {
-                let mixed = Self::mix_frames(&pending_samples, samples);
-                if let Err(e) = recorder.write_samples(&mixed) {
-                    tracing::warn!(
-                        call_id = %call_id.0,
-                        "Failed to write mixed samples to recorder: {}",
-                        e
-                    );
-                }
+    /// Everything that can be written now.
+    fn ready(&mut self, now: Instant) -> Vec<Vec<i16>> {
+        let frame = self.frame;
+        let mut out = Vec::new();
+        loop {
+            let (a, b) = (self.a.len(), self.b.len());
+            let quiet = |since: Instant, held: usize| {
+                now.saturating_duration_since(since) >= QUIET || held >= MAX_HELD * frame
+            };
+            let both = a >= frame && b >= frame;
+            let a_alone = a >= frame && quiet(self.last_b, a);
+            let b_alone = b >= frame && quiet(self.last_a, b);
+            if both || a_alone || b_alone {
+                out.push(self.take(frame));
             } else {
-                if let Err(e) = recorder.write_samples(&pending_samples) {
-                    tracing::warn!(
-                        call_id = %call_id.0,
-                        "Failed to write samples to recorder: {}",
-                        e
-                    );
-                }
-                self.pending = Some((side, samples.to_vec(), now));
+                return out;
             }
-        } else {
-            self.pending = Some((side, samples.to_vec(), now));
         }
+    }
+
+    /// The next `n` samples of each side, mixed. A side with nothing left
+    /// contributes silence.
+    fn take(&mut self, n: usize) -> Vec<i16> {
+        let a: Vec<i16> = self.a.drain(..n.min(self.a.len())).collect();
+        let b: Vec<i16> = self.b.drain(..n.min(self.b.len())).collect();
+        Self::mix_frames(&a, &b)
     }
 
     /// Mix two audio frames together using amplitude-aware averaging.
@@ -3393,7 +3741,7 @@ const PORT_BIND_ATTEMPTS: usize = 5;
 ///
 /// Only `AddrInUse` is retried. Any other bind error returns immediately —
 /// retrying must not paper over a genuine fault.
-async fn allocate_and_bind(
+pub(crate) async fn allocate_and_bind(
     port_pool: &Arc<PortPool>,
     socket_config: RtpSocketConfig,
     min_free_pairs: usize,
@@ -3477,7 +3825,7 @@ async fn release_all(port_pool: &Arc<PortPool>, pairs: Vec<PortPair>) {
     }
 }
 
-struct PortAllocationGuard {
+pub(crate) struct PortAllocationGuard {
     port_pool: Arc<PortPool>,
     ports: PortPair,
     active: bool,
@@ -3492,7 +3840,7 @@ impl PortAllocationGuard {
         }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.active = false;
     }
 }
@@ -3517,6 +3865,80 @@ impl Drop for PortAllocationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    /// One frame from each side makes one frame of the recording, with
+    /// both of them in it.
+    #[test]
+    fn a_frame_is_written_once_both_sides_have_one() {
+        let t0 = Instant::now();
+        let mut mix = RecordingMixer::default();
+        assert!(
+            mix.push_at(RecordingSide::A, &[100; 160], t0).is_empty(),
+            "waits for the other side"
+        );
+        let out = mix.push_at(RecordingSide::B, &[24; 160], t0 + ms(20));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], vec![62; 160], "both active, so averaged");
+    }
+
+    /// A leg that sends nothing does not hold the recording back — but it
+    /// is given the quiet window first.
+    #[test]
+    fn one_side_alone_is_written_once_the_other_has_been_quiet() {
+        let t0 = Instant::now();
+        let mut mix = RecordingMixer::default();
+        let mut held = 0;
+        for i in 0..5 {
+            held += mix
+                .push_at(RecordingSide::A, &[100; 160], t0 + ms(20 * i))
+                .len();
+        }
+        assert_eq!(held, 0, "held while the other side might arrive");
+        let out = mix.push_at(RecordingSide::A, &[100; 160], t0 + ms(520));
+        assert_eq!(out.len(), 6, "written once the other is quiet");
+        assert_eq!(out[0], vec![100; 160], "and passed through, not halved");
+    }
+
+    /// A loaded node hands the recorder a quarter of a second of one leg
+    /// at once and then a quarter of a second of the other. They talked
+    /// over each other, so the recording must have them over each other
+    /// rather than one after the other.
+    #[test]
+    fn a_burst_from_one_leg_is_mixed_with_the_burst_that_follows_it() {
+        let t0 = Instant::now();
+        let mut mix = RecordingMixer::default();
+        let mut out = Vec::new();
+        for burst in 0..4 {
+            let at = t0 + ms(500 * burst);
+            for _ in 0..12 {
+                out.extend(mix.push_at(RecordingSide::A, &[100; 160], at));
+            }
+            for _ in 0..12 {
+                out.extend(mix.push_at(RecordingSide::B, &[24; 160], at + ms(250)));
+            }
+        }
+        assert_eq!(out.len(), 48, "every frame of both bursts is written");
+        let together = out.iter().filter(|f| f[0] == 62).count();
+        assert_eq!(together, out.len(), "and every frame has both of them");
+    }
+
+    /// A leg whose packets stop being delivered cannot grow the mix.
+    #[test]
+    fn one_side_may_not_hold_more_than_its_share() {
+        let t0 = Instant::now();
+        let mut mix = RecordingMixer::default();
+        let mut written = 0;
+        for i in 0..MAX_HELD + 10 {
+            written += mix
+                .push_at(RecordingSide::A, &[100; 160], t0 + ms(i as u64))
+                .len();
+        }
+        assert_eq!(written, 11, "written from the cap on, inside the quiet");
+    }
 
     /// Hold every RTP port in a pool, so every draw collides.
     async fn squat_all(min: u16, max: u16) -> Vec<tokio::net::UdpSocket> {
@@ -3756,6 +4178,36 @@ mod tests {
         assert_eq!(session.call_id(), &call_id);
         assert_eq!(session.state().await, SessionState::Initializing);
         assert!(session.uptime() < Duration::from_secs(1));
+    }
+
+    // siphon-ai #603: HEP media chunks must be able to carry the SIP
+    // Call-ID rather than the session id, set after the session exists.
+    #[tokio::test]
+    async fn hep_correlation_id_defaults_to_call_id_and_is_set_once() {
+        let port_pool = Arc::new(PortPool::new(PortPoolConfig::new(31100, 31200).unwrap()));
+        let call_id = CallId::new("siphon-abc");
+        let session = MediaSession::new(
+            call_id,
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            &port_pool,
+            MediaSessionConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session.hep_correlation_id(), "siphon-abc");
+        assert!(session.set_hep_correlation_id("1c42@pbx.example.com"));
+        assert_eq!(session.hep_correlation_id(), "1c42@pbx.example.com");
+        // A second set is refused and leaves the first — the RTCP path
+        // must never see the key change mid-call.
+        assert!(!session.set_hep_correlation_id("other@pbx.example.com"));
+        assert_eq!(session.hep_correlation_id(), "1c42@pbx.example.com");
+        assert_eq!(session.call_id().0, "siphon-abc");
     }
 
     #[tokio::test]
@@ -4050,6 +4502,94 @@ mod tests {
             .iter()
             .filter(|i| matches!(i.kind, ScheduledPlayoutKind::Audio { .. }))
             .count()
+    }
+
+    #[tokio::test]
+    async fn relay_suppression_is_counted_per_leg() {
+        let session = make_test_session(40010).await;
+        assert!(!session.relay_suppressed(ParticipantLabel::A));
+        session.suppress_relay_to(ParticipantLabel::A);
+        session.suppress_relay_to(ParticipantLabel::A);
+        assert!(session.relay_suppressed(ParticipantLabel::A));
+        assert!(!session.relay_suppressed(ParticipantLabel::B));
+        session.release_relay_to(ParticipantLabel::A);
+        assert!(
+            session.relay_suppressed(ParticipantLabel::A),
+            "one playback still holds it"
+        );
+        session.release_relay_to(ParticipantLabel::A);
+        session.release_relay_to(ParticipantLabel::A);
+        assert!(
+            !session.relay_suppressed(ParticipantLabel::A),
+            "released, and never below zero"
+        );
+    }
+
+    /// 8 kHz audio handed over a 20 ms frame at a time, played to a leg
+    /// whose codec runs at 16 kHz (G.722, as a Poly VVX offers first): what
+    /// is queued must be the tone, clean, with no step at each frame's edge.
+    /// Each frame was resampled alone and by straight lines, and every
+    /// prompt to such a phone carried a buzz (FCP's D8).
+    #[tokio::test]
+    async fn audio_framed_at_8k_plays_cleanly_to_a_16k_leg() {
+        let session = make_test_session(40020).await;
+        session
+            .participant_lock(ParticipantLabel::A)
+            .write()
+            .await
+            .codec_config = ParticipantCodecConfig {
+            payload_type: 9,
+            codec: forge_core::AudioCodec::G722,
+            clock_rate: 8000,
+        };
+        let tone: Vec<i16> = (0..8000)
+            .map(|n| {
+                (8000.0 * (2.0 * std::f64::consts::PI * 1000.0 * n as f64 / 8000.0).sin()) as i16
+            })
+            .collect();
+        for frame in tone.chunks(160) {
+            session
+                .schedule_audio_playout(
+                    crate::media_bridge::MediaTarget::A,
+                    8000,
+                    frame,
+                    Some("prompt".to_string()),
+                    crate::media_bridge::PlayoutMode::Append,
+                    ScheduledPlayoutSource::AI,
+                )
+                .await
+                .unwrap();
+        }
+        let queue = session.playout_queue_lock(ParticipantLabel::A).lock().await;
+        let played: Vec<i16> = queue
+            .items
+            .iter()
+            .flat_map(|item| match &item.kind {
+                ScheduledPlayoutKind::Audio { samples, .. } => {
+                    assert_eq!(samples.len(), 320, "a whole 20 ms frame at 16 kHz");
+                    samples.clone()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        // One frame in, one out: nothing is lost or padded on the way.
+        assert_eq!(queue.items.len(), 50);
+        // Against the ideal tone at 16 kHz, delayed by the resampler.
+        let delay = forge_resampler::Resampler::new(8000, 16000, 1)
+            .unwrap()
+            .delay_frames() as f64
+            / 8000.0;
+        let ideal = |n: usize| {
+            8000.0 * (2.0 * std::f64::consts::PI * 1000.0 * (n as f64 / 16000.0 - delay)).sin()
+        };
+        let skip = 200;
+        let (mut signal, mut error) = (0.0, 0.0);
+        for (n, &y) in played.iter().enumerate().skip(skip) {
+            signal += ideal(n).powi(2);
+            error += (y as f64 - ideal(n)).powi(2);
+        }
+        let snr = 10.0 * (signal / error).log10();
+        assert!(snr > 50.0, "the tone at 16 kHz: {snr:.1} dB");
     }
 
     #[tokio::test]

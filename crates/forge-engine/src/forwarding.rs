@@ -231,7 +231,7 @@ impl ForwardingEngine {
                                         source_addr,
                                         local,
                                         &plain_data,
-                                        Some(&call_id.0),
+                                        Some(session.hep_correlation_id()),
                                     );
                                 }
                             }
@@ -325,6 +325,11 @@ impl ForwardingEngine {
         let te_pt_b = session.telephone_event_pt_b();
         let pkt_pt = packet.header.payload_type();
         if (pkt_pt == te_pt_a || pkt_pt == te_pt_b) && session.dtmf_config().enable_rfc2833 {
+            // Which leg sent it decides where it may be relayed, and is
+            // what a subscriber to the session's digits is told.
+            let sides =
+                Self::determine_packet_sides(session, participant_a, participant_b, source_addr)
+                    .await;
             tracing::debug!(
                 "Received RFC 2833 telephone-event packet for session {} from {}",
                 call_id.0,
@@ -350,6 +355,9 @@ impl ForwardingEngine {
                             counter!("forge_dtmf_events_total", "method" => "rfc2833", "digit" => format!("{}", event.digit)).increment(1);
                             counter!("forge_dtmf_rfc2833_events_total", "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type)).increment(1);
 
+                            if let Some((sender, _)) = sides {
+                                session.publish_leg_digit(sender.label(), &event);
+                            }
                             // Publish event to EventBus
                             if let Some(bus) = session.event_bus() {
                                 let _ = bus.publish(event.to_forge_event(call_id.clone()));
@@ -376,9 +384,11 @@ impl ForwardingEngine {
             session.update_activity().await;
             counter!("forge_dtmf_rfc2833_packets_total").increment(1);
 
-            if !session.relay_rfc2833() {
-                // Detect-only mode: consume the packet, don't forward
-                return;
+            // Detect-only, or a receiver that did not negotiate
+            // telephone-event: consume the packet, don't forward it.
+            match sides {
+                Some((_, receiver)) if session.rfc2833_relayed_to(receiver.label()) => {}
+                _ => return,
             }
             // Relay mode: fall through to normal forwarding path.
             // The packet's PT won't match audio codecs, so pcm_samples will be
@@ -403,6 +413,13 @@ impl ForwardingEngine {
 
         // Process decoded samples (if any)
         if !pcm_samples.is_empty() {
+            // A supervisor hears both legs (`crate::party`).
+            session.feed_party(
+                sender.label(),
+                &pcm_samples,
+                MediaSession::codec_audio_sample_rate(sender_codec.codec, sender_codec.clock_rate),
+            );
+
             // Audio tap for call recording (ALWAYS record if recorder is active)
             if let Some(recorder) = session.recorder.read().await.as_ref() {
                 let recording_side = match sender {
@@ -491,6 +508,7 @@ impl ForwardingEngine {
                                 counter!("forge_dtmf_events_total", "method" => "inband", "digit" => format!("{}", event.digit)).increment(1);
                                 counter!("forge_dtmf_inband_events_total", "digit" => format!("{}", event.digit), "event_type" => format!("{:?}", event.event_type)).increment(1);
 
+                                session.publish_leg_digit(sender.label(), &event);
                                 // Publish event to EventBus
                                 if let Some(bus) = session.event_bus() {
                                     let _ = bus.publish(event.to_forge_event(call_id.clone()));
@@ -580,6 +598,17 @@ impl ForwardingEngine {
         } else {
             packet
         };
+
+        // A playback replacing the other leg's audio (hold music) has the
+        // receiver: what the sender says is not relayed meanwhile.
+        let receiver_label = match receiver {
+            Side::A => ParticipantLabel::A,
+            Side::B => ParticipantLabel::B,
+        };
+        if session.relay_suppressed(receiver_label) {
+            counter!("forge_rtp_relay_suppressed_total").increment(1);
+            return;
+        }
 
         // Forward packet to receiver
         let receiver_addr = {
@@ -955,6 +984,54 @@ impl ForwardingEngine {
         let a = participant_a.read().await;
         let b = participant_b.read().await;
 
+        // A packet from exactly where a leg's peer is, is that leg's.
+        if a.remote_addr == Some(source_addr) {
+            return Some((Side::A, Side::B));
+        }
+        if b.remote_addr == Some(source_addr) {
+            return Some((Side::B, Side::A));
+        }
+
+        // A leg told to learn its peer from a named address claims the
+        // first packet from there, even when the other leg's peer shares
+        // the address: the other leg's packets come from its exact
+        // address, checked above, and this one did not. Without this, two
+        // peers on one address — a site and a carrier behind the same
+        // NAT, every node on a loopback — leave the learning leg deaf.
+        let source_ip = source_addr.ip();
+        let a_named_latch = a.remote_addr.is_none()
+            && a.latch_allowed_ips
+                .as_ref()
+                .is_some_and(|allowed| allowed.contains(&source_ip));
+        let b_named_latch = b.remote_addr.is_none()
+            && b.latch_allowed_ips
+                .as_ref()
+                .is_some_and(|allowed| allowed.contains(&source_ip));
+        if a_named_latch {
+            tracing::info!(
+                "Learning remote RTP endpoint for session {} leg A from its named address: {}",
+                call_id.0,
+                source_addr
+            );
+            counter!("forge_rtp_latch_learned_total").increment(1);
+            drop(a);
+            drop(b);
+            participant_a.write().await.remote_addr = Some(source_addr);
+            return Some((Side::A, Side::B));
+        }
+        if b_named_latch {
+            tracing::info!(
+                "Learning remote RTP endpoint for session {} leg B from its named address: {}",
+                call_id.0,
+                source_addr
+            );
+            counter!("forge_rtp_latch_learned_total").increment(1);
+            drop(a);
+            drop(b);
+            participant_b.write().await.remote_addr = Some(source_addr);
+            return Some((Side::B, Side::A));
+        }
+
         let a_ip_match = a
             .remote_addr
             .map(|addr| addr.ip() == source_addr.ip())
@@ -990,7 +1067,6 @@ impl ForwardingEngine {
             });
         }
 
-        let source_ip = source_addr.ip();
         let a_can_latch = a.remote_addr.is_none()
             && a.latch_allowed_ips
                 .as_ref()
@@ -1553,7 +1629,7 @@ impl ForwardingEngine {
                             local,
                             addr,
                             data,
-                            Some(&call_id.0),
+                            Some(session.hep_correlation_id()),
                         );
                     }
                 }
@@ -1767,7 +1843,7 @@ impl ForwardingEngine {
         let generated = session.generated_rtp_state(ParticipantLabel::A);
         for block in blocks {
             Self::record_report_block_metrics(block);
-            Self::emit_qos_report(sockets, source_addr, &call_id.0, block);
+            Self::emit_qos_report(sockets, source_addr, session.hep_correlation_id(), block);
             // RTT (RFC 3550 §A.7): only when the block reports on our
             // generated SSRC and carries the echo of an SR we sent. A
             // non-matching SSRC or `last_sr == 0` yields `None`.
@@ -1921,6 +1997,7 @@ mod tests {
     use forge_core::{CallId, ParticipantId};
     use forge_rtp::{PortPool, PortPoolConfig};
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_forwarding_basic() {
@@ -1970,6 +2047,99 @@ mod tests {
         // Stop forwarding
         session.stop_forwarding().await.unwrap();
         assert_eq!(session.state().await, SessionState::Terminated);
+    }
+
+    /// A session whose A leg is pinned to `a_remote` and whose B leg
+    /// learns its peer from `b_from`, and nothing else.
+    async fn latching_session(a_remote: std::net::SocketAddr, b_from: IpAddr) -> Arc<MediaSession> {
+        let config = PortPoolConfig::new(41000, 42000).unwrap();
+        let port_pool = Arc::new(PortPool::new(config));
+        let session_config = MediaSessionConfig {
+            socket_config: forge_rtp::RtpSocketConfig {
+                bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let session = Arc::new(
+            MediaSession::new(
+                CallId::generate(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                &port_pool,
+                session_config,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        session.participant_a().write().await.remote_addr = Some(a_remote);
+        {
+            let mut b = session.participant_b().write().await;
+            b.remote_addr = None;
+            b.latch_allowed_ips = Some(std::iter::once(b_from).collect());
+        }
+        session
+    }
+
+    /// A leg learning its peer from a named address gets the first packet
+    /// from there, even though the other leg's peer shares the address:
+    /// that leg's packets come from its exact address.
+    #[tokio::test]
+    async fn a_named_latch_claims_its_packets_beside_a_peer_on_the_same_address() {
+        let shared = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let a_remote: std::net::SocketAddr = (shared, 4000).into();
+        let session = latching_session(a_remote, shared).await;
+        let (pa, pb) = (
+            Arc::clone(session.participant_a()),
+            Arc::clone(session.participant_b()),
+        );
+
+        // A's own packet is A's.
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, a_remote).await;
+        assert_eq!(sides, Some((Side::A, Side::B)));
+        assert_eq!(
+            pb.read().await.remote_addr,
+            None,
+            "nothing learned from A's packet"
+        );
+
+        // A packet from the shared address, not from A's port, is B's
+        // first: B learns it.
+        let b_source: std::net::SocketAddr = (shared, 5000).into();
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, b_source).await;
+        assert_eq!(sides, Some((Side::B, Side::A)));
+        assert_eq!(pb.read().await.remote_addr, Some(b_source));
+
+        // Learned, B is exact too; A is still A.
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, b_source).await;
+        assert_eq!(sides, Some((Side::B, Side::A)));
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, a_remote).await;
+        assert_eq!(sides, Some((Side::A, Side::B)));
+    }
+
+    /// A leg that may learn from a named address learns from nowhere
+    /// else: a packet from another address is refused.
+    #[tokio::test]
+    async fn a_named_latch_refuses_another_address() {
+        let a_remote: std::net::SocketAddr = (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4000).into();
+        let session = latching_session(a_remote, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))).await;
+        let (pa, pb) = (
+            Arc::clone(session.participant_a()),
+            Arc::clone(session.participant_b()),
+        );
+        let stranger: std::net::SocketAddr =
+            (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 5000).into();
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, stranger).await;
+        assert_eq!(sides, None);
+        assert_eq!(pb.read().await.remote_addr, None);
+        let from_site: std::net::SocketAddr =
+            (IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 6000).into();
+        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, from_site).await;
+        assert_eq!(sides, Some((Side::B, Side::A)));
     }
 
     #[test]
@@ -2195,6 +2365,298 @@ mod tests {
             }
             other => panic!("expected RtcpReportReceived, got {other:?}"),
         }
+    }
+
+    /// An RFC 2833 packet for `event` (0-9 are the digits), `duration`
+    /// timestamp units in, from an SSRC of its own.
+    fn telephone_event_packet(
+        pt: u8,
+        seq: u16,
+        timestamp: u32,
+        event: u8,
+        end: bool,
+        duration: u16,
+    ) -> forge_rtp::RtpPacket {
+        let mut b = vec![0x80, pt];
+        b.extend(seq.to_be_bytes());
+        b.extend(timestamp.to_be_bytes());
+        b.extend(0x1234_5678u32.to_be_bytes());
+        b.extend([event, if end { 0x8a } else { 0x0a }]);
+        b.extend(duration.to_be_bytes());
+        forge_rtp::RtpPacket::parse(bytes::Bytes::from(b)).unwrap()
+    }
+
+    /// A digit leg A sends is published once, as leg A's; it is not
+    /// relayed to a leg B that did not negotiate telephone-event, and is
+    /// once relay to B is turned back on.
+    #[tokio::test]
+    async fn telephone_event_is_published_with_its_leg_and_relayed_only_where_allowed() {
+        let session = make_rtcp_test_session(41800, None).await;
+        session.set_relay_rfc2833(true);
+        session.set_rfc2833_relay_to(ParticipantLabel::B, false);
+        assert!(session.rfc2833_relayed_to(ParticipantLabel::A));
+        assert!(!session.rfc2833_relayed_to(ParticipantLabel::B));
+
+        let sink_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a_addr: std::net::SocketAddr = "127.0.0.1:41990".parse().unwrap();
+        let (sockets, pa, pb) = (
+            session.sockets().clone(),
+            session.participant_a().clone(),
+            session.participant_b().clone(),
+        );
+        pa.write().await.remote_addr = Some(a_addr);
+        pb.write().await.remote_addr = Some(sink_b.local_addr().unwrap());
+        let mut digits = session.subscribe_digits();
+
+        // Digit 5: two packets in progress, then the end repeated three
+        // times, as RFC 4733 §2.5.1.4 has a sender do.
+        for (seq, end, duration) in [
+            (1, false, 160),
+            (2, false, 320),
+            (3, true, 480),
+            (4, true, 480),
+            (5, true, 480),
+        ] {
+            let packet = telephone_event_packet(101, seq, 8000, 5, end, duration);
+            ForwardingEngine::handle_rtp_packet(&session, &sockets, &pa, &pb, packet, a_addr).await;
+        }
+
+        let digit = digits.try_recv().expect("the digit is published");
+        assert_eq!(digit.leg, ParticipantLabel::A);
+        assert_eq!(digit.digit, forge_dtmf::DtmfDigit::Five);
+        assert_eq!(digit.method, forge_dtmf::DtmfMethod::Rfc2833);
+        assert!(
+            digits.try_recv().is_err(),
+            "published once, not per end packet"
+        );
+
+        let mut buf = [0u8; 64];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), sink_b.recv_from(&mut buf))
+                .await
+                .is_err(),
+            "telephone-event reached a leg that refused it"
+        );
+
+        session.set_rfc2833_relay_to(ParticipantLabel::B, true);
+        let packet = telephone_event_packet(101, 6, 16000, 7, false, 160);
+        ForwardingEngine::handle_rtp_packet(&session, &sockets, &pa, &pb, packet, a_addr).await;
+        let (len, _) = tokio::time::timeout(Duration::from_secs(1), sink_b.recv_from(&mut buf))
+            .await
+            .expect("relayed once allowed")
+            .unwrap();
+        assert_eq!(buf[1] & 0x7f, 101);
+        assert_eq!(buf[12], 7, "{:?}", &buf[..len]);
+    }
+
+    /// A digit sent to a leg goes out as telephone-event at the payload
+    /// type that leg negotiated.
+    #[tokio::test]
+    async fn send_dtmf_plays_telephone_event_to_one_leg() {
+        let session = make_rtcp_test_session(41900, None).await;
+        session.set_telephone_event_pt_b(96);
+
+        let sink_a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sink_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (sockets, pa, pb) = (
+            session.sockets().clone(),
+            session.participant_a().clone(),
+            session.participant_b().clone(),
+        );
+        pa.write().await.remote_addr = Some(sink_a.local_addr().unwrap());
+        pb.write().await.remote_addr = Some(sink_b.local_addr().unwrap());
+
+        session
+            .send_dtmf(ParticipantLabel::B, forge_dtmf::DtmfDigit::Nine, 100)
+            .await
+            .unwrap();
+        ForwardingEngine::drain_scheduled_playout(&session, &sockets, &pa, &pb).await;
+
+        let mut buf = [0u8; 64];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(1), sink_b.recv_from(&mut buf))
+            .await
+            .expect("leg B hears the digit")
+            .unwrap();
+        assert_eq!(buf[1] & 0x7f, 96, "at leg B's payload type");
+        assert_eq!(buf[12], 9, "{:?}", &buf[..len]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), sink_a.recv_from(&mut buf))
+                .await
+                .is_err(),
+            "leg A was not sent the digit"
+        );
+    }
+
+    /// A 20 ms PCMU packet of one loud, steady sample.
+    fn loud_pcmu(seq: u16, ssrc: u32) -> bytes::Bytes {
+        let payload: Vec<u8> =
+            std::iter::repeat_n(forge_codecs::g711::encode_ulaw(8000), 160).collect();
+        forge_rtp::RtpPacket::build(
+            0,
+            seq,
+            u32::from(seq) * 160,
+            ssrc,
+            bytes::Bytes::from(payload),
+            false,
+        )
+        .to_bytes()
+        .freeze()
+    }
+
+    /// How loud a PCMU payload is: its mean absolute sample.
+    fn loudness(packet: &[u8]) -> i32 {
+        let payload = &packet[12..];
+        if payload.is_empty() {
+            return 0;
+        }
+        payload
+            .iter()
+            .map(|&b| (forge_codecs::g711::decode_ulaw(b) as i32).abs())
+            .sum::<i32>()
+            / payload.len() as i32
+    }
+
+    /// Wait for a loud packet on `sink`, draining the session's scheduled
+    /// playout as the forwarding loop would while waiting.
+    async fn heard_loud(
+        session: &Arc<MediaSession>,
+        sink: &tokio::net::UdpSocket,
+        within: Duration,
+    ) -> bool {
+        let (sockets, pa, pb) = (
+            session.sockets().clone(),
+            session.participant_a().clone(),
+            session.participant_b().clone(),
+        );
+        let deadline = tokio::time::Instant::now() + within;
+        let mut buf = [0u8; 512];
+        while tokio::time::Instant::now() < deadline {
+            ForwardingEngine::drain_scheduled_playout(session, &sockets, &pa, &pb).await;
+            if let Ok(Ok((len, _))) =
+                tokio::time::timeout(Duration::from_millis(20), sink.recv_from(&mut buf)).await
+            {
+                if len > 12 && loudness(&buf[..len]) > 2000 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// A supervisor (`crate::party`): monitoring hears leg A and is heard
+    /// by nobody; a whisper to B is heard by B alone, with B's relay
+    /// replaced by its mix; a barge is heard by both; removing the
+    /// supervisor gives the relay back.
+    #[tokio::test]
+    async fn a_supervisor_monitors_whispers_and_barges() {
+        use forge_mixer::{CallParty, SupervisionMode};
+        let session = make_rtcp_test_session(42100, None).await;
+        let sink_a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sink_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let supervisor = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (sockets, pa, pb) = (
+            session.sockets().clone(),
+            session.participant_a().clone(),
+            session.participant_b().clone(),
+        );
+        let a_addr = sink_a.local_addr().unwrap();
+        pa.write().await.remote_addr = Some(a_addr);
+        pb.write().await.remote_addr = Some(sink_b.local_addr().unwrap());
+
+        let ports = session.add_party(SupervisionMode::Monitor).await.unwrap();
+        assert!(
+            session.add_party(SupervisionMode::Monitor).await.is_err(),
+            "one supervisor at a time"
+        );
+        session
+            .connect_party(
+                supervisor.local_addr().unwrap(),
+                forge_core::AudioCodec::PCMU,
+                0,
+            )
+            .unwrap();
+        assert!(!session.relay_suppressed(ParticipantLabel::A));
+        assert!(!session.relay_suppressed(ParticipantLabel::B));
+
+        // Monitor: A speaks, the supervisor hears it.
+        let speak_a = {
+            let session = Arc::clone(&session);
+            let (sockets, pa, pb) = (sockets.clone(), pa.clone(), pb.clone());
+            tokio::spawn(async move {
+                for seq in 0..200u16 {
+                    let packet = forge_rtp::RtpPacket::parse(loud_pcmu(seq, 0xA)).unwrap();
+                    ForwardingEngine::handle_rtp_packet(
+                        &session, &sockets, &pa, &pb, packet, a_addr,
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        };
+        let mut buf = [0u8; 512];
+        let mut heard = false;
+        for _ in 0..50 {
+            let (len, from) =
+                tokio::time::timeout(Duration::from_secs(1), supervisor.recv_from(&mut buf))
+                    .await
+                    .expect("the supervisor is sent audio")
+                    .unwrap();
+            assert_eq!(
+                from.port(),
+                ports.rtp_port,
+                "from the supervisor's own port"
+            );
+            if loudness(&buf[..len]) > 2000 {
+                heard = true;
+                break;
+            }
+        }
+        assert!(heard, "the supervisor hears leg A");
+        speak_a.abort();
+
+        // Whisper to B: the supervisor speaks; B hears it, A does not.
+        session
+            .set_party_mode(SupervisionMode::Whisper(CallParty::B))
+            .unwrap();
+        assert!(session.relay_suppressed(ParticipantLabel::B));
+        assert!(!session.relay_suppressed(ParticipantLabel::A));
+        let party_addr: std::net::SocketAddr =
+            format!("127.0.0.1:{}", ports.rtp_port).parse().unwrap();
+        let speak_supervisor = {
+            // From another port at the same address: the supervisor is
+            // latched to where they send from.
+            tokio::spawn(async move {
+                let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                for seq in 0..200u16 {
+                    let _ = socket.send_to(&loud_pcmu(seq, 0x5), party_addr).await;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        };
+        assert!(
+            heard_loud(&session, &sink_b, Duration::from_secs(2)).await,
+            "the coached leg hears the supervisor"
+        );
+        assert!(
+            !heard_loud(&session, &sink_a, Duration::from_millis(500)).await,
+            "the far leg never hears a whisper"
+        );
+
+        // Barge: both legs hear the supervisor.
+        session.set_party_mode(SupervisionMode::Barge).unwrap();
+        assert!(session.relay_suppressed(ParticipantLabel::A));
+        assert!(
+            heard_loud(&session, &sink_a, Duration::from_secs(2)).await,
+            "a barge is heard by leg A"
+        );
+        speak_supervisor.abort();
+
+        // Gone: the relay is the legs' own again, the port back.
+        session.remove_party().await.unwrap();
+        assert!(!session.relay_suppressed(ParticipantLabel::A));
+        assert!(!session.relay_suppressed(ParticipantLabel::B));
+        assert!(session.party_ports().is_none());
+        assert!(session.party_mode().is_none());
     }
 
     async fn make_rtcp_test_session(

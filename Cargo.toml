@@ -29,11 +29,18 @@ members = [
     "crates/forge-transcoder",
     "crates/forge-video",
     "crates/forge-video-codecs",
+    "crates/forge-webm",
+    "crates/forge-mp4",
+    "crates/forge-bfcp",
+    "crates/forge-video-hw",
 ]
 # forge-kernel-ebpf is a no_std eBPF crate built separately with nightly + bpfel-unknown-none.
 # See crates/forge-kernel/build.rs for instructions.
 exclude = [
     "crates/forge-kernel-ebpf",
+    # cargo-fuzz builds these with a nightly toolchain and sanitizer flags;
+    # `fuzz/Cargo.toml` is its own workspace root. See fuzz/README.md.
+    "fuzz",
 ]
 
 [workspace.package]
@@ -205,7 +212,13 @@ debug = true
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+# Fat, not thin: with rustc 1.98, `lto = "thin"` together with
+# `codegen-units = 1` drops cross-crate definitions that only
+# forge-conference's video module references (undefined `forge_video` /
+# `forge_rtp::video` symbols at link time); thin LTO with 16 units and
+# fat LTO with one both link. One unit plus fat LTO is the intended
+# maximum-optimisation build anyway.
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true

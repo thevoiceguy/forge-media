@@ -400,8 +400,12 @@ pub struct SrtpContext {
     local_key: Option<SrtpKeyMaterial>,
     /// Key material for inbound (decrypting) traffic
     remote_key: Option<SrtpKeyMaterial>,
-    /// Replay protection window for RTP
-    replay_window: ReplayWindow,
+    /// Per-SSRC replay protection windows for RTP (RFC 3711 §3.3.2).
+    /// Every SSRC is its own stream with its own sequence space, so one
+    /// transport carrying audio and video (WebRTC BUNDLE) needs one
+    /// window per stream. Entries are only created after successful
+    /// authentication, so forged SSRCs cannot grow the map.
+    replay_windows: HashMap<u32, ReplayWindow>,
     /// Per-SSRC replay protection windows for RTCP (RFC 3711 Section 3.4).
     /// Each SSRC has its own SRTCP index space, so a shared window would
     /// reject a new SSRC's fresh low indices as replays after a mid-call
@@ -409,12 +413,29 @@ pub struct SrtpContext {
     /// Entries are only created after successful authentication, so forged
     /// SSRCs cannot grow the map.
     srtcp_replay_windows: HashMap<u32, ReplayWindow>,
-    /// ROC tracker for local (outbound) SSRC
-    local_roc: RocTracker,
-    /// ROC tracker for remote (inbound) SSRC
-    remote_roc: RocTracker,
-    /// SRTCP index for local (outbound) RTCP packets
-    local_srtcp_index: u32,
+    /// ROC tracker per local (outbound) SSRC
+    local_roc: HashMap<u32, RocTracker>,
+    /// ROC tracker per remote (inbound) SSRC. Like the replay windows, an
+    /// entry is only created once a packet on that SSRC authenticated.
+    remote_roc: HashMap<u32, RocTracker>,
+    /// SRTCP index per local (outbound) SSRC
+    local_srtcp_index: HashMap<u32, u32>,
+}
+
+/// The most SSRCs one context tracks in each direction. A peer keeps
+/// its streams well under this; the bound only stops a misbehaving one
+/// from growing the maps without limit.
+const MAX_TRACKED_SSRCS: usize = 256;
+
+/// The ROC tracker for a local SSRC, created on first use. Beyond
+/// [`MAX_TRACKED_SSRCS`] streams the context refuses new ones.
+fn local_roc_for(map: &mut HashMap<u32, RocTracker>, ssrc: u32) -> Result<&mut RocTracker> {
+    if !map.contains_key(&ssrc) && map.len() >= MAX_TRACKED_SSRCS {
+        return Err(ForgeError::Srtp(format!(
+            "too many outbound SSRCs (limit {MAX_TRACKED_SSRCS})"
+        )));
+    }
+    Ok(map.entry(ssrc).or_insert_with(RocTracker::new))
 }
 
 impl SrtpContext {
@@ -423,11 +444,11 @@ impl SrtpContext {
         Self {
             local_key: None,
             remote_key: None,
-            replay_window: ReplayWindow::new(64),
+            replay_windows: HashMap::new(),
             srtcp_replay_windows: HashMap::new(),
-            local_roc: RocTracker::new(),
-            remote_roc: RocTracker::new(),
-            local_srtcp_index: 0,
+            local_roc: HashMap::new(),
+            remote_roc: HashMap::new(),
+            local_srtcp_index: HashMap::new(),
         }
     }
 
@@ -436,11 +457,11 @@ impl SrtpContext {
         Self {
             local_key: Some(local_key),
             remote_key: Some(remote_key),
-            replay_window: ReplayWindow::new(64),
+            replay_windows: HashMap::new(),
             srtcp_replay_windows: HashMap::new(),
-            local_roc: RocTracker::new(),
-            remote_roc: RocTracker::new(),
-            local_srtcp_index: 0,
+            local_roc: HashMap::new(),
+            remote_roc: HashMap::new(),
+            local_srtcp_index: HashMap::new(),
         }
     }
 
@@ -484,12 +505,29 @@ impl SrtpContext {
         // preserved — see the doc comment.
     }
 
-    /// The current outbound SRTP packet index (ROC ‖ highest sent SEQ).
-    /// Lets a caller enforce the RFC 3711 §9.2 master-key lifetime
-    /// (a master key MUST NOT protect more than 2^48 SRTP packets) and
-    /// decide when to [`rekey`](Self::rekey). `0` before the first packet.
+    /// The highest outbound SRTP packet index (ROC ‖ highest sent SEQ)
+    /// over every local SSRC. Lets a caller enforce the RFC 3711 §9.2
+    /// master-key lifetime (a master key MUST NOT protect more than 2^48
+    /// SRTP packets) and decide when to [`rekey`](Self::rekey). `0`
+    /// before the first packet.
     pub fn local_packet_index(&self) -> u64 {
-        self.local_roc.current_index()
+        self.local_roc
+            .values()
+            .map(RocTracker::current_index)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The outbound SRTP packet index of one local SSRC; `None` before
+    /// its first packet.
+    pub fn local_packet_index_for(&self, ssrc: u32) -> Option<u64> {
+        self.local_roc.get(&ssrc).map(RocTracker::current_index)
+    }
+
+    /// The number of outbound SRTP packets protected on `ssrc` so far,
+    /// as the highest index seen plus one; `0` before its first packet.
+    pub fn local_packets_sent(&self, ssrc: u32) -> u64 {
+        self.local_packet_index_for(ssrc).map_or(0, |i| i + 1)
     }
 
     /// Encrypt an RTP packet to SRTP
@@ -544,10 +582,11 @@ impl SrtpContext {
             return Err(ForgeError::Srtp("Invalid RTP header".to_string()));
         }
 
-        // Update ROC
-        self.local_roc.update(sequence);
-        let roc = self.local_roc.roc;
-        let packet_index = self.local_roc.get_index(sequence);
+        // Update this SSRC's ROC
+        let tracker = local_roc_for(&mut self.local_roc, ssrc)?;
+        tracker.update(sequence);
+        let roc = tracker.roc;
+        let packet_index = tracker.get_index(sequence);
 
         // Derive session keys
         let derived_keys = key_material.derive_srtp_session_keys(ssrc, packet_index)?;
@@ -804,14 +843,24 @@ impl SrtpContext {
             ));
         }
 
-        // Determine ROC
-        let roc = self.remote_roc.get_roc(sequence);
+        // Determine this SSRC's ROC. A stream we have not authenticated a
+        // packet on yet starts at ROC 0 (RFC 3711 §3.3.1).
+        let roc = self
+            .remote_roc
+            .get(&ssrc)
+            .map_or(0, |t| t.get_roc(sequence));
         let packet_index = ((roc as u64) << 16) | (sequence as u64);
 
-        // Check replay protection
-        if self.replay_window.check(packet_index) {
-            counter!("forge_srtp_replay_attacks_blocked_total").increment(1);
-            return Err(ForgeError::Srtp("Replay attack detected".to_string()));
+        // Check this SSRC's replay window; an unseen SSRC has none yet.
+        if let Some(window) = self.replay_windows.get(&ssrc) {
+            if window.check(packet_index) {
+                counter!("forge_srtp_replay_attacks_blocked_total").increment(1);
+                return Err(ForgeError::Srtp("Replay attack detected".to_string()));
+            }
+        } else if self.replay_windows.len() >= MAX_TRACKED_SSRCS {
+            return Err(ForgeError::Srtp(format!(
+                "too many inbound SSRCs (limit {MAX_TRACKED_SSRCS})"
+            )));
         }
 
         // Derive session keys
@@ -840,9 +889,16 @@ impl SrtpContext {
             )?,
         };
 
-        // Update replay window
-        self.replay_window.update(packet_index);
-        self.remote_roc.update(sequence);
+        // Update this SSRC's replay window and ROC only after successful
+        // authentication, so forged packets cannot create or advance them
+        self.replay_windows
+            .entry(ssrc)
+            .or_insert_with(|| ReplayWindow::new(64))
+            .update(packet_index);
+        self.remote_roc
+            .entry(ssrc)
+            .or_insert_with(RocTracker::new)
+            .update(sequence);
 
         // Increment metrics counter
         counter!("forge_srtp_packets_decrypted_total").increment(1);
@@ -1051,9 +1107,18 @@ impl SrtpContext {
         // Extract RTCP header fields
         let ssrc = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
 
-        // SRTCP uses its own index counter (separate from RTP ROC)
-        let srtcp_index = self.local_srtcp_index & 0x7FFF_FFFF;
-        self.local_srtcp_index = self.local_srtcp_index.wrapping_add(1) & 0x7FFF_FFFF;
+        // SRTCP uses its own index counter per SSRC (separate from the RTP
+        // ROC; RFC 3711 §3.4)
+        if !self.local_srtcp_index.contains_key(&ssrc)
+            && self.local_srtcp_index.len() >= MAX_TRACKED_SSRCS
+        {
+            return Err(ForgeError::Srtp(format!(
+                "too many outbound RTCP SSRCs (limit {MAX_TRACKED_SSRCS})"
+            )));
+        }
+        let counter = self.local_srtcp_index.entry(ssrc).or_insert(0);
+        let srtcp_index = *counter & 0x7FFF_FFFF;
+        *counter = counter.wrapping_add(1) & 0x7FFF_FFFF;
 
         // Derive session keys using SRTCP index
         let derived_keys = key_material.derive_srtcp_session_keys(ssrc, srtcp_index as u64)?;
@@ -1593,6 +1658,92 @@ impl ReplayWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key_pair() -> (SrtpKeyMaterial, SrtpKeyMaterial) {
+        let profile = SrtpProfile::Aes128CmHmacSha1_80;
+        let a = SrtpKeyMaterial::new(vec![0x11; 16], vec![0x22; 14], profile).unwrap();
+        let b = SrtpKeyMaterial::new(vec![0x33; 16], vec![0x44; 14], profile).unwrap();
+        (a, b)
+    }
+
+    fn rtp(ssrc: u32, seq: u16) -> Vec<u8> {
+        crate::RtpPacket::build(
+            96,
+            seq,
+            seq as u32 * 160,
+            ssrc,
+            bytes::Bytes::from_static(b"payload"),
+            false,
+        )
+        .to_bytes()
+        .to_vec()
+    }
+
+    /// Audio and video on one transport (WebRTC BUNDLE): two SSRCs with
+    /// unrelated sequence spaces must each keep their own ROC and replay
+    /// window, or one stream's sequence numbers corrupt the other's index.
+    #[test]
+    fn two_ssrcs_on_one_context_keep_independent_indices() {
+        let (a, b) = key_pair();
+        let mut sender = SrtpContext::with_keys(a.clone(), b.clone());
+        let mut receiver = SrtpContext::with_keys(b, a);
+        // Audio starts near the top of the sequence space and wraps;
+        // video starts near the bottom. Interleaved, a shared ROC would
+        // see each switch as a wrap.
+        let mut audio_seq: u16 = 65_530;
+        let mut video_seq: u16 = 5;
+        for _ in 0..40 {
+            for (ssrc, seq) in [(0xA0D10, &mut audio_seq), (0x71DE0, &mut video_seq)] {
+                let plain = rtp(ssrc, *seq);
+                let protected = sender.protect_rtp(&plain).unwrap();
+                let back = receiver
+                    .unprotect_rtp(&protected)
+                    .unwrap_or_else(|e| panic!("ssrc {ssrc:#x} seq {seq}: {e}"));
+                assert_eq!(back, plain);
+                *seq = seq.wrapping_add(1);
+            }
+        }
+        // The audio stream wrapped once; the video stream did not.
+        assert_eq!(sender.local_packet_index_for(0xA0D10), Some((1 << 16) | 33));
+        assert_eq!(sender.local_packet_index_for(0x71DE0), Some(44));
+        assert_eq!(sender.local_packet_index(), (1 << 16) | 33);
+        assert_eq!(sender.local_packets_sent(0x71DE0), 45);
+        assert_eq!(sender.local_packets_sent(0xBEEF), 0);
+    }
+
+    #[test]
+    fn replay_is_detected_per_ssrc() {
+        let (a, b) = key_pair();
+        let mut sender = SrtpContext::with_keys(a.clone(), b.clone());
+        let mut receiver = SrtpContext::with_keys(b, a);
+        let p1 = sender.protect_rtp(&rtp(1, 100)).unwrap();
+        let p2 = sender.protect_rtp(&rtp(2, 100)).unwrap();
+        receiver.unprotect_rtp(&p1).unwrap();
+        // The same index on another SSRC is a different stream, not a replay.
+        receiver.unprotect_rtp(&p2).unwrap();
+        // The same packet again is.
+        assert!(receiver.unprotect_rtp(&p1).is_err());
+        assert!(receiver.unprotect_rtp(&p2).is_err());
+    }
+
+    #[test]
+    fn srtcp_index_is_per_sender_ssrc() {
+        let (a, b) = key_pair();
+        let mut sender = SrtpContext::with_keys(a.clone(), b.clone());
+        let mut receiver = SrtpContext::with_keys(b, a);
+        let rr = |ssrc: u32| {
+            crate::RtcpPacket::ReceiverReport(crate::ReceiverReport::new(ssrc)).to_bytes()
+        };
+        for _ in 0..3 {
+            for ssrc in [10u32, 20] {
+                let plain = rr(ssrc);
+                let protected = sender.protect_rtcp(&plain).unwrap();
+                assert_eq!(receiver.unprotect_rtcp(&protected).unwrap(), plain);
+            }
+        }
+        assert_eq!(sender.local_srtcp_index[&10], 3);
+        assert_eq!(sender.local_srtcp_index[&20], 3);
+    }
 
     #[test]
     fn test_srtp_profile_lengths() {

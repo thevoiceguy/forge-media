@@ -11,6 +11,7 @@ pub mod injection;
 pub mod manager;
 pub mod media_bridge;
 pub mod metrics;
+pub mod party;
 #[cfg(feature = "ai")]
 pub mod persistence;
 pub mod session;
@@ -23,24 +24,28 @@ pub use dtls_srtp::{
     install_keys as install_dtls_srtp_keys, is_dtls_packet, is_rtp_packet,
     is_unsupported_first_byte, DtlsLeg, HandshakeOutcome,
 };
-pub use forge_dtmf::DtmfDigit;
+pub use forge_dtmf::{DtmfDigit, DtmfMethod};
+pub use forge_mixer::{CallParty, SupervisionMode};
 pub use forwarding::ForwardingEngine;
 pub use injection::{
-    AudioTarget, MixMode, PlaybackHandle, PlaybackId, PlaybackManager, PlaybackStatus,
+    AudioTarget, MixMode, PlaybackHandle, PlaybackId, PlaybackManager, PlaybackOptions,
+    PlaybackStatus,
 };
 pub use manager::{SessionManager, SessionManagerConfig};
 pub use media_bridge::{
     InboundMediaFrame, MediaBridgeHandle, MediaBridgeManager, MediaTarget, OutboundDtmfRequest,
     OutboundMediaFrame, OutboundMediaRequest, PlayoutMode,
 };
+pub use party::PARTY_SAMPLE_RATE;
 #[cfg(feature = "ai")]
 pub use persistence::{
     ConnectionState, PersistedAISession, PersistenceBackend, PersistenceBackendType,
     PersistenceConfig,
 };
 pub use session::{
-    MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig, ParticipantLabel,
-    ParticipantMediaState, ParticipantMediaUpdate, ParticipantStats, SessionState,
+    LegDigit, MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig,
+    ParticipantLabel, ParticipantMediaState, ParticipantMediaUpdate, ParticipantStats,
+    SessionState,
 };
 
 #[cfg(feature = "xdp")]

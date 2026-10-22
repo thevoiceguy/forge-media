@@ -30,6 +30,37 @@ pub const M_PARTICIPANT_RECORDINGS_STARTED: &str =
 pub const M_PARTICIPANT_RECORDINGS_STOPPED: &str =
     "forge_conference_participant_recordings_stopped_total";
 
+// Video (the `video` module).
+pub const M_VIDEO_ROOMS: &str = "forge_conference_video_rooms";
+pub const M_VIDEO_SOURCES: &str = "forge_conference_video_sources";
+pub const M_VIDEO_ENCODERS: &str = "forge_conference_video_encoders";
+pub const M_VIDEO_FPS: &str = "forge_conference_video_fps";
+pub const M_VIDEO_TICKS: &str = "forge_conference_video_ticks_total";
+pub const M_VIDEO_FRAMES_DECODED: &str = "forge_conference_video_frames_decoded_total";
+pub const M_VIDEO_FRAMES_LOST: &str = "forge_conference_video_frames_lost_total";
+pub const M_VIDEO_FRAMES_DROPPED: &str = "forge_conference_video_frames_dropped_total";
+pub const M_VIDEO_FRAMES_MOVED: &str = "forge_conference_video_frames_moved_total";
+pub const M_VIDEO_DECODE_ERRORS: &str = "forge_conference_video_decode_errors_total";
+pub const M_VIDEO_ENCODE_ERRORS: &str = "forge_conference_video_encode_errors_total";
+pub const M_VIDEO_KEYFRAMES_SENT: &str = "forge_conference_video_keyframes_sent_total";
+pub const M_VIDEO_PACKETS_SENT: &str = "forge_conference_video_packets_sent_total";
+pub const M_VIDEO_PLIS_SENT: &str = "forge_conference_video_plis_sent_total";
+pub const M_VIDEO_PLIS_RECEIVED: &str = "forge_conference_video_plis_received_total";
+pub const M_VIDEO_NACKS_SENT: &str = "forge_conference_video_nacks_sent_total";
+pub const M_VIDEO_NACKS_RECEIVED: &str = "forge_conference_video_nacks_received_total";
+pub const M_VIDEO_COMPOSE_DURATION: &str = "forge_conference_video_compose_duration_seconds";
+pub const M_VIDEO_RECORDINGS: &str = "forge_conference_video_recordings";
+pub const M_VIDEO_RECORDING_FRAMES_DROPPED: &str =
+    "forge_conference_video_recording_frames_dropped_total";
+pub const M_VIDEO_LADDER_MOVES: &str = "forge_conference_video_ladder_moves_total";
+pub const M_VIDEO_SHED: &str = "forge_conference_video_shed_total";
+pub const M_VIDEO_CONTENT_ROOMS: &str = "forge_conference_video_content_rooms";
+pub const M_VIDEO_CONTENT_STARTED: &str = "forge_conference_video_content_started_total";
+pub const M_VIDEO_CONTENT_STOPPED: &str = "forge_conference_video_content_stopped_total";
+pub const M_VIDEO_CONTENT_REFUSED: &str = "forge_conference_video_content_refused_total";
+pub const M_VIDEO_CONTENT_PACKETS_REFUSED: &str =
+    "forge_conference_video_content_packets_refused_total";
+
 /// Every counter family forge-conference emits.
 pub const ALL_COUNTERS: &[&str] = &[
     M_ROOMS_CREATED,
@@ -41,13 +72,51 @@ pub const ALL_COUNTERS: &[&str] = &[
     M_RECORDINGS_STOPPED,
     M_PARTICIPANT_RECORDINGS_STARTED,
     M_PARTICIPANT_RECORDINGS_STOPPED,
+    M_VIDEO_TICKS,
+    M_VIDEO_FRAMES_DECODED,
+    M_VIDEO_FRAMES_LOST,
+    M_VIDEO_FRAMES_DROPPED,
+    M_VIDEO_FRAMES_MOVED,
+    M_VIDEO_DECODE_ERRORS,
+    M_VIDEO_ENCODE_ERRORS,
+    M_VIDEO_KEYFRAMES_SENT,
+    M_VIDEO_PACKETS_SENT,
+    M_VIDEO_PLIS_SENT,
+    M_VIDEO_PLIS_RECEIVED,
+    M_VIDEO_NACKS_SENT,
+    M_VIDEO_NACKS_RECEIVED,
+    M_VIDEO_RECORDING_FRAMES_DROPPED,
+    M_VIDEO_LADDER_MOVES,
+    M_VIDEO_SHED,
+    M_VIDEO_CONTENT_STARTED,
+    M_VIDEO_CONTENT_STOPPED,
+    M_VIDEO_CONTENT_REFUSED,
+    M_VIDEO_CONTENT_PACKETS_REFUSED,
 ];
 
 /// Every gauge family forge-conference emits.
-pub const ALL_GAUGES: &[&str] = &[M_ROOMS_ACTIVE, M_PARTICIPANTS_ACTIVE, M_RECORDINGS_ACTIVE];
+pub const ALL_GAUGES: &[&str] = &[
+    M_ROOMS_ACTIVE,
+    M_PARTICIPANTS_ACTIVE,
+    M_RECORDINGS_ACTIVE,
+    M_VIDEO_ROOMS,
+    M_VIDEO_SOURCES,
+    M_VIDEO_ENCODERS,
+    M_VIDEO_FPS,
+    M_VIDEO_RECORDINGS,
+    M_VIDEO_CONTENT_ROOMS,
+];
 
 /// Every histogram family forge-conference emits.
-pub const ALL_HISTOGRAMS: &[&str] = &[M_MIXING_DURATION];
+pub const ALL_HISTOGRAMS: &[&str] = &[M_MIXING_DURATION, M_VIDEO_COMPOSE_DURATION];
+
+/// Suggested buckets for `forge_conference_video_compose_duration_seconds`.
+///
+/// One compose pass renders every layout output and encodes every
+/// flavor; at 15 fps the budget is 66 ms and at 30 fps 33 ms, and three
+/// overruns in a row halve the room's frame rate.
+pub const VIDEO_COMPOSE_DURATION_SECONDS_BUCKETS: [f64; 9] =
+    [0.001, 0.002, 0.005, 0.01, 0.02, 0.033, 0.066, 0.1, 0.2];
 
 /// Suggested buckets for `forge_conference_mixing_duration_seconds`.
 ///
@@ -105,6 +174,93 @@ pub fn describe_metrics() {
     describe_counter!(
         M_PARTICIPANT_RECORDINGS_STOPPED,
         "Per-participant recordings stopped, by room_id and participant_id."
+    );
+    describe_gauge!(M_VIDEO_ROOMS, "Rooms with video running.");
+    describe_gauge!(M_VIDEO_SOURCES, "Participants sending video, node-wide.");
+    describe_gauge!(M_VIDEO_ENCODERS, "Video encoders running, node-wide.");
+    describe_gauge!(
+        M_VIDEO_RECORDINGS,
+        "Recordings taking a room's composite, node-wide."
+    );
+    describe_counter!(
+        M_VIDEO_RECORDING_FRAMES_DROPPED,
+        "Composite frames a recording could not take, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_LADDER_MOVES,
+        "Subscribers moved between bitrate-ladder rungs, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_SHED,
+        "Times an output was dropped a rung because the room was overrunning, by room_id."
+    );
+    describe_gauge!(M_VIDEO_CONTENT_ROOMS, "Rooms with a screen being shared.");
+    describe_counter!(
+        M_VIDEO_CONTENT_STARTED,
+        "Screen shares that took the floor, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_CONTENT_STOPPED,
+        "Screen shares that gave up the floor, by room_id and reason."
+    );
+    describe_counter!(
+        M_VIDEO_CONTENT_REFUSED,
+        "Screen shares refused the floor, by room_id and reason (once per participant per floor)."
+    );
+    describe_counter!(
+        M_VIDEO_CONTENT_PACKETS_REFUSED,
+        "Content packets dropped because their sender does not hold the floor, by room_id."
+    );
+    describe_gauge!(
+        M_VIDEO_FPS,
+        "A room's current video frame rate, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_TICKS,
+        "Video clock ticks (compose passes), by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_FRAMES_DECODED,
+        "Video frames decoded from participants, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_FRAMES_LOST,
+        "Video frames the assembler gave up on (loss or invalid), by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_FRAMES_DROPPED,
+        "Video frames not decoded (invalid picture, queue, rate or size limit), by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_FRAMES_MOVED,
+        "Video frames copied between the room's device and the host for a stage that runs on the other (decoder, encoder or compositor fallback), by room_id and `to`."
+    );
+    describe_counter!(M_VIDEO_DECODE_ERRORS, "Video decoder errors, by room_id.");
+    describe_counter!(M_VIDEO_ENCODE_ERRORS, "Video encoder errors, by room_id.");
+    describe_counter!(
+        M_VIDEO_KEYFRAMES_SENT,
+        "Keyframes produced by composite encoders, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_PACKETS_SENT,
+        "Composite video frames handed to subscribers (one per subscriber per frame), by room_id."
+    );
+    describe_counter!(M_VIDEO_PLIS_SENT, "PLIs sent to video sources, by room_id.");
+    describe_counter!(
+        M_VIDEO_PLIS_RECEIVED,
+        "PLIs and FIRs received from video subscribers, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_NACKS_SENT,
+        "NACKs sent to video sources, by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_NACKS_RECEIVED,
+        "NACKs received from video subscribers, by room_id."
+    );
+    describe_histogram!(
+        M_VIDEO_COMPOSE_DURATION,
+        "Wall time of one video compose pass (render and encode), by room_id."
     );
 }
 

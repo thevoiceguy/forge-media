@@ -7,6 +7,7 @@ use crate::dtmf_commands::{
 };
 use crate::pin_auth::PinAuthenticator;
 use crate::room_config::EffectiveRoomConfig;
+use crate::video::{VideoBackend, VideoRoom, VideoRoomSettings};
 use crate::{AudioFormat, ConferenceError, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -29,6 +30,25 @@ pub type RoomId = String;
 /// `play_sound_to_all`). A virtual participant, not a caller.
 pub const AUDIO_FEEDBACK_PARTICIPANT_ID: &str = "__audio_feedback__";
 
+/// One mixed frame of the room, as [`ConferenceRoom::tap_mix`] hands it
+/// out: what the room sounds like at that moment, which is what a
+/// recording writes beside the composite video (design §11).
+#[derive(Debug, Clone)]
+pub struct MixedFrame {
+    /// Interleaved samples at [`MixedFrame::sample_rate`]; shared, so a
+    /// second listener costs nothing.
+    pub samples: Arc<Vec<i16>>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// When the frame was mixed, for lining audio up with the video
+    /// composed at the same moment.
+    pub at: std::time::Instant,
+}
+
+/// Frames a slow listener may fall behind by before it starts missing
+/// them: two seconds of 20 ms frames.
+const MIX_TAP_BACKLOG: usize = 100;
+
 /// Conference room with audio mixing and optional recording
 pub struct ConferenceRoom {
     /// Room identifier
@@ -37,6 +57,8 @@ pub struct ConferenceRoom {
     mixer: Arc<AudioMixer>,
     /// Optional recorder for capturing the conference
     recorder: Arc<RwLock<Option<AudioRecorder>>>,
+    /// Listeners on the room's mix (see [`ConferenceRoom::tap_mix`]).
+    mix_taps: tokio::sync::broadcast::Sender<MixedFrame>,
     /// Optional AI manager for this room
     ai_manager: Arc<RwLock<Option<crate::ai_manager::ConferenceAIManager>>>,
     /// Optional DTMF command handler
@@ -73,6 +95,8 @@ pub struct ConferenceRoom {
     frame_clock_task: parking_lot::Mutex<Option<JoinHandle<()>>>,
     /// Frame sequence broadcast to consumers waiting on the clock
     frame_tx: tokio::sync::watch::Sender<u64>,
+    /// The video room, when the meeting has video enabled
+    video: RwLock<Option<Arc<VideoRoom>>>,
 }
 
 impl ConferenceRoom {
@@ -97,6 +121,7 @@ impl ConferenceRoom {
             id,
             mixer: Arc::new(mixer),
             recorder: Arc::new(RwLock::new(None)),
+            mix_taps: tokio::sync::broadcast::channel(MIX_TAP_BACKLOG).0,
             ai_manager: Arc::new(RwLock::new(None)),
             dtmf_handler: Arc::new(RwLock::new(None)),
             dtmf_task: Arc::new(RwLock::new(None)),
@@ -115,7 +140,43 @@ impl ConferenceRoom {
             frame_size,
             frame_clock_task: parking_lot::Mutex::new(None),
             frame_tx: tokio::sync::watch::channel(0).0,
+            video: RwLock::new(None),
         })
+    }
+
+    // ---- video ------------------------------------------------------------
+
+    /// Start the room's video (or return the running one). Participants
+    /// already in the room are adopted; later joins and leaves follow
+    /// automatically. Settings of a running room are left alone: use the
+    /// [`VideoRoom`] setters to change them.
+    pub fn enable_video(
+        self: &Arc<Self>,
+        settings: VideoRoomSettings,
+        backend: &VideoBackend,
+    ) -> Arc<VideoRoom> {
+        if let Some(v) = self.video.read().as_ref() {
+            return Arc::clone(v);
+        }
+        let mut slot = self.video.write();
+        if let Some(v) = slot.as_ref() {
+            return Arc::clone(v);
+        }
+        let room = VideoRoom::start(&self.id, settings, backend.clone(), self);
+        *slot = Some(Arc::clone(&room));
+        room
+    }
+
+    /// Stop the room's video; every participant's video leg is dropped.
+    pub fn disable_video(&self) {
+        if let Some(v) = self.video.write().take() {
+            v.stop();
+        }
+    }
+
+    /// The video room, when enabled.
+    pub fn video(&self) -> Option<Arc<VideoRoom>> {
+        self.video.read().clone()
     }
 
     /// Configure room with PIN authentication and room-specific settings
@@ -558,6 +619,41 @@ impl ConferenceRoom {
         self.add_participant_inner(&participant_id, false)
     }
 
+    /// Add a participant who was already admitted to this room on another
+    /// node and is moving here as it drains (FCP's distributed
+    /// conferencing, phase 5). The lock and wait-for-moderator do not
+    /// apply — they were passed once — but capacity does, hosts are
+    /// tracked, and no join sound plays (the room never heard them leave).
+    /// The caller is responsible for having verified the claim.
+    pub fn add_participant_admitted<S: Into<String>>(
+        &self,
+        participant_id: S,
+        is_host: bool,
+    ) -> Result<()> {
+        let participant_id = participant_id.into();
+        {
+            let config = self.room_config.read();
+            if let Some(cfg) = config.as_ref() {
+                if cfg.max_channels > 0 {
+                    let current_count =
+                        self.mixer.participant_count() + self.waiting_participants.len();
+                    if current_count >= cfg.max_channels {
+                        return Err(ConferenceError::ConferenceFull(cfg.max_channels));
+                    }
+                }
+            }
+        }
+        if is_host {
+            info!(
+                "Adding migrated host {} to room {}",
+                participant_id, self.id
+            );
+            self.hosts.insert(participant_id.clone(), ());
+            self.release_waiting_participants();
+        }
+        self.add_participant_inner(&participant_id, false)
+    }
+
     /// Add a participant that represents something other than a caller —
     /// an inter-node trunk, a media injector — and so answers to none of
     /// the caller-facing admission rules: no lock, wait-for-moderator or
@@ -581,6 +677,9 @@ impl ConferenceRoom {
     fn add_participant_inner(&self, participant_id: &str, play_sound: bool) -> Result<()> {
         info!("Adding participant {} to room {}", participant_id, self.id);
         self.mixer.add_participant(participant_id, None)?;
+        if let Some(v) = self.video.read().as_ref() {
+            v.participant_joined(participant_id);
+        }
 
         // Play join sound only if requested
         if play_sound {
@@ -669,6 +768,9 @@ impl ConferenceRoom {
 
         // Remove from mixer
         self.mixer.remove_participant(participant_id)?;
+        if let Some(v) = self.video.read().as_ref() {
+            v.participant_left(participant_id);
+        }
 
         // Play exit sound
         self.play_exit_sound();
@@ -772,9 +874,33 @@ impl ConferenceRoom {
                     recorder.write_samples(samples)?;
                 }
             }
+            if self.mix_taps.receiver_count() > 0 {
+                let _ = self.mix_taps.send(MixedFrame {
+                    samples: Arc::new(samples.clone()),
+                    sample_rate: self.format.sample_rate,
+                    channels: self.format.channels,
+                    at: std::time::Instant::now(),
+                });
+            }
         }
 
         Ok(mixed)
+    }
+
+    /// Listen to the room's mix, frame by frame — the same audio the
+    /// room recorder writes, for a listener that muxes it with video
+    /// (design §11) or feeds it somewhere else.
+    ///
+    /// Frames arrive while the mixer's clock runs. A listener that falls
+    /// more than [`MIX_TAP_BACKLOG`] frames behind misses them and its
+    /// receiver reports the gap, as a broadcast channel does.
+    pub fn tap_mix(&self) -> tokio::sync::broadcast::Receiver<MixedFrame> {
+        self.mix_taps.subscribe()
+    }
+
+    /// Whether anyone is listening to the mix.
+    pub fn mix_tapped(&self) -> bool {
+        self.mix_taps.receiver_count() > 0
     }
 
     /// Mix audio for a specific participant (excluding their own audio)
@@ -801,9 +927,10 @@ impl ConferenceRoom {
     /// this is for drivers with their own clock, and for tests.
     pub fn advance_frame(&self) -> u64 {
         let seq = self.mixer.advance_frame();
-        if self.is_recording() {
+        if self.is_recording() || self.mix_tapped() {
             // In frame-clock mode `mix()` reads the snapshot, so feeding
-            // the recorder here consumes nothing from the participants.
+            // the recorder and the mix taps here consumes nothing from
+            // the participants.
             if let Err(e) = self.mix() {
                 warn!("Room {} recorder feed failed: {}", self.id, e);
             }
@@ -1630,6 +1757,9 @@ impl ConferenceRoom {
 
 impl Drop for ConferenceRoom {
     fn drop(&mut self) {
+        if let Some(v) = self.video.get_mut().take() {
+            v.stop();
+        }
         if let Some(task) = self.frame_clock_task.get_mut().take() {
             task.abort();
         }
@@ -1733,6 +1863,7 @@ impl ConferenceBridge {
             }
         }
         room.stop_frame_clock();
+        room.disable_video();
 
         // Update metrics
         counter!("forge_conference_rooms_deleted_total").increment(1);
@@ -1809,6 +1940,47 @@ impl Default for ConferenceBridge {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_migrated_participant_is_admitted_past_the_lock_and_the_waiting_room() {
+        let room = ConferenceRoom::new(
+            "moving",
+            AudioFormat::pcm_mono(),
+            480,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
+        room.configure(
+            crate::room_config::RoomConfig {
+                wait_for_moderator: Some(true),
+                max_channels: Some(2),
+                ..Default::default()
+            },
+            &crate::config::ConferenceConfig::default(),
+        )
+        .unwrap();
+        room.lock();
+
+        // A fresh guest is locked out; a migrated one is not, and does not
+        // wait for a moderator either.
+        assert!(matches!(
+            room.add_participant_quiet("fresh", false),
+            Err(ConferenceError::ConferenceLocked)
+        ));
+        room.add_participant_admitted("moved-guest", false).unwrap();
+        assert!(room.participants().contains(&"moved-guest".to_string()));
+        assert!(room.waiting_participants().is_empty());
+
+        // A migrated host counts as a host.
+        room.add_participant_admitted("moved-host", true).unwrap();
+        assert_eq!(room.host_count(), 1);
+
+        // Capacity still applies.
+        assert!(matches!(
+            room.add_participant_admitted("one-too-many", false),
+            Err(ConferenceError::ConferenceFull(2))
+        ));
+    }
 
     #[test]
     fn test_conference_room_lifecycle() {

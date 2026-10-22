@@ -7,6 +7,843 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **forge-bfcp 0.1.1**: a grouped attribute whose last child's padding was
+  cut short by the group's end was read, but written back with every child
+  padded it no longer fitted its one-octet length, so a parsed message could
+  not be written (`AttributeTooLong`). Such a group is now refused when read
+  (`BadAttributeLength`, the header kept for the reply). Found by the
+  nightly `bfcp_parse` fuzzer on 2026-09-27 and 2026-09-28; the input is
+  kept as a regression test (`tests/fuzz_regressions.rs`).
+
+### Changed
+
+- The embedded siphon-rs moves to **v2026.09.22**, in both places that name
+  it: the `external/siphon-rs` submodule, which the binaries build against
+  by path, and the `sip-sdp` git tag that `forge-sdp` pins. They had drifted
+  apart from the rest of the world — both sat at v2026.09.05 while FCP's own
+  submodule had moved on five releases — and the submodule rule exists so
+  the SIP path and the media path cannot diverge. No crate version bumps:
+  `sip-sdp` is unchanged between the two tags apart from a test file, so this
+  is an internal dependency migration with no public API change.
+
+## [2026-09-17] — workspace release
+
+**Crate versions:** **forge-engine 0.6.1**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-bfcp 0.1.0, forge-codecs 0.2.0,
+forge-conference 0.14.1, forge-core 0.2.2, forge-dtmf 0.2.1, forge-ha 0.2.0,
+forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0,
+forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0, forge-mp4 0.1.1, forge-recorder 0.2.0,
+forge-resampler 0.1.1, forge-rtp 0.7.0, forge-sdp 0.2.2, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0,
+forge-video 0.6.1, forge-video-codecs 0.1.3, forge-video-hw 0.2.1, forge-webm 0.1.0,
+forge-webrtc 0.7.0. Embeds siphon-rs **v2026.09.05**.
+
+**`forge-engine` 0.6.1**: DTMF per leg, for a B2BUA whose legs do not
+take DTMF the same way (FCP tenant trunks, phase 3b-4: RFC 2833 ↔ SIP
+INFO).
+
+- `MediaSession::subscribe_digits` — every digit a leg sends, once, as it
+  ends, with the leg it came from and how it arrived (`LegDigit`).
+  RFC 2833 and in-band both count. The EventBus's `DtmfDigitDetected`
+  says which session, not which leg.
+- `MediaSession::set_rfc2833_relay_to(leg, false)` — telephone-event is
+  no longer relayed to a leg that did not negotiate it, though it is
+  still detected and published. Relay was one switch for both
+  directions.
+- `MediaSession::send_dtmf(leg, digit, duration_ms)` — a digit played to
+  one leg as telephone-event at that leg's payload type, for a digit
+  that arrived by signalling. The playout queue could do this already;
+  nothing outside the media bridge could reach it.
+
+## [2026-09-13.1] — workspace release
+
+**Crate versions:** **forge-conference 0.14.1**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-bfcp 0.1.0, forge-codecs 0.2.0,
+forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine 0.6.0, forge-ha 0.2.0,
+forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0,
+forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0, forge-mp4 0.1.1, forge-recorder 0.2.0,
+forge-resampler 0.1.1, forge-rtp 0.7.0, forge-sdp 0.2.2, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0,
+forge-video 0.6.1, forge-video-codecs 0.1.3, forge-video-hw 0.2.1, forge-webm 0.1.0,
+forge-webrtc 0.7.0. Embeds siphon-rs **v2026.09.05**.
+
+**`forge-conference` 0.14.1**: `ConferenceRoom::add_participant_admitted`
+— a participant who was already admitted to the room on another node
+and is moving here as it drains (FCP distributed conferencing, phase 5).
+The lock and wait-for-moderator do not apply, capacity does, a host is
+tracked as one, and no join sound plays.
+
+## [2026-09-13] — workspace release
+
+**Crate versions:** **forge-mp4 0.1.1**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-bfcp 0.1.0, forge-codecs 0.2.0,
+forge-conference 0.14.0, forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine 0.6.0,
+forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0,
+forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0, forge-recorder 0.2.0, forge-resampler 0.1.1,
+forge-rtp 0.7.0, forge-sdp 0.2.2, forge-siprec 0.2.1, forge-storage 0.2.0,
+forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0, forge-video 0.6.1,
+forge-video-codecs 0.1.3, forge-video-hw 0.2.1, forge-webm 0.1.0, forge-webrtc 0.7.0.
+Embeds siphon-rs **v2026.09.05**.
+
+**`forge-mp4` 0.1.1**: `read` took a track's duration from the `tkhd`'s
+reserved field (four bytes before the duration), so `TrackInfo::duration`
+read zero on every finished file — which the phase 9b close-out
+recorded as the writer leaving the per-track durations unpatched. The
+writer was patching all three headers on `finish`; the reader now
+reads the `tkhd` at the right offset and reads the `mdhd` duration too,
+as `TrackInfo::media_duration`, and the writer's test asserts both
+against the movie's duration on a finished file and zero on an
+unfinished one.
+
+## [2026-09-12.3] — workspace release
+
+**Crate versions:** **forge-mp4 0.1.0** (new). Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-bfcp 0.1.0, forge-codecs 0.2.0,
+forge-conference 0.14.0, forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine 0.6.0,
+forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0,
+forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0, forge-recorder 0.2.0, forge-resampler 0.1.1,
+forge-rtp 0.7.0, forge-sdp 0.2.2, forge-siprec 0.2.1, forge-storage 0.2.0,
+forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0, forge-video 0.6.1,
+forge-video-codecs 0.1.3, forge-video-hw 0.2.1, forge-webm 0.1.0, forge-webrtc 0.7.0.
+Embeds siphon-rs **v2026.09.05**.
+
+**`forge-mp4` 0.1.0** — a fragmented MP4 (ISO base media) writer for
+conference recordings (FCP video conferencing phase 9a). `Mp4Writer`
+takes **H.264** (`avc1` + `avcC`), **HEVC** (`hvc1` + `hvcC`) or **AV1**
+(`av01` + `av1C`) video with **Opus** audio (`Opus` + `dOps`), both on a
+millisecond timescale: an `ftyp` and a `moov` with empty sample tables
+and an `mvex`, then a `moof` + `mdat` pair per fragment, a fragment
+closing at each video keyframe past `FragmentLimits::min_ms` and at
+`max_ms` regardless, the durations patched into the `moov` and an
+`mfra` appended on `finish`. The configuration record is built from the
+first keyframe's parameter sets (SPS/PPS, VPS/SPS/PPS, the AV1
+sequence header with profile, level and tier read from it), so the
+header is written when that frame arrives and audio before it is held
+for the first fragment; H.264 and HEVC frames arrive as Annex B and are
+stored as length-prefixed NAL units with the parameter sets lifted out,
+AV1 temporal units as they are. `read` parses a file back — brands,
+tracks with their records, every fragment's runs, the `mfra` — for the
+tests and for checking a file; it stops at the first box it cannot
+complete, so a recording cut short reads to its last whole fragment.
+Fuzz target `mp4_read` with seeds derived by a test.
+
+## [2026-09-12.2] — workspace release
+
+**Crate versions:** **forge-video 0.6.1**, **forge-video-hw 0.2.1**,
+**forge-conference 0.14.0**. Unchanged: bcg729-sys 0.1.0, forge-ai-stream 0.2.0,
+forge-api 0.4.0, forge-bfcp 0.1.0, forge-codecs 0.2.0, forge-core 0.2.2, forge-dtmf 0.2.1,
+forge-engine 0.6.0, forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1,
+forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0, forge-recorder 0.2.0,
+forge-resampler 0.1.1, forge-rtp 0.7.0, forge-sdp 0.2.2, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0,
+forge-video-codecs 0.1.3, forge-webm 0.1.0, forge-webrtc 0.7.0. Embeds siphon-rs **v2026.09.05**.
+
+**`forge-video` 0.6.1**: `bench::measure_compose_saturated` — 1, 2, 4, …
+compositors on their own threads, each warmed up uncounted, until the
+summed render rate stops growing — and `ComposeSaturation::ns_per_px`,
+the constant that makes that many composites fill one execution unit:
+how a GPU's compose engine is priced (FCP §15.8, decision 1).
+
+**`forge-video-hw` 0.2.1**: `bench::saturate` warms each step up for a
+second (or the step's length when shorter) before it counts, so a short
+step no longer reads an engine's first frames as its rate (decision 2).
+
+**`forge-conference` 0.14.0**: `ContentGate::admit` takes the room's
+`VideoRoomSettings`, so a share is priced at the room's content cap and
+rate rather than at defaults (decision 3).
+
+## [2026-09-12.1] — workspace release
+
+**Crate versions:** **forge-video 0.6.0**, **forge-video-hw 0.2.0**,
+**forge-video-codecs 0.1.3**, **forge-conference 0.13.0**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-bfcp 0.1.0, forge-codecs 0.2.0,
+forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine 0.6.0, forge-ha 0.2.0, forge-hep 0.0.1,
+forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0,
+forge-mixer 0.4.0, forge-recorder 0.2.0, forge-resampler 0.1.1, forge-rtp 0.7.0,
+forge-sdp 0.2.2, forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder 0.2.0,
+forge-transcription 0.2.0, forge-vad 0.2.0, forge-webm 0.1.0, forge-webrtc 0.7.0.
+Embeds siphon-rs **v2026.09.05**.
+
+**`forge-video` 0.6.0** — the pipeline placed on a device (FCP video
+conferencing phase 8b). `device::DeviceBackend` is what a room is placed
+on: its compositor and scaler, and `upload` / `download` across the bus
+(`HostBackend` is the CPU; `resident` moves a frame onto the device when
+it is not there). The compositor's chrome is one piece of code for every
+device: `compose::tile_geometry` (ring, picture area, name band),
+`draw_chrome_under` (background, rings, bars, avatars), `draw_band` and
+`label_text`; `HostCompositor` draws through them, pixel for pixel as
+before. `parity::scenes` is the golden set a device compositor is checked
+against, rendered by the host as the reference. `CodecRegistry::
+decodable_on` / `encodable_on` split what `codecs_on` required of both
+(NVDEC decodes VP8 and VP9; NVENC encodes neither). `bench::
+measure_compose_on` times any backend's compositor. `testing` is a fake
+device — host frames behind device handles, copies counted, a compositor
+that can be told to fail — and the raw codec registers on it
+(`RawFactory::on`), so a room on a device is tested without one.
+
+**`forge-video-hw` 0.2.0**: `DeviceCompositor`, an FFmpeg filter graph
+per output — onto a background uploaded once, in tile order, each
+tile's chrome plane (its ring, bars or avatar, painted by the shared
+chrome code, cached by what it shows and uploaded when that changes),
+its picture through `scale_cuda` (bilinear for cameras, Lanczos for a
+shrunk screen) and its name band, each an `overlay_cuda`; the graph is
+rebuilt when its shape (tile rectangles, picture sizes, bands) changes
+and nothing crosses the bus for a steady scene. `HwBackend` is the `DeviceBackend` over an open `HwDevice`, with
+`register` putting the codecs on the same open device; `graph` is the
+shared graph builder the scaler now uses too (`DeviceScaler::scale_with`
+takes a `ScaleMode`). Tests on the box: every golden scene within a PSNR
+threshold of the host, the graph built once for a steady scene, the
+composite's per-tick cost against the host's, and a room on the device
+end to end with an H.264 (NVENC) and a VP8 (host, downloaded canvas)
+subscriber.
+
+**`forge-video-codecs` 0.1.3**: `open_device` opens a device as a room's
+backend and registers its codecs on it (a warning and `None` without the
+`hwaccel` feature).
+
+**`forge-conference` 0.13.0**: `VideoBackend::on_device` places a node's
+rooms on a `DeviceBackend`; `VideoBackend::new` is the host as before.
+Each stage runs on the device when it can and on the host otherwise, one
+copy per frame: a decoder the device lacks uploads what it decodes, an
+encoder it lacks (VP8 and VP9 on NVENC, so every WebM recording) takes
+the canvas downloaded once a tick for every such flavor, and an output
+whose device compositor does not build composes on the host from
+downloaded tiles. An oversize shared screen decoded on the device is
+shrunk on the device's scaler rather than dropped (it was dropped before:
+the shrink only knew host frames). The status names the device per
+stage: `VideoRoomStatus::device`, `VideoSourceInfo::device` (decode),
+`VideoOutputInfo::device` (compose), `VideoFlavorInfo::device` (encode).
+New counter `forge_conference_video_frames_moved_total{room_id,to}`. The
+codec pool binds no context per thread: FFmpeg's CUDA context is pushed
+per call, so none is needed.
+
+## [2026-09-12] — workspace release
+
+**Crate versions:** **forge-video-hw 0.1.0** (new), **forge-video-codecs 0.1.2**.
+Unchanged: bcg729-sys 0.1.0, forge-ai-stream 0.2.0, forge-api 0.4.0, forge-bfcp 0.1.0,
+forge-codecs 0.2.0, forge-conference 0.12.1, forge-core 0.2.2, forge-dtmf 0.2.1,
+forge-engine 0.6.0, forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0,
+forge-injection 0.1.1, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0,
+forge-recorder 0.2.0, forge-resampler 0.1.1, forge-rtp 0.7.0, forge-sdp 0.2.2,
+forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder 0.2.0,
+forge-transcription 0.2.0, forge-vad 0.2.0, forge-video 0.5.0, forge-webm 0.1.0,
+forge-webrtc 0.7.0. Embeds siphon-rs **v2026.09.05**.
+
+**`forge-video-hw` 0.1.0** — GPU video over FFmpeg's hardware device
+contexts (FCP video conferencing phase 8a). `HwDevice` opens a
+`MediaDevice::Gpu` (`cuda:0`; `vaapi` and `qsv` compile, untested) and
+hands out `HwFrames` pools; a `DeviceFrame`'s handle is an `AVFrame` in
+device memory (NV12) with `frame::upload` / `download` crossing the bus
+with one chroma interleave each way. `HwDecoder` runs FFmpeg's `h264`,
+`hevc`, `vp8`, `vp9` and `av1` decoders with the device's acceleration
+(NVDEC), output resident; `NvEncoder` is `h264_nvenc`, `hevc_nvenc` and
+`av1_nvenc` taking device frames (a host frame is uploaded), zero
+latency, parameter sets in-band on every IDR, `ContentHint` mapped to
+NVENC's presets and spatial AQ, and a bitrate retarget by reopening on
+the next frame, which is then a keyframe. `DeviceScaler` is `scale_cuda`
+in a kept two-node filter graph per pair of sizes. `probe` says what a
+device offers; `register` puts it in a `CodecRegistry`. `bench::saturate`
+runs 1, 2, 4, … streams of one stage on their own threads until the
+summed frame rate stops growing — how a GPU, being several engines, is
+priced. On an NVIDIA L4 (driver 550, FFmpeg 7.1, 720p30, 1.2 Mb/s):
+H.264 encode saturates at about 62 real-time streams, AV1 at 79, HEVC at
+57; decode at 237, 252 and 306; `scale_cuda` matches the host's bilinear
+within 29 dB. The bindings are `ffmpeg-sys-next`, generated against the
+machine's FFmpeg; a machine without a GPU builds the crate and its tests
+skip.
+
+**`forge-video-codecs` 0.1.2**: a `hwaccel` feature that pulls
+`forge-video-hw` and registers the default device's codecs when it
+opens.
+
+## [2026-09-11.3] — workspace release
+
+**Crate versions:** **forge-bfcp 0.1.0** (new). Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-codecs 0.2.0, forge-conference 0.12.1,
+forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine 0.6.0, forge-ha 0.2.0, forge-hep 0.0.1,
+forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0,
+forge-mixer 0.4.0, forge-recorder 0.2.0, forge-resampler 0.1.1, forge-rtp 0.7.0,
+forge-sdp 0.2.2, forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder 0.2.0,
+forge-transcription 0.2.0, forge-vad 0.2.0, forge-video 0.5.0, forge-video-codecs 0.1.1,
+forge-webm 0.1.0, forge-webrtc 0.7.0. Embeds siphon-rs **v2026.09.05**.
+
+**`forge-bfcp` 0.1.0** — BFCP, the Binary Floor Control Protocol (RFC 8855),
+as a conference floor server needs it (FCP video conferencing phase 7e,
+screen share for SIP room systems). `message`: the common header and every
+attribute of the base specification, grouped ones included, with a parser
+that never panics on hostile bytes and reports what an `Error` reply needs
+whenever the header was readable, and a writer that is exact about lengths
+and padding. `server`: `FloorServer`, one floor per conference, transport-
+agnostic — it answers `Hello`, takes `FloorRequest`s as pending and reports
+them as `Event`s for the owner to `grant`, `deny` or `revoke`, handles
+`FloorRelease` (Released or Cancelled), `FloorRequestQuery`, `UserQuery`,
+`FloorQuery` subscriptions kept told with `FloorStatus`, and `Goodbye`, and
+answers every mistake with the error code RFC 8855 §13 names (unsupported
+version, unknown conference, user, primitive or mandatory attribute, another
+floor, another's request, a second request, a chair's action). `transport`:
+`TcpFramer` cuts a stream into messages; `UdpPeer` keeps one client's
+RFC 8855 §8 transactions over UDP — the R flag, a cached response replayed
+for a retransmitted request until T2, one outstanding server-initiated
+message at a time retransmitted on T1 (doubling, three times) until
+acknowledged or the peer is broken. Left out: chairs, several floors, TLS/
+DTLS, BFCP-level fragmentation. A tenth fuzz target, `bfcp_parse`, seeded
+from the round-trip tests.
+
+## [2026-09-11.2] — workspace release
+
+**Crate versions:** **forge-conference 0.12.1**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-codecs 0.2.0, forge-core 0.2.2,
+forge-dtmf 0.2.1, forge-engine 0.6.0, forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0,
+forge-injection 0.1.1, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0,
+forge-recorder 0.2.0, forge-resampler 0.1.1, forge-rtp 0.7.0, forge-sdp 0.2.2,
+forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0,
+forge-vad 0.2.0, forge-video 0.5.0, forge-video-codecs 0.1.1, forge-webm 0.1.0,
+forge-webrtc 0.7.0. Embeds siphon-rs **v2026.09.05**.
+
+**`forge-conference` 0.12.1**: `VideoRoom::release_content_with(id, reason)`
+takes the floor from a holder for a reason the room cannot know — the
+`ContentStop::Replaced` that 7a reserved for a room-wide floor (FCP video
+conferencing phase 7d: another node's presenter won), or `Ended` for a
+peer's share behind a remote content source that is known to be over —
+without the host-stop's ban on sharing again. `release_content` is now
+`release_content_with(id, Ended)`.
+
+## [2026-09-11.1] — workspace release
+
+**Crate versions:** **forge-rtp 0.7.0**, **forge-webrtc 0.7.0**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-codecs 0.2.0, forge-conference 0.12.0,
+forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine 0.6.0, forge-ha 0.2.0, forge-hep 0.0.1,
+forge-ice 0.3.0, forge-injection 0.1.1, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0,
+forge-mixer 0.4.0, forge-recorder 0.2.0, forge-resampler 0.1.1, forge-sdp 0.2.2,
+forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0,
+forge-vad 0.2.0, forge-video 0.5.0, forge-video-codecs 0.1.1, forge-webm 0.1.0.
+Embeds siphon-rs **v2026.09.05**.
+
+**A shared screen over WebRTC** (FCP video conferencing, phase 7c, the
+forge-media half). A browser's screen is a second video track, which on the
+wire is a second video section sharing the camera's payload types — so the
+transport has to read the RFC 8285 `sdes:mid` header extension to tell the
+two apart, which nothing here did before.
+
+**`forge-rtp` 0.7.0**: `RtpExtension::elements` / `element` walk an RFC 8285
+one-byte (`0xBEDE`) or two-byte (`0x100x`) extension, `one_byte` / `two_byte`
+build one, and `RtpPacket::to_bytes` sets the header's X bit to match the
+extension it writes (a packet built with an extension used to go out with
+the bit clear). A ninth fuzz target, `rtp_extension`, walks the elements of
+whatever parses as a packet, seeded by `fuzz_seeds`.
+
+**`forge-webrtc` 0.7.0**: `VideoConfig::content` offers (or accepts) a second
+video section — `a=mid:2`, `a=content:slides` (RFC 4796), the same codecs and
+direction, BUNDLE `0 1 2` — and every section offers `a=extmap … sdes:mid`;
+an answer mirrors the offer's id. Inbound video is sorted into
+`TransportEvent::VideoRtp` (the camera) or the new `TransportEvent::ContentRtp`
+by `VideoDemux`: the mid extension when a packet carries one — and the SSRC
+is remembered so the next packets need none — else the SSRC each side
+signalled for the section, else the camera. A third SSRC and
+`PeerConnection::content_sender`; `NegotiatedVideo::mid`,
+`PeerConnection::negotiated_content` / `content_ssrc`;
+`RemoteDescription::{content, mid_ext}`, `LocalParams::{content, mid_ext}`,
+`LocalVideo::content`, `Negotiated::content`, `DemuxConfig` and
+`Transport::set_demux` in place of `set_payload_map`, `Transport::send_video_on`.
+
+Breaking: `TransportEvent` has a new variant; `LocalParams`, `LocalVideo`
+and `NegotiatedVideo` have new fields; `Transport::new` takes the content
+SSRC; `set_payload_map` is gone.
+
+## [2026-09-11] — workspace release
+
+**A shared screen** (FCP video conferencing, phase 7a). A participant can
+send a second stream — the content of a screen or a window — and the room
+shows it large and plain, one at a time, to everyone.
+
+**`forge-conference` 0.12.0**: a `content` module. A source has a
+`StreamKind`, `Camera` or `Content`, and sources and channels are keyed by
+participant *and* kind (`SourceKey`); `add_source_kind`, `push_rtp_kind`,
+`subscribe_kind`, `handle_feedback_kind` and their camera-only shorthands
+(`add_source`, `push_rtp`, `subscribe`, … unchanged). One participant at a
+time holds the **floor**: the first content packet takes it when it is free,
+a `ContentGate` can refuse a grant the node cannot afford, and it is given up
+when the presenter stops (`release_content`, the source removed), leaves,
+sends nothing for `content_idle` (30 s, judged on packets, since a still slide
+is not a lost one), or a host stops them (`stop_content`, after which
+`set_participant_content_enabled` lets them back). Refusals are reported once
+per participant per floor. Every output names a `View`: `Composite` (the
+layout, and a presentation — or the content alone, per `content_layout` —
+while a screen is shared), `Cameras` (never the content) and `Content` (the
+content alone, letterboxed, no chrome, nothing at all while nobody shares).
+An endpoint with one video section takes `Composite`; one with a content
+section of its own takes `Cameras` on its main section and `Content` on the
+other, and is never sent its own share back. A content channel is capped at
+`content_max_resolution` (1080p) rather than the room's canvas, is forwarded
+verbatim under any passthrough mode but `Off` (there is no banner on it to
+lose), is not on the resolution ladder (it moves in frame rate instead:
+`Subscriber::fps_move`), and is shed last. A recording's `Composite` view
+follows a share into the presentation and back. `add_remote_content` brings a
+peer's screen over a trunk (7d). Events: `ParticipantState` carries the
+`kind`, `LayoutChanged` the `content_layout`, and `Content { participant_id,
+event: Started | Stopped(reason) | Refused(reason) }` is new; `Shed.output`
+names the view after the scope when it is not the composite.
+`VideoParticipantInfo` gains `content_state`, `presenting`, `content` and
+`content_subscription`; `VideoRoomStatus` gains `content` and
+`content_layout`; `VideoSubscriberInfo::forwarding` is a `SourceKey`.
+Metrics: `forge_conference_video_content_rooms`, `…_content_started_total`,
+`…_content_stopped_total` (by reason), `…_content_refused_total` (by reason)
+and `…_content_packets_refused_total`.
+
+**`forge-video` 0.5.0**: `Layout::Presentation` (the active-speaker geometry
+with the shared screen as its subject); `TileSource::kind` (`TileKind::Content`
+draws the picture alone — no border, no name band, no avatar — shrunk with a
+box filter so text survives); `scale::box_plane`, `ScaleMode`, `resize_with`,
+`letterbox_with` and `fit_within`; `EncoderSettings::content` (`ContentHint`)
+and `for_screen()`.
+
+**`forge-video-codecs` 0.1.1**: `ContentHint::Screen` selects OpenH264's
+`ScreenContentRealTime`, libvpx's `VP8E_SET_SCREEN_CONTENT_MODE` /
+`VP9E_SET_TUNE_CONTENT` and SVT-AV1's `screen_content_mode`.
+
+**`forge-sdp` 0.2.2**: RFC 4796 `a=content` (`Content`, `contents`,
+`is_slides`, `set_content`), RFC 4574 `a=label` (`label`, `set_label`) and
+`video_sections` (the camera and the slides of an offer); `answer_video`
+repeats the offer's content and label.
+
+**Crate versions:** **forge-conference 0.12.0**, **forge-video 0.5.0**,
+**forge-video-codecs 0.1.1**, **forge-sdp 0.2.2**. Unchanged: bcg729-sys 0.1.0,
+forge-ai-stream 0.2.0, forge-api 0.4.0, forge-codecs 0.2.0, forge-core 0.2.2,
+forge-dtmf 0.2.1, forge-engine 0.6.0, forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0,
+forge-injection 0.1.1, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0,
+forge-recorder 0.2.0, forge-resampler 0.1.1, forge-rtp 0.6.0, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0,
+forge-webm 0.1.0, forge-webrtc 0.6.0. Embeds siphon-rs **v2026.09.05**.
+
+Breaking: `TileSource` and `EncoderSettings` have a new field; `OutputKey`
+has a `view`; `SubscribeRequest::view` and `RecordRequest::view` are new;
+`Subscriber::new` takes the channel's kind; `VideoRoomEvent::ParticipantState`
+and `LayoutChanged` carry one more field.
+
+## [2026-09-10.1] — workspace release
+
+**HEP media chunks on the call they belong to.** forge-engine stamped every HEP RTCP
+(`0x05`) and RTP-QoS chunk with the session's own call id. Homer threads a call view on
+the SIP `Call-ID`, and an embedder's session id is rarely that — siphon-ai's is its bridge
+id — so the RTCP and QoS of a call landed under a different key from its SIP ladder and
+CDR and never showed up beside them (siphon-ai #603). `MediaSession::set_hep_correlation_id`
+lets the embedder hand the session its `Call-ID` once known; every later chunk carries
+it. A setter rather than a `MediaSessionConfig` field because an offerer builds its
+session (for the SDP offer) before the INVITE that names the `Call-ID` exists.
+
+**Crate versions:** **forge-engine 0.6.0**. Unchanged: bcg729-sys 0.1.0, forge-ai-stream
+0.2.0, forge-api 0.4.0, forge-codecs 0.2.0, forge-conference 0.11.0, forge-core 0.2.2,
+forge-dtmf 0.2.1, forge-ha 0.2.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.1.1,
+forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.4.0, forge-recorder 0.2.0,
+forge-resampler 0.1.1, forge-rtp 0.6.0, forge-sdp 0.2.1, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0,
+forge-video 0.4.0, forge-video-codecs 0.1.0, forge-webm 0.1.0, forge-webrtc 0.6.0,
+forge-media (standalone server) 0.2.0. Embeds siphon-rs **v2026.09.05**.
+
+**Breaking changes:** none. forge-engine's minor bump is for new public API:
+`set_hep_correlation_id` / `hep_correlation_id` here (#154), and the dynamic payload-type
+map (`payload_type_map` / `set_payload_type_map`, `to_transcoder_codec` made `pub`) that
+shipped in v2026.09.02 without a bump.
+
+### Added
+
+- **forge-engine**: `MediaSession::set_hep_correlation_id` / `hep_correlation_id` (#154).
+  The HEP RTCP (`0x05`) and RTP-QoS chunks forge ships carried the session's own call id
+  as their correlation id, which is rarely the SIP `Call-ID` Homer keys its call view on —
+  so an embedder's media chunks landed under a different key from its SIP ladder and CDR
+  and never appeared beside them (siphon-ai #603). An embedder now sets the SIP `Call-ID`
+  once it is known, and every later RTCP / QoS chunk for the session carries it. Set-once
+  (a `OnceLock`), so the RTCP path reads it with one atomic load. Unset, the chunks carry
+  the session call id exactly as before.
+
+### Changed
+
+- CI: fuzz targets run nightly rather than weekly (#153).
+
+## [2026-09-10] — workspace release
+
+Backfilled from the `v2026.09.10` tag message, which shipped without a changelog section.
+
+**Overload shedding and fuzzing (video phase 6c).** A room whose compositor overruns
+three ticks in a row no longer halves everyone's frame rate first. forge-video's clock now
+asks a `LoadShedder` before it halves (`VideoClock::done_with`), and the video room answers
+by taking its largest output down a rung of the bitrate ladder, then the next largest,
+until every output is at the bottom; only then does the rate halve. A shed is a ceiling on
+the output's scope, which the ladder does not climb through. Recovery unwinds in the
+opposite order: the frame rate first, then the pictures, worst-off first.
+`VideoRoomEvent::Shed { output, from, to }` reports each step, down or back up.
+
+A `fuzz` crate holds eight cargo-fuzz targets for the parsers that read bytes nobody here
+wrote: the five video depacketizers, the frame assembler, compound RTCP and the WebM
+reader. Their seed corpora are derived by the `fuzz_seeds` tests in forge-rtp and
+forge-webm.
+
+**Crate versions:** **forge-video 0.4.0**, **forge-conference 0.11.0**.
+
+## [2026-09-08.4] — workspace release
+
+**The bitrate ladder** (FCP video conferencing, phase 6b). A flavor's encoder
+targets the lowest rate any of its subscribers can take, so one caller on a
+poor link dragged every other subscriber of that flavor down to their bitrate.
+Now that caller is moved instead, and the rest keep the picture they can
+afford.
+
+**`forge-video` 0.3.0**: a `ladder` module. `Ladder::for_room` gives the rungs
+at or below a room's own size — 1080p at 2.5 Mb/s, 720p at 1.2, 360p at 500
+kb/s, 180p at 200 (§7) — and `wants` says whether a link should move, given
+its estimate and a `LadderPolicy` (below 70% of the current rung, go down;
+above 120% of the next one up, climb). A link that has collapsed goes straight
+to the rung it can carry rather than walking down one step at a time.
+
+**`forge-conference` 0.10.0**: `VideoRoom` walks the ladder each tick and moves
+whoever has been asking for long enough — five seconds to go down, fifteen to
+go up, since a picture nobody can decode is worse than a small one and
+climbing only to fall back is the worst of both. A move is invisible to
+signaling: the subscriber keeps its SSRC, its payload type and its sequence,
+and sees a resolution change with a keyframe to start it. The old rung's
+encoder is released if it was the last one there, so a room ends up with as
+many encoders as it has distinct needs, no more. `forge_conference_video_ladder_moves_total`
+counts the moves.
+
+A subscriber on the passthrough fast path is left alone: it is not being
+encoded for at all.
+
+Breaking: `Subscriber::flavor` and `output` are now methods rather than fields
+(a subscriber's rung changes under it), and `VideoRoomSettings` is no longer
+`Eq` — it carries the policy's thresholds.
+
+## [2026-09-08.3] — workspace release
+
+**The passthrough fast path** (FCP video conferencing, phase 6a). §2 and §5.6
+always said forwarding is an optimisation inside the mixer rather than an
+architecture; this is it. Phase 1 built `StreamRewriter` and
+`H264Fmtp::forwardable_to` for the day, and neither had been called since.
+
+**`forge-conference` 0.9.0**: a subscriber whose view comes to exactly one
+source with a picture, and whose stream that source can already be decoded as
+— same codec, an H.264 profile `forwardable_to` its own, a frame no larger
+than it asked for — is sent that source's **own packets** instead of a
+composite. `Subscriber::start_forwarding` seeds a `StreamRewriter` from where
+the subscriber's stream has got to, so the SSRC, the sequence numbers and the
+timestamps carry straight on and the receiver never learns the picture stopped
+being composed for it; the switch lands on a keyframe, which the source is
+asked for. Forwarded packets go out on ingress, off the compose clock, since a
+tick of latency would undo the point of it; the retransmission cache holds
+them exactly as it holds encoded ones; and a PLI from the receiver is sent to
+the source rather than re-keying an encoder that is not running.
+
+An output that every subscriber has been forwarded away from is not rendered
+or encoded at all, which is where the saving is: for a two-party call in
+spotlight, one composite and one encode per tick become none.
+
+`VideoRoomSettings::passthrough` is a `PassthroughMode`: `Off`, `On`, or
+`Auto` (the default) — forward only while the room is showing one participant
+full canvas. A forwarded frame is the sender's own picture, so it carries no
+name banner, no speaking border and no avatar; that is right for a presenter
+and wrong for a grid where the labels are how you tell people apart.
+`VideoSubscriberInfo::forwarding` says which subscribers are on the fast path.
+
+**`forge-rtp` 0.6.0**: `RtpHeader::set_payload_type`, since two legs negotiate
+their own numbers for the same codec.
+
+Breaking: `VideoRoom::add_source` and `add_remote` take the sender's `a=fmtp`
+(H.264 forwardability needs it), `VideoRoomSettings::passthrough` is new, and
+`VideoSubscriberInfo` has a new `forwarding` field.
+
+## [2026-09-08.2] — workspace release
+
+**One speaker a whole room agrees on** (FCP video conferencing, phase 5c).
+A remote tile's own energy is a peer node's entire mix, which says nothing
+about who is talking behind it. The node that has the caller says instead.
+
+**`forge-conference` 0.8.0**: `VideoRoom::set_remote_speaker(remote_id,
+Option<RemoteSpeaker>)` records what a peer claims — node, participant,
+display name, energy, speaking — and the claim joins this node's own levels
+in the same election, under the tile's id. So the layouts keep moving tiles
+around, while `active_speaker()` names the person, `active_speaker_via()`
+the tile they are behind, and `VideoRoomEvent::ActiveSpeaker` carries both.
+A tile with no claim never wins. The tile is also labelled with whoever
+holds the floor behind it, falling back to the node's name.
+
+Every node runs the same rule over the same candidates, so they converge:
+`Level` gained a `node`, `ActiveSpeaker` breaks an exact tie by node and
+then by id, and the candidates are sorted before the election, so the
+answer no longer depends on which order a node's own map happened to
+iterate in. `VideoRoom::set_local_node` names this node for that purpose.
+
+Breaking: `Level` has a new `node` field, `VideoRoomEvent::ActiveSpeaker` a
+new `via` field, `VideoRoomStatus` a new `active_speaker_via`, and
+`active_speaker()` now returns the participant rather than the tile (use
+`active_speaker_tile()` for the old value).
+
+## [2026-09-08.1] — workspace release
+
+**A remote tile, and the composite a trunk carries** (FCP video conferencing,
+phase 5b). A room spread over several nodes needs each node to see the others,
+and the rule that keeps it from seeing itself.
+
+**`forge-conference` 0.7.0**: `VideoRoom::add_remote(id, codec)` registers a
+source that is a **tile without being a participant** — a peer node's composite,
+arriving over a trunk, drawn like any other tile and decoded like any other
+source, but not in the audio room and so never the active speaker on its own
+energy (the peer says who is speaking behind it; that is 5c). `remove_remote`
+and `is_remote` go with it, and `VideoParticipantInfo::remote` says which is
+which.
+
+`OutputKey::exclude` becomes `OutputKey::scope`, an `OutputScope` with three
+answers: `All` (every tile, a remote one included — the shared composite and
+every recording), `Excluding(id)` (the private composite `exclude_self` gives a
+participant) and **`LocalOnly`** (this node's callers only). `LocalOnly` is what
+a trunk subscribes with, the exact analogue of the audio mix's anti-echo rule:
+without it, a tile forwarded through one peer would be drawn a second time via
+another, and a three-node room would show the same caller twice.
+`SubscribeRequest::scope` asks for one; `None` keeps the room's own rule.
+
+Breaking: `SubscribeRequest` has a new field, `VideoOutputInfo::exclude` is now
+`scope`, and `VideoParticipantInfo` has a new field.
+
+## [2026-09-08] — workspace release
+
+**A recording the room really lets go, and the reader in reach.**
+
+**`forge-conference`**: dropping a `RecordingSink` now does what its
+documentation always said it did — stop the recording. The tap's send told the
+room nothing when its channel had closed, so a recorder that went away without
+calling `stop_record` left the room composing and encoding a flavor nobody read,
+for as long as the room lived. `RecorderTap::send` now reports a closed channel
+and `compose_tick` reaps those recordings once it has let go of the outputs
+lock. A new test drops a sink and watches the recording, and its encoder, go.
+
+**`forge-webm`**: `read_summary_file` and `CueInfo` are re-exported from the
+crate root beside `read_summary`, so a caller reading a finished file back does
+not have to reach into the `read` module for half of it.
+
+## [2026-09-07.2] — workspace release
+
+**Recording a conference (FCP video conferencing, phase 5a).** The two halves a
+recording needs, and the container to put them in.
+
+**`forge-webm`** (new): a Matroska writer for VP8 or VP9 video and Opus audio —
+EBML header, a Segment whose size starts as the unknown-size marker so a file cut
+short by a crash still plays, Info at a 1 ms timecode scale, Tracks (an OpusHead
+`CodecPrivate` with `CodecDelay` and `SeekPreRoll`), Clusters of SimpleBlocks
+bounded by keyframes, duration and bytes, a Cue per keyframe Cluster, and, on
+`finish`, the Segment size, the duration and the SeekHead patched in. It has no
+dependencies beyond `thiserror`: Matroska is a small, well-specified corner of
+EBML, and this workspace already writes Ogg/Opus by hand in `forge-recorder`. A
+`read` module walks a file back — tracks, every block's track, timestamp and
+keyframe flag, and whether each Cue points at a real Cluster — which is what the
+round-trip tests assert.
+
+**`forge-conference`**: a recording is one more consumer of a flavor, but not a
+participant. `VideoRoom::record(id, RecordRequest)` returns a `RecordingSink` of
+**coded frames** rather than packets (a muxer wants frames; packetizing one only
+to take it apart again is waste), composed from an output that leaves nobody out
+whatever `exclude_self` says, and drawing no tile of its own. A recording at the
+room's own codec and resolution shares a subscriber's encoder, so it costs no
+extra encode; `stop_record` releases it. `ConferenceRoom::tap_mix()` hands out
+the room's mixed frames as they are made — the same audio the room recorder
+writes — and the frame clock feeds it whether or not anything is being recorded.
+Each side carries the instant its frame was made, and video frames keep the
+room's 90 kHz timestamps (`VideoRoom::started_at`), which is how the two are
+lined up in one file.
+
+**Crate versions:** **forge-webm 0.1.0** (new), **forge-conference 0.6.0**.
+
+**Breaking changes:** `VideoRoomStatus` gains `recordings`; nothing in the
+workspace or FCP constructs it.
+
+### Added
+
+- **forge-webm**: `WebmWriter`, `WebmConfig`, `VideoTrack`, `AudioTrack`,
+  `WebmVideoCodec`, `ClusterLimits`, `WebmStats`, `WebmError`, and
+  `read_summary` / `read_summary_file` with `WebmSummary`, `TrackInfo`,
+  `BlockInfo`, `CueInfo`, `TrackKind`.
+- **forge-conference**: `VideoRoom::{record, stop_record, is_recording,
+  recordings, started_at}`, `RecordRequest`, `RecordedFrame`, `RecordingSink`,
+  `VideoRecordingInfo`, `VideoRoomStatus::recordings`;
+  `ConferenceRoom::{tap_mix, mix_tapped}` and `MixedFrame`. Metrics
+  `forge_conference_video_recordings` and
+  `forge_conference_video_recording_frames_dropped_total`.
+- Tests: a WebM round trip (tracks, blocks, cluster boundaries against keyframes
+  and the size and duration limits, cues, the SeekHead, an audio-only and a
+  video-only file, a recording left unfinished, and a frame too far behind its
+  Cluster); a room recording that takes the composite without joining the room,
+  shares a subscriber's encoder, sees a composite nobody is left out of, and a
+  mix tap that carries exactly what the room mixed, on the frame clock too.
+
+### Changed
+
+- **forge-conference**: `ConferenceRoom::advance_frame` mixes for a mix tap as
+  well as for a recorder; the encoder for a flavor is now created and released
+  through one path shared by subscriptions and recordings.
+
+## [2026-09-07.1] — workspace release
+
+**Video over WebRTC (FCP video conferencing, phase 4a).** `forge-webrtc` negotiates
+a video section beside the audio one: `PeerConfig::video` (codecs in preference order
+with offered payload types, direction, H.264 `profile-level-id`, a `b=AS` cap) puts
+`m=video` with `a=mid:1` in offers, BUNDLE'd with the audio, offering `nack`,
+`nack pli`, `ccm fir` and `goog-remb` per payload type and H.264 as
+`packetization-mode=1`; answers accept a remote video section with the first local
+preference the remote offered (H.264 entries count only in packetization mode 1; RTX,
+RED and FEC formats are skipped), echo its `fmtp`, keep the feedback both sides
+support, and reject the section with port 0 when there is no configuration or no
+codec in common. Both sections carry `a=msid` and `a=ssrc … msid`. Re-offers add or
+drop the section on the same transport. The transport sorts inbound RTP by payload
+type into `TransportEvent::Rtp` (audio) and the new `TransportEvent::VideoRtp`, parses
+inbound RTCP into `TransportEvent::Rtcp(Vec<RtcpPacket>)`, keeps RFC 3550 reception
+statistics per remote SSRC, sends a compound SR/RR + SDES every
+`TransportConfig::rtcp_interval` (one second) and prefixes the same report to the
+feedback the owner sends through `PeerConnection::send_rtcp`, so every RTCP packet on
+the wire is a proper compound. `VideoSender::send_packet` sends a producer's pre-built
+RTP packet — a conference room subscription's, retransmissions included — with the
+SSRC replaced by the connection's video SSRC and the sequence number, timestamp,
+payload type and marker kept. G.722 joins the audio codec set (static type 9, clocked
+at 8 kHz on the wire) so a browser can meet a G.722 mixer without transcoding.
+
+`forge-rtp` underneath: `SrtpContext` now keeps its rollover counter, replay window and
+SRTCP index **per SSRC** in each direction, which one transport carrying audio and
+video (BUNDLE) needs — a shared counter saw every switch between the two streams as a
+sequence wrap; `local_packet_index` is now the highest over all outbound SSRCs, with
+`local_packet_index_for` and `local_packets_sent` per stream. A new `stats` module
+(`SourceStats`, `SenderStats`) computes reception report blocks (extended highest
+sequence, cumulative and interval loss, interarrival jitter, LSR/DLSR) and sender
+reports. **Fixed:** `RtcpPacket::to_bytes` declared SDES and BYE packets one 32-bit
+word short of their size, so any compound carrying one was cut off after it by a
+length-honouring parser (including `parse_compound`).
+
+**Crate versions:** **forge-rtp 0.5.0**, **forge-webrtc 0.6.0**.
+
+**Breaking changes:** `forge_webrtc::TransportEvent::Rtcp` carries `Vec<RtcpPacket>`
+instead of `Bytes`; `forge_webrtc::sdp::build_answer` returns `Negotiated` instead of
+the audio codec pair, and `LocalParams` gains `msid` and `video`;
+`forge_webrtc::transport::Transport::new` takes the video SSRC and CNAME. forge-api,
+the only consumer, is unaffected.
+
+### Added
+
+- **forge-webrtc** `VideoConfig`, `PeerConfig::video`, `PeerConnection::{set_video,
+  video_config, video_sender, send_rtcp, negotiated_video, video_ssrc, sources}`,
+  `VideoSender`, `NegotiatedVideo`, `TransportEvent::VideoRtp`, `MediaKind`,
+  `PayloadMapping`, `TransportConfig::rtcp_interval`, `AudioSender::{clock_rate,
+  send_rtcp}`, `sdp::{rtp_clock, LocalVideo, RemoteVideo, Negotiated,
+  select_video_codec, video_from_answer}`; G.722 in `PeerConfig::codecs`. Re-exported
+  at the crate root: `VideoCodec`, `RtcpPacket`, `SourceStats`.
+- **forge-rtp** `stats::{SourceStats, SenderStats}`, `SrtpContext::{local_packet_index_for,
+  local_packets_sent}`.
+- Tests: forge-webrtc answers the Chrome fixture with video accepted, rejected and
+  filtered (transport-cc and RTX left out, packetization-mode 0 H.264 skipped), a
+  two-peer loopback moving video and audio both ways with PLI and NACK crossing the
+  shared RTCP path and SR/RR reports arriving on cadence, video added and dropped by
+  re-offer, and a peer without video rejecting it; forge-rtp two SSRCs on one SRTP
+  context, per-SSRC replay and SRTCP indices, the statistics, and declared RTCP
+  lengths against serialised sizes. The two-peer harness moved to `tests/common`.
+
+### Changed
+
+- **forge-webrtc** `AudioSender::samples_per_20ms` uses the RTP clock (160 for G.722).
+- **forge-rtp** SRTP state per SSRC (above); SDES and BYE header lengths corrected.
+
+## [2026-09-07] — workspace release
+
+**Self-benchmark (FCP video conferencing, phase 3c).** `forge-video` gains a public
+`bench` module: the synthetic sources the codec bindings' tests already used (`synth`,
+`noisy`) and the measurements a node runs at start to price its devices for FCP's
+capacity model (design §9.3): `measure_codec` times one codec's encode and decode of the
+hard source and reports nanoseconds per pixel, the delivered bitrate and whether the run
+fit its wall-clock budget; `measure_all` does that for every codec a registry serves on a
+device; `measure_compose` times the host compositor drawing a grid. `CodecCost` turns the
+constants back into "streams per execution unit" for logs. forge-video-codecs' test
+sources now come from there and its bench test also runs the self-benchmark on each
+native codec.
+
+**Crate versions:** **forge-video 0.2.0**. forge-video-codecs is unchanged in its API.
+
+**Breaking changes:** none.
+
+### Added
+
+- **forge-video** `bench`: `synth`, `noisy`, `BenchSettings` (640×360 @ 30, 800 kb/s,
+  90 frames, 3 s budget by default), `CodecCost` with `encode_streams_per_unit` /
+  `decode_streams_per_unit`, `measure_codec`, `measure_all`, `measure_compose`.
+  Re-exported at the crate root: `BenchSettings`, `CodecCost`.
+
+### Changed
+
+- **forge-video-codecs**: `testsrc::{synth, noisy}` re-export `forge_video::bench`; the
+  bitrate/speed test prints each native codec's self-benchmark constants beside its own
+  numbers.
+
+## [2026-09-06] — workspace release
+
+**Conference video (FCP video conferencing, phase 3b).** The video room beside the
+audio room. `forge-conference` gains `VideoRoom`: participants' RTP goes in, is
+reassembled and decoded on a dedicated codec thread pool into per-participant frame
+slots; a per-room clock composes the layout once per layout output and encodes it once
+per *flavor*, so participants with the same needs share one encoder; each subscriber
+gets its own SSRC, sequence space and retransmission cache and drains its packets from a
+channel the conference server protects and sends. Keyframe requests are coalesced per
+encoder, loss raises NACK then PLI per source through rate gates, REMB pins an encoder
+to its slowest receiver, and decoders run behind size, resolution, rate and error
+limits that fail one source rather than the room. The active speaker comes from the
+audio mixer's per-participant energy with take/hold hysteresis. The room is
+transport-free like the audio room and runs on the raw codec in CI. Design and rationale
+in FCP's `docs/VIDEO_CONFERENCING.md`.
+
+**Crate versions:** **forge-conference 0.5.0**, **forge-mixer 0.4.0**; forge-sdp's
+`sip-sdp` git pin and the embedded siphon-rs submodule move to `v2026.09.05`
+(sip-sdp 0.3.2, `RTP/AVPF`), no API change.
+
+**Breaking changes:** none. `forge_mixer::ParticipantMetadata` gains a public `energy`
+field (source-breaking only for code constructing it by struct literal, which nothing in
+the workspace or FCP does).
+
+### Added
+
+- **forge-conference** (`video` module):
+  - `CodecPool`: the dedicated codec thread pool (design §9.2), `cores − 2` threads by
+    default; decode, compose and encode never run on tokio workers. A panicking codec
+    ends its job, not the worker.
+  - `VideoRoom` with `ConferenceRoom::enable_video` / `disable_video` / `video`:
+    participants are adopted from the audio room and follow its joins and leaves;
+    `add_source` / `push_rtp` (returns the RTCP feedback to send back) / `remove_source`
+    for ingress; `subscribe` (a `SubscribeRequest`, clamped to the room's resolution
+    and frame rate) / `unsubscribe` / `handle_feedback` (PLI, FIR, NACK, REMB) for egress;
+    `set_layout`, `pin`, `spotlight`, `set_fps`, `set_participant_video_enabled`,
+    `set_display_name`; `participant` / `participants` / `status` for the API;
+    `events()` — `FpsChanged`, `ParticipantState` (`off` / `on` / `lost` / `disabled` /
+    `failed`), `ActiveSpeaker`, `LayoutChanged`.
+  - `VideoRoomSettings` (layout, tiles, resolution, fps, `exclude_self`, codecs,
+    keyframe interval and coalescing, freeze timeout, cache and queue depths) and
+    `SourceLimits` (coded frame bytes, resolution, frame rate, decode queue,
+    consecutive decoder errors, PLI and NACK spacing).
+  - `VideoBackend`: the codec registry, pool and device a node's rooms share;
+    `VideoBackend::raw()` for tests.
+  - Tile ordering per layout (design §8): grid in join order with the speaker swapped in
+    when it would fall off the end, active-speaker strip by recency of speech, spotlight
+    and picture-in-picture around the spotlit / pinned / speaking participant.
+  - `ActiveSpeaker`: a challenger must be loudest for 800 ms and the incumbent keeps
+    the spot for 2 s; silence keeps the last speaker.
+  - Seventeen metric families (`forge_conference_video_*`, in `docs/METRICS.md`).
+  - Integration test `tests/video_room.rs`: two raw-codec cameras composited into a grid
+    and decoded back from a subscriber's packets, encoder sharing and `exclude_self`,
+    loss → NACK → PLI and subscriber NACK / PLI / REMB, resolution limits and layout
+    controls, the active speaker from the mixer.
+- **forge-mixer**: `ParticipantMetadata::energy`, a smoothed RMS of the participant's
+  recent audio, for active-speaker selection.
+
+### Changed
+
+- **Release profile**: `lto = "fat"` (was `"thin"`). With rustc 1.98, thin LTO together
+  with `codegen-units = 1` dropped the cross-crate definitions that only
+  forge-conference's video module references (`rust-lld: undefined symbol:
+  forge_rtp::video::payload::packetize`, `<HostCompositor as Compositor>::render`, …
+  while linking the `forge-media` binary); thin LTO with 16 units and fat LTO with one
+  both link. Release builds take longer; the binaries are, if anything, faster.
+
 ## [2026-09-05.1] — workspace release
 
 **Video mixer core (FCP video conferencing, phase 2).** Two new crates above the phase 1

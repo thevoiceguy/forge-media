@@ -1,0 +1,142 @@
+name: Fuzz
+
+# Nightly, not on every pull request.
+#
+# The design (§15.5) originally called for a 60-second smoke run per target on
+# each PR, on the reasoning that the Actions budget was too tight for anything
+# longer. A fuzzer's value is almost entirely in how long it runs: eight
+# targets on a PR cost the ASan build plus eight minutes to rediscover, every
+# time, what the round-trip tests already cover. So the run is scheduled
+# instead, ten minutes a target, and the corpus persists between runs, so each
+# night starts where the last one left off rather than from the seeds again.
+#
+# Nightly rather than weekly because this repository is public. GitHub's
+# standard runners cost a public repository nothing, so the budget that argued
+# for a short run — FCP's, which is private — does not reach this workflow,
+# and seven runs a week find more than one.
+on:
+  schedule:
+    # 08:00 UTC, an hour after the CI workflow's own weekly sweep on Mondays,
+    # so the two do not contend for runners that day.
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        default: '600'
+      target:
+        description: A single target to run, or blank for all of them
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: Fuzz parsers
+    runs-on: ubuntu-latest
+    # Ten minutes a target across eight targets, plus the sanitizer build.
+    timeout-minutes: 150
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      # cargo-fuzz compiles the targets with libFuzzer and AddressSanitizer,
+      # both of which need a nightly compiler.
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz
+          workspaces: |
+            .
+            fuzz
+
+      # The last run's corpus, so a run starts from the inputs the last one
+      # found interesting rather than from the seeds. Restored by prefix: the
+      # key carries the run number so each night writes a new entry, and
+      # entries older than a week are evicted by GitHub on its own schedule.
+      - name: Restore fuzzing corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_number }}
+          restore-keys: fuzz-corpus-
+
+      # `cargo fuzz run <target>` reads `fuzz/corpus/<target>`, which is the
+      # layout these tests write. They are ordinary stable-toolchain tests and
+      # are silent unless the variable is set.
+      - name: Generate seed corpora
+        run: |
+          set -eo pipefail
+          FORGE_FUZZ_SEED_DIR="$PWD/fuzz/corpus" \
+            cargo test -p forge-rtp -p forge-webm -p forge-bfcp --test fuzz_seeds
+          find fuzz/corpus -type f | wc -l | xargs echo "corpus entries:"
+
+      - name: Fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
+          ONLY: ${{ inputs.target }}
+        run: |
+          set -eo pipefail
+          targets=$(cargo metadata --manifest-path fuzz/Cargo.toml --no-deps \
+            --format-version=1 | jq -r '.packages[0].targets[]
+              | select(.kind[0] == "bin") | .name' | sort)
+          if [ -n "$ONLY" ]; then
+            targets="$ONLY"
+          fi
+          # cargo-fuzz builds for the triple it was itself built for, and
+          # the prebuilt binary the install action fetches is a musl one:
+          # without --target every run went for x86_64-unknown-linux-musl,
+          # which the toolchain has no std for and which links libc
+          # statically (no sanitizer there). Name the host.
+          target_triple=x86_64-unknown-linux-gnu
+          # A target that does not build is not a target that crashed;
+          # keep the two apart, and keep going after either.
+          unbuilt=""
+          crashed=""
+          for t in $targets; do
+            echo "::group::$t"
+            if ! cargo fuzz build --target "$target_triple" "$t"; then
+              unbuilt="$unbuilt $t"
+            elif ! cargo fuzz run --target "$target_triple" "$t" -- \
+                -max_total_time="$SECONDS_PER_TARGET" -timeout=25; then
+              crashed="$crashed $t"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$unbuilt" ]; then
+            echo "::error::fuzz targets that did not build:$unbuilt"
+          fi
+          if [ -n "$crashed" ]; then
+            echo "::error::fuzzing found crashes in:$crashed"
+          fi
+          [ -z "$unbuilt$crashed" ]
+
+      # The crashing input itself, which is what makes a finding reproducible
+      # (`cargo fuzz run <target> <file>`).
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

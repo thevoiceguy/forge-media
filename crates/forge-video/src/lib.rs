@@ -5,11 +5,17 @@
 //!   on a device) and the [`MediaDevice`] it lives on.
 //! - [`scale`]: I420 scaling, letterboxing and blitting, and the
 //!   [`Scaler`] trait a device backend implements.
-//! - [`layout`]: grid, active-speaker, spotlight and picture-in-picture
-//!   tile geometry.
+//! - [`layout`]: grid, active-speaker, spotlight, picture-in-picture and
+//!   presentation (a shared screen with a strip of cameras) tile
+//!   geometry.
 //! - [`compose`]: the [`Compositor`] trait and the [`HostCompositor`]
 //!   that draws a layout of sources onto a canvas, with name labels,
-//!   speaking indicators and avatars.
+//!   speaking indicators and avatars; the chrome is shared so a device
+//!   compositor draws the same, and [`parity`] holds the scenes it is
+//!   checked against.
+//! - [`device`]: the [`DeviceBackend`] a room is placed on — its
+//!   compositor and scaler, and the copies across the bus — with the
+//!   host as [`HostBackend`]; [`testing`] has a fake device for tests.
 //! - [`clock`]: the per-room [`VideoClock`] with overrun back-off.
 //! - [`flavor`]: [`Flavor`], what a receiver consumes, and the table that
 //!   lets subscribers with the same needs share one encoder.
@@ -17,28 +23,37 @@
 //!   binding implements, and the registry that picks one per device.
 //! - [`raw`]: an uncompressed "codec" so the whole pipeline is testable
 //!   without native libraries.
+//! - [`bench`](mod@bench): the synthetic sources and the self-benchmark a node runs
+//!   at start to price codecs and composition per pixel.
 //!
 //! Design: FCP `docs/VIDEO_CONFERENCING.md`.
 
+pub mod bench;
 pub mod clock;
 pub mod codec;
 pub mod compose;
+pub mod device;
 pub mod flavor;
 pub mod font;
 pub mod frame;
+pub mod ladder;
 pub mod layout;
 pub mod metrics;
+pub mod parity;
 pub mod raw;
 pub mod scale;
+pub mod testing;
 
-pub use clock::{ClockEvent, VideoClock};
+pub use bench::{BenchSettings, CodecCost};
+pub use clock::{ClockEvent, LoadShedder, RateOnly, VideoClock};
 pub use codec::{
-    CodecError, CodecRegistry, DecoderFactory, EncoderFactory, EncoderSettings, VideoDecoder,
-    VideoEncoder,
+    CodecError, CodecRegistry, ContentHint, DecoderFactory, EncoderFactory, EncoderSettings,
+    VideoDecoder, VideoEncoder,
 };
-pub use compose::{Compositor, HostCompositor, Theme, TileSource};
+pub use compose::{Compositor, HostCompositor, Theme, TileGeometry, TileKind, TileSource};
+pub use device::{DeviceBackend, HostBackend};
 pub use flavor::{Flavor, FlavorTable};
 pub use frame::{DeviceFrame, HostFrame, MediaDevice, Resolution, VideoFrame};
 pub use layout::{Layout, Rect};
 pub use raw::{RawDecoder, RawEncoder};
-pub use scale::{HostScaler, Scaler};
+pub use scale::{HostScaler, ScaleMode, Scaler};

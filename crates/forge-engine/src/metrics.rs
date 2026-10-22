@@ -55,6 +55,7 @@ pub const M_RTP_BYTES_RECEIVED: &str = "forge_rtp_bytes_received_total";
 pub const M_RTP_BYTES_SENT: &str = "forge_rtp_bytes_sent_total";
 pub const M_RTP_PACKETS_RECEIVED: &str = "forge_rtp_packets_received_total";
 pub const M_RTP_PACKETS_SENT: &str = "forge_rtp_packets_sent_total";
+pub const M_RTP_RELAY_SUPPRESSED: &str = "forge_rtp_relay_suppressed_total";
 pub const M_RTP_UNSUPPORTED_FIRST_BYTE: &str = "forge_rtp_unsupported_first_byte_total";
 pub const M_SRTCP_PROTECT_ERRORS: &str = "forge_srtcp_protect_errors_total";
 pub const M_SRTCP_UNPROTECT_ERRORS: &str = "forge_srtcp_unprotect_errors_total";
@@ -102,6 +103,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     M_RTP_BYTES_SENT,
     M_RTP_PACKETS_RECEIVED,
     M_RTP_PACKETS_SENT,
+    M_RTP_RELAY_SUPPRESSED,
     M_RTP_UNSUPPORTED_FIRST_BYTE,
     M_SRTCP_PROTECT_ERRORS,
     M_SRTCP_UNPROTECT_ERRORS,
@@ -299,6 +301,11 @@ pub fn describe_metrics() {
         M_RTP_UNSUPPORTED_FIRST_BYTE,
         "Datagrams dropped from media sockets whose first byte marks them as \
          neither RTP/RTCP nor DTLS."
+    );
+    describe_counter!(
+        M_RTP_RELAY_SUPPRESSED,
+        "RTP packets not relayed to a leg because a playback replacing the \
+         other leg's audio (hold music) has it."
     );
     describe_counter!(
         M_SRTP_PROTECT_ERRORS,

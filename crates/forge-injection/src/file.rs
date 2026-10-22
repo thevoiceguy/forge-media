@@ -4,15 +4,12 @@ use crate::error::{InjectionError, Result};
 use crate::source::AudioSource;
 use forge_core::AudioFrame;
 use std::path::{Component, Path, PathBuf};
-use symphonia::core::audio::{AudioBuffer, AudioBufferRef, Signal};
-use symphonia::core::codecs::{Decoder, DecoderOptions};
-use symphonia::core::conv::FromSample;
-use symphonia::core::formats::{FormatOptions, FormatReader};
+use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::sample::Sample;
-use symphonia::core::units::{Time, TimeBase};
+use symphonia::core::units::{Time, TimeBase, Timestamp};
 use tracing::debug;
 
 /// Audio file source using Symphonia for decoding
@@ -41,7 +38,7 @@ pub struct FileSource {
     format: Box<dyn FormatReader>,
 
     /// Symphonia decoder
-    decoder: Box<dyn Decoder>,
+    decoder: Box<dyn AudioDecoder>,
 
     /// Track ID being decoded
     track_id: u32,
@@ -69,6 +66,10 @@ pub struct FileSource {
 
     /// Finished flag
     finished: bool,
+
+    /// Frames still to discard after an accurate seek: the reader lands on the
+    /// packet holding the target, which may start before it
+    skip_frames: u64,
 }
 
 /// Sandbox for audio-injection file paths.
@@ -222,28 +223,30 @@ impl FileSource {
         }
 
         // Probe the file format
-        let probed = symphonia::default::get_probe()
-            .format(
+        let format = symphonia::default::get_probe()
+            .probe(
                 &hint,
                 mss,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
+                FormatOptions::default(),
+                MetadataOptions::default(),
             )
             .map_err(|e| {
                 InjectionError::UnsupportedFormat(format!("Failed to probe file format: {}", e))
             })?;
 
-        let format = probed.format;
-
         // Find the first audio track
-        let track = format
+        let (track, codec_params) = format
             .tracks()
             .iter()
-            .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+            .find_map(|t| {
+                t.codec_params
+                    .as_ref()
+                    .and_then(|p| p.audio())
+                    .map(|p| (t, p))
+            })
             .ok_or_else(|| InjectionError::UnsupportedFormat("No audio track found".to_string()))?;
 
         let track_id = track.id;
-        let codec_params = &track.codec_params;
 
         debug!("Audio track found: codec={:?}", codec_params.codec);
 
@@ -254,14 +257,18 @@ impl FileSource {
 
         let channels = codec_params
             .channels
+            .as_ref()
             .ok_or_else(|| InjectionError::InvalidParameters("Unknown channel count".to_string()))?
             .count() as u8;
 
-        let time_base = codec_params
-            .time_base
-            .unwrap_or_else(|| TimeBase::new(1, sample_rate));
+        let time_base = match track.time_base {
+            Some(tb) => tb,
+            None => TimeBase::try_new(1, sample_rate).ok_or_else(|| {
+                InjectionError::InvalidParameters("Sample rate of 0Hz".to_string())
+            })?,
+        };
 
-        let total_samples = codec_params.n_frames;
+        let total_samples = track.num_frames;
 
         debug!(
             "Audio format: {}Hz, {} channels, duration: {:?} samples",
@@ -270,7 +277,7 @@ impl FileSource {
 
         // Create a decoder
         let decoder = symphonia::default::get_codecs()
-            .make(codec_params, &DecoderOptions::default())
+            .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
             .map_err(|e| {
                 InjectionError::UnsupportedFormat(format!("Failed to create decoder: {}", e))
             })?;
@@ -287,6 +294,7 @@ impl FileSource {
             sample_buffer: Vec::new(),
             file_path,
             finished: false,
+            skip_frames: 0,
         })
     }
 
@@ -319,7 +327,11 @@ impl FileSource {
         loop {
             // Read the next packet
             let packet = match self.format.next_packet() {
-                Ok(packet) => packet,
+                Ok(Some(packet)) => packet,
+                Ok(None) => {
+                    self.finished = true;
+                    return Err(InjectionError::EndOfFile);
+                }
                 Err(symphonia::core::errors::Error::IoError(e))
                     if e.kind() == std::io::ErrorKind::UnexpectedEof =>
                 {
@@ -333,46 +345,29 @@ impl FileSource {
             };
 
             // Skip packets that aren't for our track
-            if packet.track_id() != self.track_id {
+            if packet.track_id != self.track_id {
                 continue;
             }
 
             // Decode the packet
             let decoded = self.decoder.decode(&packet)?;
 
-            // Extract samples (inline to avoid borrow checker issues)
+            // Interleave and convert to i16, whatever the decoder's sample format
             self.sample_buffer.clear();
-            match &decoded {
-                AudioBufferRef::S16(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
-                AudioBufferRef::F32(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
-                AudioBufferRef::F64(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
-                AudioBufferRef::U8(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
-                AudioBufferRef::U16(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
-                AudioBufferRef::U24(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
-                AudioBufferRef::U32(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
-                AudioBufferRef::S8(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
-                AudioBufferRef::S24(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
-                AudioBufferRef::S32(buf) => interleave_to_buffer(&mut self.sample_buffer, buf),
+            decoded.copy_to_vec_interleaved(&mut self.sample_buffer);
+
+            if self.skip_frames > 0 {
+                let frames = self.samples_to_frames(self.sample_buffer.len());
+                let skip = frames.min(self.skip_frames as usize);
+                let samples = self.frames_to_samples(skip);
+                self.sample_buffer.drain(..samples);
+                self.skip_frames -= skip as u64;
+                if self.sample_buffer.is_empty() {
+                    continue;
+                }
             }
 
             return Ok(());
-        }
-    }
-}
-
-fn interleave_to_buffer<T>(buffer: &mut Vec<i16>, buf: &AudioBuffer<T>)
-where
-    T: Sample,
-    i16: FromSample<T>,
-{
-    let channels = buf.spec().channels.count();
-    let frames = buf.frames();
-    buffer.reserve(frames * channels);
-
-    for frame_idx in 0..frames {
-        for ch in 0..channels {
-            let sample = buf.chan(ch)[frame_idx];
-            buffer.push(i16::from_sample(sample));
         }
     }
 }
@@ -384,6 +379,14 @@ impl FileSource {
     /// For stereo audio, 1 frame = 2 samples (left + right).
     fn frames_to_samples(&self, frames: usize) -> usize {
         frames * self.channels as usize
+    }
+
+    /// Convert a duration in track time-base units to audio frames
+    fn ts_to_frames(&self, ts: i64) -> u64 {
+        let ts = ts.max(0) as u128;
+        let numer = self.time_base.numer.get() as u128;
+        let denom = self.time_base.denom.get() as u128;
+        (ts * numer * self.sample_rate as u128 / denom) as u64
     }
 
     /// Convert sample count to frame count (samples / channels)
@@ -463,9 +466,9 @@ impl AudioSource for FileSource {
         // Seeking to beginning
         self.format
             .seek(
-                symphonia::core::formats::SeekMode::Accurate,
-                symphonia::core::formats::SeekTo::TimeStamp {
-                    ts: 0,
+                SeekMode::Accurate,
+                SeekTo::Timestamp {
+                    ts: Timestamp::ZERO,
                     track_id: self.track_id,
                 },
             )
@@ -475,29 +478,31 @@ impl AudioSource for FileSource {
         self.sample_buffer.clear();
         self.position = 0;
         self.finished = false;
+        self.skip_frames = 0;
 
         Ok(())
     }
 
     fn seek(&mut self, seconds: f64) -> Result<()> {
-        let whole_seconds = seconds.trunc();
-        let frac = (seconds - whole_seconds).clamp(0.0, 0.999_999_999);
-        let timestamp = self
-            .time_base
-            .calc_timestamp(Time::new(whole_seconds as u64, frac));
+        let timestamp = Time::try_from_secs_f64(seconds.max(0.0))
+            .and_then(|time| self.time_base.calc_timestamp(time))
+            .ok_or_else(|| InjectionError::InvalidParameters(format!("Bad seek: {}s", seconds)))?;
 
-        self.format
+        let seeked = self
+            .format
             .seek(
-                symphonia::core::formats::SeekMode::Accurate,
-                symphonia::core::formats::SeekTo::TimeStamp {
+                SeekMode::Accurate,
+                SeekTo::Timestamp {
                     ts: timestamp,
                     track_id: self.track_id,
                 },
             )
             .map_err(|e| InjectionError::Internal(format!("Seek failed: {}", e)))?;
 
+        self.decoder.reset();
         self.sample_buffer.clear();
-        self.position = timestamp;
+        self.skip_frames = self.ts_to_frames(seeked.required_ts.get() - seeked.actual_ts.get());
+        self.position = self.ts_to_frames(seeked.required_ts.get());
         self.finished = false;
 
         Ok(())
@@ -618,5 +623,56 @@ mod tests {
             .resolve("does-not-exist.wav")
             .expect_err("nonexistent path must be rejected");
         assert!(matches!(err, InjectionError::PathRejected(_)));
+    }
+
+    /// A mono 16-bit PCM WAV whose sample `i` is `i as i16`.
+    fn write_ramp_wav(path: &Path, rate: u32, frames: u32) {
+        let data_len = frames * 2;
+        let mut wav = Vec::with_capacity(44 + data_len as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..frames {
+            wav.extend_from_slice(&(i as i16).to_le_bytes());
+        }
+        std::fs::write(path, wav).unwrap();
+    }
+
+    #[test]
+    fn test_file_source_decodes_seeks_and_resets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ramp.wav");
+        write_ramp_wav(&path, 8000, 8000);
+
+        let mut source = FileSource::new(&path).unwrap();
+        assert_eq!(source.sample_rate(), 8000);
+        assert_eq!(source.channels(), 1);
+        assert_eq!(source.duration(), Some(1.0));
+
+        let frame = source.read_frame(160).unwrap();
+        assert_eq!(frame, (0..160).collect::<Vec<i16>>());
+
+        source.seek(0.5).unwrap();
+        assert_eq!(source.position(), 0.5);
+        assert_eq!(source.read_frame(4).unwrap(), vec![4000, 4001, 4002, 4003]);
+
+        source.reset().unwrap();
+        assert_eq!(source.read_frame(2).unwrap(), vec![0, 1]);
+
+        let mut total = 2;
+        while let Ok(frame) = source.read_frame(960) {
+            total += frame.len();
+        }
+        assert_eq!(total, 8000);
+        assert!(source.is_finished());
     }
 }

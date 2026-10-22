@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **forge-rtp**: a packet refused by the latch policy logged a WARN every
+  time — 50 a second per leg, 44 million lines in one 24-hour soak, and a
+  way for anyone spraying the media ports to fill a disk (#175). Each socket
+  pair now warns once per refused source, for at most 32 sources (then once
+  more to say the rest go to debug); `forge_rtp_latch_rejected_total` still
+  counts every refused packet.
+- **forge-engine**: `MediaSession::to_transcoder_codec` maps G.722 when the
+  `g722` feature is on (it is by default), so arming a G.722 ↔ G.711 pair
+  sets up both transcoders instead of reporting the pair as not transcodable
+  while the forwarding loop transcoded it anyway (#174).
+- **forge-conference**: `ConferenceBridge::create_room` checked for the room
+  and inserted it in two steps, so two concurrent creates of one id both
+  succeeded and the second replaced the first; `get_or_create_room` could
+  hand two callers two rooms for one id, orphaning whoever joined the first.
+  The check and the insert are now one operation on the map entry (#172).
 - **forge-bfcp 0.1.1**: a grouped attribute whose last child's padding was
   cut short by the group's end was read, but written back with every child
   padded it no longer fitted its one-octet length, so a parsed message could
@@ -19,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **forge-conference**: recorded for #138 — the default end-conference key
+  (`HostCommandsConfig` and `HostCommands`) has been `*00` since 954fd97
+  (2026-04-02); it was `*99`. That change never reached the release notes. A
+  deployment that relied on the default and wants `*99` back must set
+  `end_conference` explicitly.
 - The embedded siphon-rs moves to **v2026.09.22**, in both places that name
   it: the `external/siphon-rs` submodule, which the binaries build against
   by path, and the `sip-sdp` git tag that `forge-sdp` pins. They had drifted

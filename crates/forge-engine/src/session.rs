@@ -1817,6 +1817,8 @@ impl MediaSession {
             forge_core::AudioCodec::PCMA => Some(forge_codecs::AudioCodecType::PCMA),
             forge_core::AudioCodec::Opus => Some(forge_codecs::AudioCodecType::Opus),
             forge_core::AudioCodec::PCM => Some(forge_codecs::AudioCodecType::PCM),
+            #[cfg(feature = "g722")]
+            forge_core::AudioCodec::G722 => Some(forge_codecs::AudioCodecType::G722),
             // Codecs not supported by transcoder yet
             _ => None,
         }
@@ -4137,6 +4139,15 @@ mod tests {
     }
 
     #[cfg(feature = "opus")]
+    #[test]
+    fn g722_maps_to_the_transcoder_when_the_feature_is_on() {
+        let mapped = MediaSession::to_transcoder_codec(forge_core::AudioCodec::G722);
+        #[cfg(feature = "g722")]
+        assert_eq!(mapped, Some(forge_codecs::AudioCodecType::G722));
+        #[cfg(not(feature = "g722"))]
+        assert_eq!(mapped, None);
+    }
+
     #[test]
     fn opus_codec_is_built_at_16k_mono() {
         // The engine builds the Opus codec at 16 kHz mono (so libopus does

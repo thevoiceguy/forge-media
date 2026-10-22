@@ -88,6 +88,22 @@ impl LatchPolicy {
     }
 }
 
+/// How many distinct refused sources a socket pair warns about before it logs
+/// further ones at debug: one WARN per source, but a bounded set, since
+/// anyone can spray the media ports from any number of addresses.
+const MAX_WARNED_LATCH_SOURCES: usize = 32;
+
+/// What to log for a packet the latch policy refused
+#[derive(Debug, PartialEq, Eq)]
+enum LatchRejectionLog {
+    /// First refusal from this source: warn
+    Warn,
+    /// First refusal from a source past the cap: warn that the rest go to debug
+    WarnCapReached,
+    /// Already warned about, or past the cap: debug
+    Debug,
+}
+
 /// A pair of UDP sockets for RTP and RTCP
 pub struct RtpSocketPair {
     /// RTP socket
@@ -100,6 +116,10 @@ pub struct RtpSocketPair {
     remote_endpoint: Arc<RwLock<Option<RemoteEndpoint>>>,
     /// Policy governing which source IPs may latch the remote endpoint.
     latch_policy: Arc<RwLock<LatchPolicy>>,
+    /// Refused sources already warned about (at most `MAX_WARNED_LATCH_SOURCES`)
+    latch_rejected_sources: std::sync::Mutex<HashSet<SocketAddr>>,
+    /// Set once a refusal past the cap has been warned about
+    latch_rejected_overflow: std::sync::atomic::AtomicBool,
     /// Configuration
     config: RtpSocketConfig,
 }
@@ -128,6 +148,8 @@ impl RtpSocketPair {
             ports,
             remote_endpoint: Arc::new(RwLock::new(None)),
             latch_policy: Arc::new(RwLock::new(LatchPolicy::default())),
+            latch_rejected_sources: std::sync::Mutex::new(HashSet::new()),
+            latch_rejected_overflow: std::sync::atomic::AtomicBool::new(false),
             config,
         })
     }
@@ -272,11 +294,27 @@ impl RtpSocketPair {
         // Policy check — reject disallowed sources before touching the endpoint.
         let policy = self.latch_policy.read().await;
         if !policy.allows(&addr) {
-            tracing::warn!(
-                target: "forge::rtp::latch",
-                source = %addr,
-                "rejected RTP latch attempt: source disallowed by latch policy"
-            );
+            drop(policy);
+            match self.latch_rejection_log(addr) {
+                LatchRejectionLog::Warn => tracing::warn!(
+                    target: "forge::rtp::latch",
+                    source = %addr,
+                    "rejected RTP latch attempt: source disallowed by latch policy \
+                     (further packets from this source logged at debug)"
+                ),
+                LatchRejectionLog::WarnCapReached => tracing::warn!(
+                    target: "forge::rtp::latch",
+                    source = %addr,
+                    "rejected RTP latch attempt: source disallowed by latch policy \
+                     ({} sources refused; further refusals logged at debug)",
+                    MAX_WARNED_LATCH_SOURCES
+                ),
+                LatchRejectionLog::Debug => tracing::debug!(
+                    target: "forge::rtp::latch",
+                    source = %addr,
+                    "rejected RTP latch attempt: source disallowed by latch policy"
+                ),
+            }
             metrics::counter!("forge_rtp_latch_rejected_total").increment(1);
             return;
         }
@@ -298,6 +336,29 @@ impl RtpSocketPair {
             });
             tracing::debug!(target: "forge::rtp::latch", source = %addr, "learned RTP endpoint");
             metrics::counter!("forge_rtp_latch_learned_total").increment(1);
+        }
+    }
+
+    /// Decide how loudly to log a refused packet from `addr`: a WARN for the
+    /// first from each source, then debug, so a steady stream from a refused
+    /// source cannot fill a disk.
+    fn latch_rejection_log(&self, addr: SocketAddr) -> LatchRejectionLog {
+        let mut warned = self
+            .latch_rejected_sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if warned.contains(&addr) {
+            LatchRejectionLog::Debug
+        } else if warned.len() < MAX_WARNED_LATCH_SOURCES {
+            warned.insert(addr);
+            LatchRejectionLog::Warn
+        } else if !self
+            .latch_rejected_overflow
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            LatchRejectionLog::WarnCapReached
+        } else {
+            LatchRejectionLog::Debug
         }
     }
 
@@ -608,6 +669,52 @@ mod tests {
         assert_eq!(
             learned.rtp_addr.ip(),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_latch_rejection_warns_once_per_source_up_to_a_cap() {
+        let config = RtpSocketConfig {
+            bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ..Default::default()
+        };
+        let sockets = RtpSocketPair::new(PortPair::new(10106).unwrap(), config)
+            .await
+            .unwrap();
+        let source = |i: usize| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), i as u16);
+
+        assert_eq!(
+            sockets.latch_rejection_log(source(1)),
+            LatchRejectionLog::Warn
+        );
+        for _ in 0..100 {
+            assert_eq!(
+                sockets.latch_rejection_log(source(1)),
+                LatchRejectionLog::Debug
+            );
+        }
+        for i in 2..=MAX_WARNED_LATCH_SOURCES {
+            assert_eq!(
+                sockets.latch_rejection_log(source(i)),
+                LatchRejectionLog::Warn
+            );
+        }
+        let past_cap = source(MAX_WARNED_LATCH_SOURCES + 1);
+        assert_eq!(
+            sockets.latch_rejection_log(past_cap),
+            LatchRejectionLog::WarnCapReached
+        );
+        assert_eq!(
+            sockets.latch_rejection_log(past_cap),
+            LatchRejectionLog::Debug
+        );
+        assert_eq!(
+            sockets.latch_rejection_log(source(MAX_WARNED_LATCH_SOURCES + 2)),
+            LatchRejectionLog::Debug
+        );
+        assert_eq!(
+            sockets.latch_rejected_sources.lock().unwrap().len(),
+            MAX_WARNED_LATCH_SOURCES
         );
     }
 

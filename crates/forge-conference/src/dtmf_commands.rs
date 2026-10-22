@@ -102,7 +102,7 @@ pub struct HostCommands {
     pub unlock: String, // default: "*94"
 
     /// End conference for all
-    pub end_conference: String, // default: "*99"
+    pub end_conference: String, // default: "*00"
 
     /// Dial-out prefix: starts collecting an extension/number.
     /// After entering the prefix the caller types digits then #.

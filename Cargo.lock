@@ -1692,7 +1692,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference"
-version = "0.14.1"
+version = "0.14.2"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1742,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "forge-engine"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "forge-injection"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "forge-core",
  "rubato",
@@ -1884,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mixer"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "forge-resampler"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -1966,7 +1966,7 @@ dependencies = [
  "forge-ice",
  "forge-rtp",
  "rand 0.10.2",
- "sip-sdp 0.3.2 (git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22)",
+ "sip-sdp 0.3.2 (git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2)",
  "smol_str",
  "thiserror 2.0.20",
 ]
@@ -2127,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "forge-webrtc"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -4700,7 +4700,7 @@ dependencies = [
 
 [[package]]
 name = "sip-dialog"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4770,7 +4770,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.2"
-source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.09.22#7472567cc273e10549f4e06326f6e1076cd140de"
+source = "git+https://github.com/thevoiceguy/siphon-rs?tag=v2026.10.22.2#590d55f6546799847437f6e25035357ec433b7e8"
 dependencies = [
  "nom 7.1.3",
  "smol_str",
@@ -4778,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transaction"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4797,7 +4797,7 @@ dependencies = [
 
 [[package]]
 name = "sip-transport"
-version = "0.6.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4825,7 +4825,7 @@ dependencies = [
 
 [[package]]
 name = "sip-uas"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -234,7 +234,43 @@ async fn test_unsupported_codec_no_transcoder() {
     let config = SessionManagerConfig::default();
     let manager = SessionManager::new(config, None);
 
-    let codec_g722 = codec_config(AudioCodec::G722, 9, 8000); // Not in transcoder
+    let codec_amr = codec_config(AudioCodec::AMR, 96, 8000); // Not in transcoder
+    let codec_pcmu = codec_config(AudioCodec::PCMU, 0, 8000);
+
+    let session = manager
+        .create_session_with_codecs(
+            CallId::generate(),
+            ParticipantId::generate(),
+            ParticipantId::generate(),
+            codec_amr,
+            codec_pcmu,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("Failed to create session");
+
+    // Should not crash, but transcoders won't be initialized
+    let transcoder_a_to_b = session.transcoder_a_to_b().lock().await;
+    let transcoder_b_to_a = session.transcoder_b_to_a().lock().await;
+
+    // AMR not supported by transcoder, so should be None
+    assert!(
+        transcoder_a_to_b.is_none(),
+        "Transcoder should not initialize for unsupported codec"
+    );
+    assert!(transcoder_b_to_a.is_none());
+}
+
+#[tokio::test]
+async fn test_g722_pcmu_arms_both_transcoders() {
+    // forge-engine's default `g722` feature makes G.722 transcodable (#174)
+    let config = SessionManagerConfig::default();
+    let manager = SessionManager::new(config, None);
+
+    let codec_g722 = codec_config(AudioCodec::G722, 9, 8000);
     let codec_pcmu = codec_config(AudioCodec::PCMU, 0, 8000);
 
     let session = manager
@@ -252,16 +288,8 @@ async fn test_unsupported_codec_no_transcoder() {
         .await
         .expect("Failed to create session");
 
-    // Should not crash, but transcoders won't be initialized
-    let transcoder_a_to_b = session.transcoder_a_to_b().lock().await;
-    let transcoder_b_to_a = session.transcoder_b_to_a().lock().await;
-
-    // G722 not supported by transcoder, so should be None
-    assert!(
-        transcoder_a_to_b.is_none(),
-        "Transcoder should not initialize for unsupported codec"
-    );
-    assert!(transcoder_b_to_a.is_none());
+    assert!(session.transcoder_a_to_b().lock().await.is_some());
+    assert!(session.transcoder_b_to_a().lock().await.is_some());
 }
 
 #[tokio::test]

@@ -1811,24 +1811,40 @@ impl ConferenceBridge {
         room_id: S,
         format: Option<AudioFormat>,
     ) -> Result<Arc<ConferenceRoom>> {
-        let room_id = room_id.into();
+        self.insert_room(room_id.into(), format, false)
+    }
 
-        if self.rooms.contains_key(&room_id) {
-            return Err(ConferenceError::Internal(format!(
-                "Room {} already exists",
-                room_id
-            )));
-        }
-
-        let format = format.unwrap_or(self.default_format);
-        let room = Arc::new(ConferenceRoom::new(
-            &room_id,
-            format,
-            self.default_frame_size,
-            self.mixer_options.clone(),
-        )?);
-
-        self.rooms.insert(room_id.clone(), room.clone());
+    /// Create a room, or hand back the one already under `room_id` when
+    /// `existing_ok` (an error otherwise). The check and the insert are one
+    /// operation on the map's entry, so concurrent creators of one id all get
+    /// the same room.
+    fn insert_room(
+        &self,
+        room_id: String,
+        format: Option<AudioFormat>,
+        existing_ok: bool,
+    ) -> Result<Arc<ConferenceRoom>> {
+        let room = match self.rooms.entry(room_id.clone()) {
+            dashmap::Entry::Occupied(entry) if existing_ok => return Ok(entry.get().clone()),
+            dashmap::Entry::Occupied(_) => {
+                return Err(ConferenceError::Internal(format!(
+                    "Room {} already exists",
+                    room_id
+                )));
+            }
+            dashmap::Entry::Vacant(entry) => {
+                let format = format.unwrap_or(self.default_format);
+                let room = Arc::new(ConferenceRoom::new(
+                    &room_id,
+                    format,
+                    self.default_frame_size,
+                    self.mixer_options.clone(),
+                )?);
+                entry.insert(room.clone());
+                room
+            }
+        };
+        // The entry's shard lock is released here: `len()` below takes every shard.
         info!("Created conference room: {}", room_id);
 
         // Update metrics
@@ -1895,7 +1911,7 @@ impl ConferenceBridge {
         if let Some(room) = self.rooms.get(&room_id) {
             Ok(room.value().clone())
         } else {
-            self.create_room(room_id, format)
+            self.insert_room(room_id, format, true)
         }
     }
 
@@ -2083,6 +2099,46 @@ mod tests {
 
         // Should be the same instance
         assert_eq!(bridge.room_count(), 1);
+    }
+
+    #[test]
+    fn test_concurrent_room_creation_yields_one_room() {
+        const THREADS: usize = 16;
+        for _ in 0..20 {
+            let bridge = Arc::new(ConferenceBridge::default());
+            let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+            let handles: Vec<_> = (0..THREADS)
+                .map(|i| {
+                    let bridge = bridge.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let strict = i % 2 == 1;
+                        let room = if strict {
+                            bridge.create_room("race", None).ok()
+                        } else {
+                            bridge.get_or_create_room("race", None).ok()
+                        };
+                        (strict, room)
+                    })
+                })
+                .collect();
+            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+            let stored = bridge.get_room("race").unwrap();
+            // Every room handed out is the one the bridge holds
+            assert!(results
+                .iter()
+                .filter_map(|(_, room)| room.as_ref())
+                .all(|room| Arc::ptr_eq(room, &stored)));
+            // At most one create_room won; the rest saw the room already there
+            let created = results
+                .iter()
+                .filter(|(strict, room)| *strict && room.is_some())
+                .count();
+            assert!(created <= 1, "{created} create_room calls succeeded");
+            assert_eq!(bridge.room_count(), 1);
+        }
     }
 
     #[test]

@@ -3,7 +3,9 @@ description: >
   What forge-video-codecs links against with every feature on: libvpx,
   dav1d, nasm (OpenH264 from source), libclang (bindgen) and the FFmpeg
   development libraries (forge-video-hw's bindings compile against them;
-  the GPU they drive is not here) from apt, and SVT-AV1 built from source
+  the GPU they drive is not here) from apt, libopus from apt (audiopus_sys
+  finds it with pkg-config; without it the crate builds its bundled opus
+  1.3 with CMake, which CMake 4 refuses), and SVT-AV1 built from source
   at a pinned tag because Ubuntu's package is older than the 2.x API the
   binding uses. The SVT-AV1 install is cached by tag.
 inputs:
@@ -19,7 +21,7 @@ runs:
       run: |
         sudo apt-get update
         sudo apt-get install -y libvpx-dev libdav1d-dev nasm libclang-dev cmake pkg-config \
-          libavcodec-dev libavfilter-dev libavutil-dev
+          libavcodec-dev libavfilter-dev libavutil-dev libopus-dev
 
     - name: Cache SVT-AV1
       id: svt

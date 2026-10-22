@@ -463,6 +463,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libbcg729-dev jq
 
+      - name: Install native video codec libraries
+        # `--all-features` again: without these the build stops at
+        # ffmpeg-sys-next, which needs the FFmpeg headers; see the action.
+        uses: ./.github/actions/video-codecs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

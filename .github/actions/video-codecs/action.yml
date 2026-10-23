@@ -46,19 +46,6 @@ runs:
         cmake --build "$RUNNER_TEMP/svt-av1/build" -j"$(nproc)"
         sudo cmake --install "$RUNNER_TEMP/svt-av1/build"
 
-    - name: Point bindgen at the packaged libclang
-      # clang-sys loads the newest libclang it can find, and runner images
-      # carry more than one: ubuntu-26.04 has LLVM 20, 21 and 22, while
-      # libclang-dev installs 21. env-libvpx-sys generates with bindgen
-      # 0.68, which reads libclang 22's AST wrongly (every vpx struct comes
-      # out empty, `_address` only), so name the one libclang-dev put in
-      # place: only the -dev package creates the unversioned libclang.so.
-      shell: bash
-      run: |
-        lib=$(ls -d /usr/lib/llvm-*/lib/libclang.so | sort -V | tail -n1)
-        echo "LIBCLANG_PATH=$(dirname "$lib")" >> "$GITHUB_ENV"
-        echo "libclang: $lib"
-
     - name: Export SVT-AV1 paths
       shell: bash
       run: |

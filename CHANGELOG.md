@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **forge-video-hw 0.3.0**: builds against FFmpeg 8 (#181). `ffmpeg-sys-next`
+  7.1 bound `libavcodec/avfft.h`, which FFmpeg 8 removed, so the crate did not
+  build on Ubuntu 26.04 or any other system shipping FFmpeg 8. It now uses
+  `ffmpeg-sys-next` 9.0, which binds FFmpeg 3.0 through 9.0 and includes
+  `avfft.h` only where it exists; no source change was needed. Built, tested
+  and linted here against FFmpeg 7.1.3 and 8.0.1. Breaking only in name: the
+  `ff::AVPixelFormat` and `ff::AVHWDeviceType` that `device::SW_FORMAT`,
+  `HwDevice::kind` and `pix_fmt` return now come from `ffmpeg-sys-next` 9, so
+  a consumer that names those types through its own `ffmpeg-sys-next` 7
+  dependency must move to 9. Building it needs Rust 1.88 (the binding's
+  build script uses `let` chains).
+
 ## [2026-10-22] — workspace release
 
 **Crate versions:** **forge-engine 0.7.0**, **forge-mixer 0.5.0**,

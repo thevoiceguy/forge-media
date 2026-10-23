@@ -1,6 +1,6 @@
 [package]
 name = "forge-video-hw"
-version = "0.2.1"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -20,7 +20,7 @@ tracing = { workspace = true }
 # Raw bindings, generated at build time against the FFmpeg the machine
 # has (pkg-config, or FFMPEG_DIR). avutil comes with them; avcodec for
 # the codecs, avfilter for scale_cuda.
-ffmpeg-sys-next = { version = "7.1", default-features = false, features = ["avcodec", "avfilter"] }
+ffmpeg-sys-next = { version = "9.0", default-features = false, features = ["avcodec", "avfilter"] }
 
 [dev-dependencies]
 forge-conference = { path = "../forge-conference" }

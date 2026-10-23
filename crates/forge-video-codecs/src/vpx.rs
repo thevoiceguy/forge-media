@@ -1,4 +1,17 @@
-//! VP8 and VP9 through libvpx.
+//! VP8 and VP9 through libvpx (system library, bindings generated in
+//! `build.rs`).
+
+mod ffi {
+    #![allow(
+        non_upper_case_globals,
+        non_camel_case_types,
+        non_snake_case,
+        dead_code,
+        unused_imports,
+        clippy::all
+    )]
+    include!(concat!(env!("OUT_DIR"), "/vpx.rs"));
+}
 
 use forge_core::VideoCodec;
 use forge_rtp::CodedFrame;
@@ -11,7 +24,6 @@ use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::os::raw::{c_int, c_long, c_uint, c_ulong};
 use std::ptr;
-use vpx_sys as ffi;
 
 fn check(err: ffi::vpx_codec_err_t, what: &str) -> Result<(), CodecError> {
     if err == ffi::vpx_codec_err_t::VPX_CODEC_OK {

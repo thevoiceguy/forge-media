@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dependency must move to 9. Building it needs Rust 1.88 (the binding's
   build script uses `let` chains).
 
+### Fixed
+
+- **forge-video-codecs 0.1.4**: the `vpx` feature did not build where
+  libclang 22 is the newest libclang (#185). `env-libvpx-sys` 5.1.3, the
+  latest, generates with bindgen 0.68, which reads libclang 22's AST wrongly:
+  every libvpx struct came out empty. The crate now binds libvpx in its own
+  `build.rs` (pkg-config `vpx`) with bindgen 0.73, the same selection
+  `env-libvpx-sys` made, and drops the dependency; SVT-AV1 moves to bindgen
+  0.73 too. Built and tested here against libvpx 1.16 with libclang 21 and 22.
+  CI no longer pins `LIBCLANG_PATH`.
+
 ## [2026-10-22] — workspace release
 
 **Crate versions:** **forge-engine 0.7.0**, **forge-mixer 0.5.0**,

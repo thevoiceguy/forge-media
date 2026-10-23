@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-10-23] — workspace release
+
+**Crate versions:** **forge-video-hw 0.3.0**, **forge-video-codecs 0.1.4**.
+Unchanged: bcg729-sys 0.1.0, forge-ai-stream 0.2.0, forge-api 0.4.0,
+forge-bfcp 0.1.1, forge-codecs 0.2.0, forge-conference 0.14.2, forge-core
+0.2.2, forge-dtmf 0.2.1, forge-engine 0.7.0, forge-ha 0.2.0, forge-hep 0.0.1,
+forge-ice 0.3.0, forge-injection 0.2.0, forge-kernel 0.2.0, forge-kernel-ebpf
+0.2.0, forge-mixer 0.5.0, forge-mp4 0.1.1, forge-recorder 0.2.0,
+forge-resampler 0.2.0, forge-rtp 0.7.1, forge-sdp 0.2.2, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0,
+forge-vad 0.2.0, forge-video 0.6.1, forge-webm 0.1.0, forge-webrtc 0.8.0.
+Embeds siphon-rs **v2026.10.22.2** (unchanged; still the latest siphon-rs
+release).
+
+The workspace builds on Ubuntu 26.04 and other FFmpeg 8 / libclang 22
+systems again, and CI is back on `ubuntu-latest`.
+
+**Breaking changes**
+
+- **forge-video-hw 0.3.0** (in name only): `device::SW_FORMAT`,
+  `HwDevice::kind` and `pix_fmt` return `ffmpeg-sys-next` 9's
+  `AVPixelFormat` / `AVHWDeviceType` rather than 7.1's (#181). A consumer
+  that names those types through its own `ffmpeg-sys-next` 7 dependency must
+  move to 9.
+
 ### Changed
 
 - **forge-video-hw 0.3.0**: builds against FFmpeg 8 (#181). `ffmpeg-sys-next`
@@ -31,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `env-libvpx-sys` made, and drops the dependency; SVT-AV1 moves to bindgen
   0.73 too. Built and tested here against libvpx 1.16 with libclang 21 and 22.
   CI no longer pins `LIBCLANG_PATH`.
+
+### Security
+
+- ctutils 0.4.5 (under `digest` 0.11, so HMAC in forge-ice and the SRTP
+  crates): RUSTSEC-2026-0385, non-constant-time mask generation and `u128`
+  comparisons (#187).
 
 ## [2026-10-22] — workspace release
 

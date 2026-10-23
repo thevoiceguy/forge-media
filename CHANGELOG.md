@@ -7,19 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-10-22] — workspace release
+
+**Crate versions:** **forge-engine 0.7.0**, **forge-mixer 0.5.0**,
+**forge-resampler 0.2.0**, **forge-webrtc 0.8.0**, **forge-injection 0.2.0**,
+**forge-rtp 0.7.1**, **forge-conference 0.14.2**, **forge-bfcp 0.1.1**.
+Unchanged: bcg729-sys 0.1.0, forge-ai-stream 0.2.0, forge-api 0.4.0,
+forge-codecs 0.2.0, forge-core 0.2.2, forge-dtmf 0.2.1, forge-ha 0.2.0,
+forge-hep 0.0.1, forge-ice 0.3.0, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0,
+forge-mp4 0.1.1, forge-recorder 0.2.0, forge-sdp 0.2.2, forge-siprec 0.2.1,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0,
+forge-vad 0.2.0, forge-video 0.6.1, forge-video-codecs 0.1.3,
+forge-video-hw 0.2.1, forge-webm 0.1.0. Embeds siphon-rs **v2026.10.22.2**.
+
+This section covers everything since the 2026-09-17 release. The tags
+v2026.09.20, v2026.09.22, v2026.09.24, v2026.09.26, v2026.09.27, v2026.09.28,
+v2026.09.29, v2026.10.07 and v2026.10.19 were cut without converting
+`[Unreleased]` or bumping crate versions (forge-bfcp's 0.1.1 aside), so the
+work they tagged is versioned here.
+
+**Breaking changes**
+
+- **forge-webrtc 0.8.0**: `TransportConfig` gains three public fields,
+  `relay_nomination_wait`, `renomination` and `renomination_window` (#169,
+  #170). It is not `#[non_exhaustive]`, so a struct literal without
+  `..Default::default()` no longer compiles. Behaviour: renomination is on by
+  default, and `IceConnected` is emitted a second time, with the new remote,
+  when a relayed session moves to a direct pair.
+- **forge-injection 0.2.0**: `InjectionError` converts from symphonia 0.6's
+  error type rather than 0.5's (#125). Only code that builds symphonia
+  errors itself and converts them with `?` is affected.
+- **forge-resampler 0.2.0** (behaviour, not signatures): `Resampler` streams
+  with a constant delay, `delay_frames()` long, so output is shifted by that
+  much relative to 0.1; use `resample_all` for a whole buffer with the delay
+  taken out (#173).
+- **forge-engine 0.7.0** (behaviour, not signatures): `start_playback` now
+  sends on the target leg's own stream, in its negotiated codec and SRTP,
+  rather than as PCMU on a stream of its own; `MixMode::Replace` now holds
+  back the relayed audio it always claimed to (#166).
+
+### Added
+
+- **forge-engine 0.7.0**: playback on the leg's own stream (#166):
+  `PlaybackOptions`, `start_playback_with` (`looped` for hold music), and
+  `MediaSession::suppress_relay_to` / `release_relay_to` /
+  `relay_suppressed`, counted in `forge_rtp_relay_suppressed_total`.
+- **forge-engine 0.7.0**: a supervisor on a two-party session — monitor,
+  whisper, barge (#167): `MediaSession::add_party`, `connect_party`,
+  `set_party_mode`, `party_mode`, `party_ports`, `remove_party`;
+  `PARTY_SAMPLE_RATE`; `CallParty` and `SupervisionMode` re-exported.
+- **forge-mixer 0.5.0**: `SupervisionMix`, the three-way mixing core behind
+  the supervisor (#167).
+- **forge-engine 0.7.0**: `SessionManager::port_pool()`, so ports opened
+  outside media sessions come from the same pool; two pools over one range
+  handed out the same port (7c2eead).
+- **forge-webrtc 0.8.0**: ICE renomination (#170) — the controlling agent
+  nominates the first valid pair at once and, while relayed, keeps checking
+  direct pairs and moves the session to one when it succeeds.
+- **forge-resampler 0.2.0**: `resample_all` and `Resampler::delay_frames`
+  (#173).
+
 ### Fixed
 
-- **forge-rtp**: a packet refused by the latch policy logged a WARN every
+- **forge-rtp 0.7.1**: a packet refused by the latch policy logged a WARN every
   time — 50 a second per leg, 44 million lines in one 24-hour soak, and a
   way for anyone spraying the media ports to fill a disk (#175). Each socket
   pair now warns once per refused source, for at most 32 sources (then once
   more to say the rest go to debug); `forge_rtp_latch_rejected_total` still
   counts every refused packet.
-- **forge-engine**: `MediaSession::to_transcoder_codec` maps G.722 when the
+- **forge-engine 0.7.0**: `MediaSession::to_transcoder_codec` maps G.722 when the
   `g722` feature is on (it is by default), so arming a G.722 ↔ G.711 pair
   sets up both transcoders instead of reporting the pair as not transcodable
   while the forwarding loop transcoded it anyway (#174).
-- **forge-conference**: `ConferenceBridge::create_room` checked for the room
+- **forge-conference 0.14.2**: `ConferenceBridge::create_room` checked for the room
   and inserted it in two steps, so two concurrent creates of one id both
   succeeded and the second replaced the first; `get_or_create_room` could
   hand two callers two rooms for one id, orphaning whoever joined the first.
@@ -31,6 +91,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`BadAttributeLength`, the header kept for the reply). Found by the
   nightly `bfcp_parse` fuzzer on 2026-09-27 and 2026-09-28; the input is
   kept as a regression test (`tests/fuzz_regressions.rs`).
+- **forge-injection 0.2.0**: `FileSource::seek` landed on the start of the
+  packet holding the target and played from there; the frames before the
+  target are now discarded, the decoder is reset, and `position()` reports
+  the target (#125).
+- **forge-resampler 0.2.0 / forge-engine 0.7.0**: resampling was linear and
+  playout resampled each 20 ms frame on its own, so 8 kHz prompts played to
+  a G.722 leg stepped at every frame edge (a 50 Hz buzz, 24.5 dB SNR on a
+  1 kHz tone). The resampler is now a Kaiser-windowed sinc that streams
+  across calls, and playout keeps one per playback per leg (#173).
+- **forge-webrtc 0.8.0**: the controlling agent nominated the first pair to
+  succeed, often a relay pair, pinning calls to TURN when a direct path
+  existed; a relay-first nomination is now held up to 2 s
+  (`relay_nomination_wait`) when renomination is off (#169), and both agents
+  keep checking direct pairs while relayed (#170).
+- **forge-rtp 0.7.1**: SRTP's crypto crates sat in the `cfg(unix)`
+  dependency table, so forge-rtp did not build on Windows (#171).
+- **forge-engine 0.7.0**: the recording mixer paired frames by arrival, so on
+  a loaded node two parties who talked over each other were recorded taking
+  turns; it now queues per side and mixes once both have a frame (33558f7).
+- **forge-engine 0.7.0**: RTP was classified to a leg by IP alone, so a leg
+  latching from a named address went deaf when the other leg's peer shared
+  that IP (two peers behind one NAT, or loopback). Exact address first, then
+  the named-address latch, then IP (346e1ed).
+- **forge-engine 0.7.0**: `release_relay_to` no longer uses
+  `AtomicU32::fetch_update`, deprecated in Rust 1.99 (6110dee).
 
 ### Changed
 
@@ -39,14 +124,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (2026-04-02); it was `*99`. That change never reached the release notes. A
   deployment that relied on the default and wants `*99` back must set
   `end_conference` explicitly.
-- The embedded siphon-rs moves to **v2026.09.22**, in both places that name
-  it: the `external/siphon-rs` submodule, which the binaries build against
-  by path, and the `sip-sdp` git tag that `forge-sdp` pins. They had drifted
-  apart from the rest of the world — both sat at v2026.09.05 while FCP's own
-  submodule had moved on five releases — and the submodule rule exists so
-  the SIP path and the media path cannot diverge. No crate version bumps:
-  `sip-sdp` is unchanged between the two tags apart from a test file, so this
-  is an internal dependency migration with no public API change.
+- The embedded siphon-rs moves to **v2026.10.22.2**, in both places that
+  name it: the `external/siphon-rs` submodule (the binaries) and the
+  `sip-sdp` git tag that `forge-sdp` pins. `sip-sdp` is identical between
+  v2026.09.22 and v2026.10.22.2, so forge-sdp is not bumped. (v2026.09.22
+  itself, from v2026.09.05, was embedded on 2026-09-22.)
+- Dependencies: symphonia 0.6 (forge-injection, #125), tokio-tungstenite
+  0.29 (forge-ai-stream, #128), reqwest 0.13 (forge-api, #127), aya-log 0.3
+  (forge-kernel, #126), zeroize 1.9 (#124). Only symphonia's reaches a public
+  API (see Breaking changes).
+
+### Security
+
+- rustls 0.23.45 and 0.23.46: RUSTSEC-2026-0285, -0347, -0348, -0349 and the
+  Debug-secrets advisory.
+- rustls-webpki 0.103.16: RUSTSEC-2026-0382 (#177).
+- quinn-proto 0.11.19 and webpki-root-certs 1.0.10: RUSTSEC-2026-0338,
+  -0340, -0343 and -0383 (#178).
 
 ## [2026-09-17] — workspace release
 

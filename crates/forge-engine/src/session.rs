@@ -4149,6 +4149,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "opus")]
     fn opus_codec_is_built_at_16k_mono() {
         // The engine builds the Opus codec at 16 kHz mono (so libopus does
         // the 48<->16 conversion + stereo->mono); 20 ms => 320 samples.

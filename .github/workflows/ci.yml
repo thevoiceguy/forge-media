@@ -31,16 +31,11 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
-# Runners are pinned to ubuntu-24.04. ubuntu-latest moved to 26.04 in
-# October 2026, whose FFmpeg 8 headers ffmpeg-sys-next 7.x cannot bind
-# (avfft.h is gone); move the pin once forge-video-hw is on a binding
-# that supports FFmpeg 8.
-
 jobs:
 
   test:
     name: Test Suite (stable)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -111,7 +106,7 @@ jobs:
 
   check:
     name: Check, lint and docs
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # One job where there were five: `check`, `clippy`, the three-way
     # `check-features` matrix, `fmt` and `docs`. Each of those paid its own
     # ~2 minutes of apt, codec and toolchain setup and started from its own
@@ -298,7 +293,7 @@ jobs:
 
   security-audit:
     name: Security Audit
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -325,7 +320,7 @@ jobs:
     # that has not happened yet; hearing it up to six days later is no worse,
     # and stable still runs on every pull request.
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -387,7 +382,7 @@ jobs:
     # question the tests had answered. What it does catch -- breakage that only
     # shows under the release profile -- is rare enough for a weekly cadence.
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -442,7 +437,7 @@ jobs:
     # Weekly. Coverage is a trend, not a merge gate, and this was the single
     # most expensive job in the workflow.
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v7

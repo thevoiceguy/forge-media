@@ -3965,6 +3965,16 @@ pub struct LegSockets {
     swapped: Arc<AtomicBool>,
 }
 
+impl std::fmt::Debug for LegSockets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LegSockets")
+            .field("a", &self.ports_for(ParticipantLabel::A))
+            .field("b", &self.ports_for(ParticipantLabel::B))
+            .field("swapped", &self.swapped.load(Ordering::Acquire))
+            .finish()
+    }
+}
+
 impl LegSockets {
     fn new(a: (PortPair, RtpSocketPair), b: (PortPair, RtpSocketPair)) -> Self {
         Self {

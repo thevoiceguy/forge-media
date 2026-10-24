@@ -211,7 +211,15 @@ pub struct SessionState {
     pub state: String, // "Initializing", "Active", "OnHold", "Terminating"
     pub participant_a: ParticipantState,
     pub participant_b: ParticipantState,
+    /// Leg A's ports (the session's only pair before a pair per leg).
     pub ports: PortPair,
+    /// Leg B's ports; absent in state written before a pair per leg, and
+    /// then allocated afresh on recovery.
+    #[serde(default)]
+    pub ports_b: Option<PortPair>,
+    /// Whether the legs' pairs are exchanged (a phone moved between legs).
+    #[serde(default)]
+    pub legs_swapped: bool,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub sdp: Option<String>,

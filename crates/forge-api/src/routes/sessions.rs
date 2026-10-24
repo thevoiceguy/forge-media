@@ -60,8 +60,19 @@ pub struct CreateSessionRequest {
 pub struct SessionResponse {
     pub call_id: String,
     pub state: String,
+    /// Leg A's RTP port (the session's only port before a pair per leg).
     pub rtp_port: u16,
     pub rtcp_port: u16,
+    /// Leg A's ports, named.
+    #[serde(default)]
+    pub rtp_port_a: u16,
+    #[serde(default)]
+    pub rtcp_port_a: u16,
+    /// Leg B's ports: what leg B's peer is told.
+    #[serde(default)]
+    pub rtp_port_b: u16,
+    #[serde(default)]
+    pub rtcp_port_b: u16,
     pub sdp: Option<String>,
     /// Negotiated SDP answer (if sdp_offer was provided in request)
     pub sdp_answer: Option<String>,
@@ -531,6 +542,7 @@ async fn create_session(
     };
 
     let ports = session.ports();
+    let ports_b = session.ports_for(ParticipantLabel::B);
     let session_state = session.state().await;
 
     // Extract SDP answer and negotiated codecs from negotiation result
@@ -563,6 +575,10 @@ async fn create_session(
         state: format!("{:?}", session_state),
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
+        rtp_port_a: ports.rtp_port,
+        rtcp_port_a: ports.rtcp_port,
+        rtp_port_b: ports_b.rtp_port,
+        rtcp_port_b: ports_b.rtcp_port,
         sdp: session.sdp().map(|s| s.to_string()),
         sdp_answer,
         negotiated_codecs,
@@ -600,6 +616,7 @@ async fn get_session(
         .ok_or_else(|| ApiError::SessionNotFound(call_id.0.clone()))?;
 
     let ports = session.ports();
+    let ports_b = session.ports_for(ParticipantLabel::B);
     let session_state = session.state().await;
     let stats_a = session.participant_a_stats().await;
     let stats_b = session.participant_b_stats().await;
@@ -609,6 +626,10 @@ async fn get_session(
         state: format!("{:?}", session_state),
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
+        rtp_port_a: ports.rtp_port,
+        rtcp_port_a: ports.rtcp_port,
+        rtp_port_b: ports_b.rtp_port,
+        rtcp_port_b: ports_b.rtcp_port,
         sdp: session.sdp().map(|s| s.to_string()),
         sdp_answer: None,
         negotiated_codecs: None,
@@ -718,6 +739,7 @@ async fn list_sessions(
 
     for session in sessions {
         let ports = session.ports();
+        let ports_b = session.ports_for(ParticipantLabel::B);
         let session_state = session.state().await;
 
         session_responses.push(SessionResponse {
@@ -725,6 +747,10 @@ async fn list_sessions(
             state: format!("{:?}", session_state),
             rtp_port: ports.rtp_port,
             rtcp_port: ports.rtcp_port,
+            rtp_port_a: ports.rtp_port,
+            rtcp_port_a: ports.rtcp_port,
+            rtp_port_b: ports_b.rtp_port,
+            rtcp_port_b: ports_b.rtcp_port,
             sdp: session.sdp().map(|s| s.to_string()),
             sdp_answer: None,
             negotiated_codecs: None,
@@ -769,6 +795,7 @@ async fn start_session(
         .ok_or_else(|| ApiError::SessionNotFound(call_id.0.clone()))?;
 
     let ports = session.ports();
+    let ports_b = session.ports_for(ParticipantLabel::B);
     let session_state = session.state().await;
 
     let response = SessionResponse {
@@ -776,6 +803,10 @@ async fn start_session(
         state: format!("{:?}", session_state),
         rtp_port: ports.rtp_port,
         rtcp_port: ports.rtcp_port,
+        rtp_port_a: ports.rtp_port,
+        rtcp_port_a: ports.rtcp_port,
+        rtp_port_b: ports_b.rtp_port,
+        rtcp_port_b: ports_b.rtcp_port,
         sdp: session.sdp().map(|s| s.to_string()),
         sdp_answer: None,        // Will be populated in Sprint 2.2
         negotiated_codecs: None, // Will be populated in Sprint 2.2

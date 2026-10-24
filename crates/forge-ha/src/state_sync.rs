@@ -356,6 +356,8 @@ mod tests {
                 rtp_port: 30000,
                 rtcp_port: 30001,
             },
+            ports_b: None,
+            legs_swapped: false,
             created_at: Utc::now(),
             last_activity: Utc::now(),
             sdp: Some("v=0...".to_string()),

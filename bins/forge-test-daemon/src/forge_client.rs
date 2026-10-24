@@ -29,8 +29,14 @@ pub struct CreateSessionRequest {
 pub struct SessionResponse {
     pub call_id: String,
     pub state: String,
+    /// Leg A's ports.
     pub rtp_port: u16,
     pub rtcp_port: u16,
+    /// Leg B's ports (absent from a forge-api older than a pair per leg).
+    #[serde(default)]
+    pub rtp_port_b: u16,
+    #[serde(default)]
+    pub rtcp_port_b: u16,
 }
 
 /// API success wrapper

@@ -874,10 +874,8 @@ pub struct MediaSession {
     participant_a: Arc<RwLock<Participant>>,
     /// Participant B
     participant_b: Arc<RwLock<Participant>>,
-    /// RTP/RTCP socket pair
-    sockets: Arc<RtpSocketPair>,
-    /// Port pair allocation
-    ports: PortPair,
+    /// An RTP/RTCP socket pair per leg
+    legs: LegSockets,
     /// Port pool reference for cleanup
     port_pool: Arc<PortPool>,
     /// Track if ports have been deallocated
@@ -922,6 +920,11 @@ pub struct MediaSession {
     transcoder_a_to_b: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
     /// Transcoder for B → A direction (optional, created when needed)
     transcoder_b_to_a: Arc<Mutex<Option<forge_transcoder::RtpTranscoder>>>,
+    /// RTP timestamps of the A → B transcoded stream, from A's codec clock
+    /// to B's.
+    ts_map_a_to_b: std::sync::Mutex<TimestampMap>,
+    /// RTP timestamps of the B → A transcoded stream.
+    ts_map_b_to_a: std::sync::Mutex<TimestampMap>,
     /// Playbacks replacing what the other leg says, per leg: while one
     /// is above zero the forwarding engine relays nothing toward that leg
     /// (hold music is heard alone). Counted, so overlapping playbacks
@@ -1011,21 +1014,21 @@ impl MediaSession {
         from_tag: Option<String>,
         to_tag: Option<String>,
     ) -> Result<Self> {
-        // Allocate ports and bind them, retrying past any port the host
-        // has handed to a socket outside this pool (#111).
-        let (ports, sockets, mut port_guard) = allocate_and_bind(
+        // Allocate a port pair per leg and bind them, retrying past any
+        // port the host has handed to a socket outside this pool (#111).
+        let legs = allocate_leg_sockets(
             port_pool,
             config.socket_config.clone(),
             config.min_free_port_pairs,
         )
         .await?;
+        let [a_ports, b_ports] = legs.all_ports();
         tracing::info!(
-            "Allocated ports for session {}: RTP={}, RTCP={}",
+            "Allocated ports for session {}: A RTP={}, B RTP={}",
             call_id.0,
-            ports.rtp_port,
-            ports.rtcp_port
+            a_ports.rtp_port,
+            b_ports.rtp_port
         );
-        port_guard.disarm();
 
         let default_codec_config = ParticipantCodecConfig::default();
 
@@ -1060,8 +1063,7 @@ impl MediaSession {
             state: Arc::new(RwLock::new(SessionState::Initializing)),
             participant_a: Arc::new(RwLock::new(participant_a)),
             participant_b: Arc::new(RwLock::new(participant_b)),
-            sockets: Arc::new(sockets),
-            ports,
+            legs,
             port_pool: Arc::clone(port_pool),
             ports_deallocated: Arc::new(AtomicBool::new(false)),
             created_at: now,
@@ -1080,6 +1082,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            ts_map_a_to_b: std::sync::Mutex::new(TimestampMap::default()),
+            ts_map_b_to_a: std::sync::Mutex::new(TimestampMap::default()),
             relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
             relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -1183,21 +1187,21 @@ impl MediaSession {
             pt_map.opus
         );
 
-        // Allocate ports and bind them, retrying past any port the host
-        // has handed to a socket outside this pool (#111).
-        let (ports, sockets, mut port_guard) = allocate_and_bind(
+        // Allocate a port pair per leg and bind them, retrying past any
+        // port the host has handed to a socket outside this pool (#111).
+        let legs = allocate_leg_sockets(
             port_pool,
             config.socket_config.clone(),
             config.min_free_port_pairs,
         )
         .await?;
+        let [a_ports, b_ports] = legs.all_ports();
         tracing::info!(
-            "Allocated ports for session {}: RTP={}, RTCP={}",
+            "Allocated ports for session {}: A RTP={}, B RTP={}",
             call_id.0,
-            ports.rtp_port,
-            ports.rtcp_port
+            a_ports.rtp_port,
+            b_ports.rtp_port
         );
-        port_guard.disarm();
 
         let participant_a = Participant {
             id: participant_a_id,
@@ -1230,8 +1234,7 @@ impl MediaSession {
             state: Arc::new(RwLock::new(SessionState::Initializing)),
             participant_a: Arc::new(RwLock::new(participant_a)),
             participant_b: Arc::new(RwLock::new(participant_b)),
-            sockets: Arc::new(sockets),
-            ports,
+            legs,
             port_pool: Arc::clone(port_pool),
             ports_deallocated: Arc::new(AtomicBool::new(false)),
             created_at: now,
@@ -1250,6 +1253,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            ts_map_a_to_b: std::sync::Mutex::new(TimestampMap::default()),
+            ts_map_b_to_a: std::sync::Mutex::new(TimestampMap::default()),
             relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
             relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -1395,21 +1400,21 @@ impl MediaSession {
         from_tag: Option<String>,
         to_tag: Option<String>,
     ) -> Result<Self> {
-        // Allocate ports and bind them, retrying past any port the host
-        // has handed to a socket outside this pool (#111).
-        let (ports, sockets, mut port_guard) = allocate_and_bind(
+        // Allocate a port pair per leg and bind them, retrying past any
+        // port the host has handed to a socket outside this pool (#111).
+        let legs = allocate_leg_sockets(
             port_pool,
             config.socket_config.clone(),
             config.min_free_port_pairs,
         )
         .await?;
+        let [a_ports, b_ports] = legs.all_ports();
         tracing::info!(
-            "Allocated ports for session {}: RTP={}, RTCP={}",
+            "Allocated ports for session {}: A RTP={}, B RTP={}",
             call_id.0,
-            ports.rtp_port,
-            ports.rtcp_port
+            a_ports.rtp_port,
+            b_ports.rtp_port
         );
-        port_guard.disarm();
 
         let default_codec_config = ParticipantCodecConfig::default();
 
@@ -1444,8 +1449,7 @@ impl MediaSession {
             state: Arc::new(RwLock::new(SessionState::Initializing)),
             participant_a: Arc::new(RwLock::new(participant_a)),
             participant_b: Arc::new(RwLock::new(participant_b)),
-            sockets: Arc::new(sockets),
-            ports,
+            legs,
             port_pool: Arc::clone(port_pool),
             ports_deallocated: Arc::new(AtomicBool::new(false)),
             created_at: now,
@@ -1464,6 +1468,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            ts_map_a_to_b: std::sync::Mutex::new(TimestampMap::default()),
+            ts_map_b_to_a: std::sync::Mutex::new(TimestampMap::default()),
             relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
             relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -1548,9 +1554,38 @@ impl MediaSession {
         *self.state.read().await
     }
 
-    /// Get the allocated port pair
+    /// Leg A's port pair: what a caller that reads one port has always
+    /// meant. [`Self::ports_for`] names the leg.
     pub fn ports(&self) -> PortPair {
-        self.ports
+        self.legs.ports_for(ParticipantLabel::A)
+    }
+
+    /// The port pair `leg`'s peer is told.
+    pub fn ports_for(&self, leg: ParticipantLabel) -> PortPair {
+        self.legs.ports_for(leg)
+    }
+
+    /// `ts`, from `sender`'s transcoded stream, on the receiver's clock.
+    pub(crate) fn map_transcoded_timestamp(
+        &self,
+        sender: ParticipantLabel,
+        ts: u32,
+        from_clock: u32,
+        to_clock: u32,
+    ) -> u32 {
+        let map = match sender {
+            ParticipantLabel::A => &self.ts_map_a_to_b,
+            ParticipantLabel::B => &self.ts_map_b_to_a,
+        };
+        map.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .map(ts, from_clock, to_clock)
+    }
+
+    /// Exchange the legs' sockets, for a phone moved from one leg to the
+    /// other: it keeps sending to, and hearing from, the port it was told.
+    pub fn swap_leg_sockets(&self) {
+        self.legs.swap();
     }
 
     /// Get participant A statistics
@@ -1952,14 +1987,16 @@ impl MediaSession {
 
         let (a_ip, a_port) = addr_to_network_bytes(a_addr);
         let (b_ip, b_port) = addr_to_network_bytes(b_addr);
-        let rtp_port_be = self.ports.rtp_port.to_be();
+        // A sends to A's port and hears from it; B likewise on B's.
+        let a_rtp_port_be = self.legs.ports_for(ParticipantLabel::A).rtp_port.to_be();
+        let b_rtp_port_be = self.legs.ports_for(ParticipantLabel::B).rtp_port.to_be();
 
         // Insert bidirectional forwarding rules
         // Rule 1: A -> B (packets from A forwarded to B)
         let key_a_to_b = ForwardKey {
             src_ip: a_ip,
             src_port: a_port,
-            dst_port: rtp_port_be,
+            dst_port: a_rtp_port_be,
             dst_ip: 0,    // Will be filled by XDP program (our local IP)
             protocol: 17, // UDP
             _padding: [0; 3],
@@ -1969,7 +2006,7 @@ impl MediaSession {
             dest_ip: b_ip,
             dest_port: b_port,
             src_ip: 0, // Our IP for reply
-            src_port: rtp_port_be,
+            src_port: b_rtp_port_be,
             last_seen: 0,
         };
 
@@ -1982,7 +2019,7 @@ impl MediaSession {
         let key_b_to_a = ForwardKey {
             src_ip: b_ip,
             src_port: b_port,
-            dst_port: rtp_port_be,
+            dst_port: b_rtp_port_be,
             dst_ip: 0,
             protocol: 17,
             _padding: [0; 3],
@@ -1992,7 +2029,7 @@ impl MediaSession {
             dest_ip: a_ip,
             dest_port: a_port,
             src_ip: 0,
-            src_port: rtp_port_be,
+            src_port: a_rtp_port_be,
             last_seen: 0,
         };
 
@@ -2050,13 +2087,14 @@ impl MediaSession {
 
         let (a_ip, a_port) = addr_to_network_bytes(a_addr);
         let (b_ip, b_port) = addr_to_network_bytes(b_addr);
-        let rtp_port_be = self.ports.rtp_port.to_be();
+        let a_rtp_port_be = self.legs.ports_for(ParticipantLabel::A).rtp_port.to_be();
+        let b_rtp_port_be = self.legs.ports_for(ParticipantLabel::B).rtp_port.to_be();
 
         // Remove bidirectional forwarding rules
         let key_a_to_b = ForwardKey {
             src_ip: a_ip,
             src_port: a_port,
-            dst_port: rtp_port_be,
+            dst_port: a_rtp_port_be,
             dst_ip: 0,
             protocol: 17,
             _padding: [0; 3],
@@ -2065,7 +2103,7 @@ impl MediaSession {
         let key_b_to_a = ForwardKey {
             src_ip: b_ip,
             src_port: b_port,
-            dst_port: rtp_port_be,
+            dst_port: b_rtp_port_be,
             dst_ip: 0,
             protocol: 17,
             _padding: [0; 3],
@@ -2173,13 +2211,15 @@ impl MediaSession {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            tracing::debug!(
-                "Deallocating ports for session {}: RTP={}, RTCP={}",
-                self.call_id.0,
-                self.ports.rtp_port,
-                self.ports.rtcp_port
-            );
-            self.port_pool.deallocate(self.ports).await;
+            for ports in self.legs.all_ports() {
+                tracing::debug!(
+                    "Deallocating ports for session {}: RTP={}, RTCP={}",
+                    self.call_id.0,
+                    ports.rtp_port,
+                    ports.rtcp_port
+                );
+                self.port_pool.deallocate(ports).await;
+            }
         }
     }
 
@@ -2189,9 +2229,14 @@ impl MediaSession {
         *self.last_activity.write().await = Instant::now();
     }
 
-    /// Get the socket pair (for forwarding implementation)
+    /// Leg A's socket pair.
     pub fn sockets(&self) -> &Arc<RtpSocketPair> {
-        &self.sockets
+        self.legs.for_leg(ParticipantLabel::A)
+    }
+
+    /// Both legs' socket pairs (for the forwarding implementation).
+    pub fn leg_sockets(&self) -> &LegSockets {
+        &self.legs
     }
 
     /// Get mutable reference to participant A
@@ -3176,11 +3221,18 @@ impl MediaSession {
             },
         };
 
-        // Convert ports
+        // Convert ports: the two pairs in slot order, and whether the legs
+        // are exchanged on them.
+        let [slot_0, slot_1] = self.legs.all_ports();
         let ports = forge_ha::types::PortPair {
-            rtp_port: self.ports.rtp_port,
-            rtcp_port: self.ports.rtcp_port,
+            rtp_port: slot_0.rtp_port,
+            rtcp_port: slot_0.rtcp_port,
         };
+        let ports_b = Some(forge_ha::types::PortPair {
+            rtp_port: slot_1.rtp_port,
+            rtcp_port: slot_1.rtcp_port,
+        });
+        let legs_swapped = self.legs.slot_of(ParticipantLabel::A) == 1;
 
         // Convert times (Instant can't be serialized, use Utc::now() as approximation)
         let created_at =
@@ -3225,6 +3277,8 @@ impl MediaSession {
             participant_a: participant_a_state,
             participant_b: participant_b_state,
             ports,
+            ports_b,
+            legs_swapped,
             created_at,
             last_activity: last_activity_time,
             sdp: self.sdp.clone(),
@@ -3259,8 +3313,33 @@ impl MediaSession {
             rtcp_port: state.ports.rtcp_port,
         };
 
-        // Create socket pair with recovered ports
+        // Rebind the recovered pairs. State written before a pair per leg
+        // has only one: leg B gets a fresh pair.
         let sockets = RtpSocketPair::new(ports, config.socket_config.clone()).await?;
+        let (b_ports, b_sockets) = match state.ports_b {
+            Some(b) => {
+                let b_ports = forge_rtp::PortPair {
+                    rtp_port: b.rtp_port,
+                    rtcp_port: b.rtcp_port,
+                };
+                let b_sockets = RtpSocketPair::new(b_ports, config.socket_config.clone()).await?;
+                (b_ports, b_sockets)
+            }
+            None => {
+                let (b_ports, b_sockets, mut guard) = allocate_and_bind(
+                    port_pool,
+                    config.socket_config.clone(),
+                    config.min_free_port_pairs,
+                )
+                .await?;
+                guard.disarm();
+                (b_ports, b_sockets)
+            }
+        };
+        let legs = LegSockets::new((ports, sockets), (b_ports, b_sockets));
+        if state.legs_swapped {
+            legs.swap();
+        }
 
         // Parse participant IDs (stored as UUID strings in state)
         let participant_a_id = ParticipantId(state.participant_a.id.clone());
@@ -3346,8 +3425,7 @@ impl MediaSession {
             state: Arc::new(RwLock::new(session_state)),
             participant_a: Arc::new(RwLock::new(participant_a)),
             participant_b: Arc::new(RwLock::new(participant_b)),
-            sockets: Arc::new(sockets),
-            ports,
+            legs,
             port_pool: Arc::clone(port_pool),
             ports_deallocated: Arc::new(AtomicBool::new(false)),
             created_at: now, // Use current time as approximation
@@ -3366,6 +3444,8 @@ impl MediaSession {
             speech_started_at: Arc::new(Mutex::new(None)),
             transcoder_a_to_b: Arc::new(Mutex::new(None)),
             transcoder_b_to_a: Arc::new(Mutex::new(None)),
+            ts_map_a_to_b: std::sync::Mutex::new(TimestampMap::default()),
+            ts_map_b_to_a: std::sync::Mutex::new(TimestampMap::default()),
             relay_suppressed_a: std::sync::atomic::AtomicU32::new(0),
             relay_suppressed_b: std::sync::atomic::AtomicU32::new(0),
             srtp_a: Arc::new(Mutex::new(SrtpContext::new())),
@@ -3446,7 +3526,7 @@ impl Drop for MediaSession {
 
             // Spawn a detached task to deallocate ports asynchronously
             let port_pool = Arc::clone(&self.port_pool);
-            let ports = self.ports;
+            let all_ports = self.legs.all_ports();
             let ports_deallocated = Arc::clone(&self.ports_deallocated);
             let call_id = self.call_id.0.clone();
 
@@ -3456,13 +3536,15 @@ impl Drop for MediaSession {
                     .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    tracing::debug!(
-                        "Drop cleanup: Deallocating ports for session {}: RTP={}, RTCP={}",
-                        call_id,
-                        ports.rtp_port,
-                        ports.rtcp_port
-                    );
-                    port_pool.deallocate(ports).await;
+                    for ports in all_ports {
+                        tracing::debug!(
+                            "Drop cleanup: Deallocating ports for session {}: RTP={}, RTCP={}",
+                            call_id,
+                            ports.rtp_port,
+                            ports.rtcp_port
+                        );
+                        port_pool.deallocate(ports).await;
+                    }
                 }
             });
         }
@@ -3819,6 +3901,151 @@ pub(crate) async fn allocate_and_bind(
     }
 }
 
+/// A transcoded stream's RTP timestamps moved from the sender's codec
+/// clock to the receiver's (8 kHz G.711 to 48 kHz Opus is six times the
+/// ticks for the same 20 ms). Timestamps keep their spacing — gaps,
+/// reordering — scaled exactly: the source's ticks since the first packet
+/// are summed and scaled as a whole, so an uneven ratio does not drift.
+#[derive(Debug, Default)]
+pub(crate) struct TimestampMap {
+    /// The first packet's timestamp on both clocks, the last source
+    /// timestamp, and the source ticks since the first.
+    state: Option<TimestampMapState>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TimestampMapState {
+    base_out: u32,
+    last_in: u32,
+    ticks_in: i64,
+    from_clock: u32,
+    to_clock: u32,
+}
+
+impl TimestampMap {
+    pub(crate) fn map(&mut self, ts: u32, from_clock: u32, to_clock: u32) -> u32 {
+        if from_clock == 0 || to_clock == 0 {
+            return ts;
+        }
+        let state = match self.state {
+            // A change of clocks (a re-negotiation) starts afresh from
+            // where the source is.
+            Some(state) if state.from_clock == from_clock && state.to_clock == to_clock => {
+                let mut state = state;
+                state.ticks_in += i64::from(ts.wrapping_sub(state.last_in) as i32);
+                state.last_in = ts;
+                state
+            }
+            _ => TimestampMapState {
+                base_out: ts,
+                last_in: ts,
+                ticks_in: 0,
+                from_clock,
+                to_clock,
+            },
+        };
+        self.state = Some(state);
+        let ticks_out = state.ticks_in * i64::from(to_clock) / i64::from(from_clock);
+        state.base_out.wrapping_add(ticks_out as u32)
+    }
+}
+
+/// A session's sockets: a pair per leg, so a packet's leg is the socket it
+/// arrived on and each leg hears from the port it was told. Two phones
+/// behind one public address are then two sockets, not two sources to
+/// tell apart.
+///
+/// The two pairs are fixed for the session's life; which leg each serves
+/// is not. [`LegSockets::swap`] exchanges them, so a phone moved from one
+/// leg to the other (park, takeover) keeps the port it sends to.
+#[derive(Clone)]
+pub struct LegSockets {
+    slots: [Arc<RtpSocketPair>; 2],
+    ports: [PortPair; 2],
+    swapped: Arc<AtomicBool>,
+}
+
+impl LegSockets {
+    fn new(a: (PortPair, RtpSocketPair), b: (PortPair, RtpSocketPair)) -> Self {
+        Self {
+            slots: [Arc::new(a.1), Arc::new(b.1)],
+            ports: [a.0, b.0],
+            swapped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn slot_of(&self, leg: ParticipantLabel) -> usize {
+        let own = match leg {
+            ParticipantLabel::A => 0,
+            ParticipantLabel::B => 1,
+        };
+        if self.swapped.load(Ordering::Acquire) {
+            1 - own
+        } else {
+            own
+        }
+    }
+
+    /// The socket pair serving `leg`.
+    pub fn for_leg(&self, leg: ParticipantLabel) -> &Arc<RtpSocketPair> {
+        &self.slots[self.slot_of(leg)]
+    }
+
+    /// The ports `leg`'s peer is told.
+    pub fn ports_for(&self, leg: ParticipantLabel) -> PortPair {
+        self.ports[self.slot_of(leg)]
+    }
+
+    /// One of the two fixed socket pairs (0 or 1), whatever leg it serves.
+    pub fn slot(&self, slot: usize) -> &Arc<RtpSocketPair> {
+        &self.slots[slot]
+    }
+
+    /// The leg the fixed socket pair `slot` serves now.
+    pub fn leg_of_slot(&self, slot: usize) -> ParticipantLabel {
+        if self.slot_of(ParticipantLabel::A) == slot {
+            ParticipantLabel::A
+        } else {
+            ParticipantLabel::B
+        }
+    }
+
+    /// Exchange the legs' sockets.
+    pub fn swap(&self) {
+        self.swapped.fetch_xor(true, Ordering::AcqRel);
+    }
+
+    /// Both pairs, in slot order.
+    pub fn all_ports(&self) -> [PortPair; 2] {
+        self.ports
+    }
+}
+
+/// Allocate and bind a socket pair for each leg: both or neither. The
+/// first allocation keeps one pair more than `min_free_pairs` free, so the
+/// second is not the one refused.
+pub(crate) async fn allocate_leg_sockets(
+    port_pool: &Arc<PortPool>,
+    socket_config: RtpSocketConfig,
+    min_free_pairs: usize,
+) -> Result<LegSockets> {
+    let (a_ports, a_sockets, mut a_guard) =
+        allocate_and_bind(port_pool, socket_config.clone(), min_free_pairs + 1).await?;
+    let (b_ports, b_sockets, mut b_guard) =
+        match allocate_and_bind(port_pool, socket_config, min_free_pairs).await {
+            Ok(bound) => bound,
+            Err(e) => {
+                a_guard.disarm();
+                drop(a_sockets);
+                port_pool.deallocate(a_ports).await;
+                return Err(e);
+            }
+        };
+    a_guard.disarm();
+    b_guard.disarm();
+    Ok(LegSockets::new((a_ports, a_sockets), (b_ports, b_sockets)))
+}
+
 /// Hand a batch of pairs back to the pool, awaited, so the caller can rely
 /// on the pool's counts immediately afterwards.
 async fn release_all(port_pool: &Arc<PortPool>, pairs: Vec<PortPair>) {
@@ -3870,6 +4097,56 @@ mod tests {
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
+    }
+
+    /// G.711's 160 ticks per 20 ms are Opus's 960, from where the source
+    /// started; and back.
+    #[test]
+    fn a_transcoded_timestamp_moves_to_the_receivers_clock() {
+        let mut up = TimestampMap::default();
+        assert_eq!(up.map(1_000, 8_000, 48_000), 1_000);
+        assert_eq!(up.map(1_160, 8_000, 48_000), 1_960);
+        assert_eq!(up.map(1_320, 8_000, 48_000), 2_920);
+        let mut down = TimestampMap::default();
+        assert_eq!(down.map(50_000, 48_000, 8_000), 50_000);
+        assert_eq!(down.map(50_960, 48_000, 8_000), 50_160);
+    }
+
+    /// A late packet keeps its place, a wrap of the source's timestamp is
+    /// a step like any other, and an uneven ratio does not drift.
+    #[test]
+    fn a_transcoded_timestamp_keeps_its_spacing() {
+        let mut map = TimestampMap::default();
+        map.map(u32::MAX - 79, 8_000, 48_000);
+        assert_eq!(
+            map.map(80, 8_000, 48_000),
+            (u32::MAX - 79).wrapping_add(960)
+        );
+        assert_eq!(
+            map.map((u32::MAX - 79).wrapping_add(80), 8_000, 48_000),
+            (u32::MAX - 79).wrapping_add(480)
+        );
+
+        let mut uneven = TimestampMap::default();
+        uneven.map(0, 44_100, 48_000);
+        let mut ts = 0u32;
+        let mut out = 0;
+        for _ in 0..44_100 {
+            ts += 1;
+            out = uneven.map(ts, 44_100, 48_000);
+        }
+        assert_eq!(out, 48_000, "one second is one second");
+    }
+
+    /// Unchanged where the clocks agree, and after a re-negotiation it
+    /// starts afresh from where the source is.
+    #[test]
+    fn a_transcoded_timestamp_follows_a_change_of_clocks() {
+        let mut map = TimestampMap::default();
+        assert_eq!(map.map(500, 8_000, 8_000), 500);
+        assert_eq!(map.map(660, 8_000, 8_000), 660);
+        assert_eq!(map.map(820, 8_000, 48_000), 820);
+        assert_eq!(map.map(980, 8_000, 48_000), 1_780);
     }
 
     /// One frame from each side makes one frame of the recording, with

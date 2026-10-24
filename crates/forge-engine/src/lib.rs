@@ -43,7 +43,7 @@ pub use persistence::{
     PersistenceConfig,
 };
 pub use session::{
-    LegDigit, MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig,
+    LegDigit, LegSockets, MediaSession, MediaSessionConfig, Participant, ParticipantCodecConfig,
     ParticipantLabel, ParticipantMediaState, ParticipantMediaUpdate, ParticipantStats,
     SessionState,
 };

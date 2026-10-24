@@ -382,7 +382,8 @@ async fn handle_invite(state: Arc<AppState>, req: Request, from: SocketAddr) -> 
     );
 
     // Create modified INVITE with Forge RTP in SDP to send to callee
-    let sdp = create_sdp_answer(&state.local_ip, forge_session.rtp_port)?;
+    // The callee is leg B, told leg B's port.
+    let sdp = create_sdp_answer(&state.local_ip, forge_session.rtp_port_b)?;
     let mut callee_invite = req.clone();
     let new_body: Bytes = sdp.into_bytes().into();
     let body_len = new_body.len();
@@ -397,7 +398,7 @@ async fn handle_invite(state: Arc<AppState>, req: Request, from: SocketAddr) -> 
     // Forward INVITE to callee
     info!(
         "→ Forwarding INVITE to {} (RTP port {})",
-        callee, forge_session.rtp_port
+        callee, forge_session.rtp_port_b
     );
     let invite_bytes = serialize_request(&callee_invite);
     state
@@ -437,8 +438,11 @@ async fn handle_ack(state: Arc<AppState>, req: Request) -> Result<()> {
     } else {
         info!("✓ RTP forwarding ACTIVE");
         info!(
-            "  Both {} and {} sending RTP to port {}",
-            call_state.caller, call_state.callee, call_state.forge_session.rtp_port
+            "  {} sending RTP to port {}, {} to port {}",
+            call_state.caller,
+            call_state.forge_session.rtp_port,
+            call_state.callee,
+            call_state.forge_session.rtp_port_b
         );
 
         // Mark call as Active

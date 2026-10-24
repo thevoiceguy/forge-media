@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-10-24] — workspace release
+
+**Crate versions:** **forge-engine 0.8.0**, **forge-ha 0.3.0**, **forge-api
+0.5.0**. Unchanged: bcg729-sys 0.1.0, forge-ai-stream 0.2.0, forge-bfcp
+0.1.1, forge-codecs 0.2.0, forge-conference 0.14.2, forge-core 0.2.2,
+forge-dtmf 0.2.1, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.2.0,
+forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.5.0, forge-mp4
+0.1.1, forge-recorder 0.2.0, forge-resampler 0.2.0, forge-rtp 0.7.1,
+forge-sdp 0.2.2, forge-siprec 0.2.1, forge-storage 0.2.0, forge-transcoder
+0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0, forge-video 0.6.1,
+forge-video-codecs 0.1.4, forge-video-hw 0.3.0, forge-webm 0.1.0,
+forge-webrtc 0.8.0. Embeds siphon-rs **v2026.10.22.2** (unchanged).
+
+A media session has a socket pair per leg. Two phones behind one public
+address — every office, most homes — got one-way or no audio: the session
+had one port for both legs and told a packet's leg by its source.
+
+**Breaking changes**
+
+- **forge-engine 0.8.0**: each leg's peer must be told that leg's port
+  (`MediaSession::ports_for`). `ports()` is leg A's; a B leg still pointed
+  at it is refused as a stranger on A's port. A session takes two pairs
+  from the pool.
+- **forge-ha 0.3.0**: `SessionState` gains `ports_b` and `legs_swapped`
+  (defaulted when reading older state; leg B then gets a fresh pair).
+- **forge-api 0.5.0**: `SessionResponse` gains `rtp_port_a`, `rtcp_port_a`,
+  `rtp_port_b`, `rtcp_port_b`; `rtp_port`/`rtcp_port` stay leg A's.
+
+### Changed
+
+- **forge-engine**: a packet's leg is the socket it arrived on; its source
+  decides only whether the leg takes it (its peer, the peer's IP on another
+  port, or a latch that may learn). Media to a leg leaves from that leg's
+  socket. `swap_leg_sockets()` moves each port with its phone when a phone
+  changes legs (park).
+
+### Fixed
+
+- **forge-engine**: a B leg's first SRTP packet, before its address was
+  known, was decrypted with leg A's keys and dropped, so the leg never
+  learned its address; SRTCP and DTLS guessed the same way, and RTCP's leg
+  was guessed from port + 1.
+- **forge-engine**: RTCP report blocks are read on the reporting leg's
+  clock and generated stream, not always leg A's.
+- **forge-engine**: a transcoded packet's RTP timestamp moves to the
+  receiver's codec clock; it kept the sender's (160 ticks per 20 ms of
+  G.711 reached an Opus peer, whose clock wants 960).
+- **forge-engine**: XDP fast-path rules are keyed on each leg's port.
+- **forge-sip-server**: the callee is told leg B's port.
+
 ## [2026-10-23] — workspace release
 
 **Crate versions:** **forge-video-hw 0.3.0**, **forge-video-codecs 0.1.4**.

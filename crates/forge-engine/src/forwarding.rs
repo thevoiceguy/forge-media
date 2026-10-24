@@ -1,7 +1,9 @@
 //! RTP packet forwarding engine
 
 use crate::media_bridge::{InboundMediaFrame, OutboundMediaRequest};
-use crate::session::{MediaSession, Participant, ParticipantLabel, RecordingSide, SessionState};
+use crate::session::{
+    LegSockets, MediaSession, Participant, ParticipantLabel, RecordingSide, SessionState,
+};
 use forge_core::{ForgeError, ForgeEvent, Result};
 use forge_rtp::rtcp::RtcpPacket;
 use metrics::{counter, histogram};
@@ -64,7 +66,12 @@ impl ForwardingEngine {
     #[tracing::instrument(skip(session), fields(call_id = %session.call_id().0))]
     async fn forwarding_loop(session: Arc<MediaSession>) {
         let call_id = session.call_id();
-        let sockets = session.sockets().clone();
+        // A socket pair per leg: a packet's leg is the socket it arrived
+        // on. The two pairs are fixed; which leg each serves is read per
+        // packet, so a swap (`MediaSession::swap_leg_sockets`) takes effect
+        // at once.
+        let sockets = session.leg_sockets().clone();
+        let (slot_0, slot_1) = (sockets.slot(0).clone(), sockets.slot(1).clone());
         let participant_a = session.participant_a().clone();
         let participant_b = session.participant_b().clone();
 
@@ -100,156 +107,53 @@ impl ForwardingEngine {
                 break;
             }
 
-            // Wait for either RTP or RTCP packet
+            // Wait for an RTP or RTCP packet on either leg's sockets
             tokio::select! {
-                // Handle RTP packets (raw receive for SRTP support)
-                result = sockets.recv_rtp_raw() => {
-                    match result {
-                        Ok((raw_data, source_addr)) => {
-                            // RFC 5764 §5.1.2 demux: peek the first byte
-                            // to route DTLS handshake bytes away from the
-                            // SRTP/RTP path. DTLS packets would otherwise
-                            // crash `unprotect_rtp` with a parse error.
-                            #[cfg(feature = "dtls")]
-                            if let Some(first) = raw_data.first().copied() {
-                                if crate::dtls_srtp::is_dtls_packet(first) {
-                                    Self::handle_dtls_packet(
-                                        &session,
-                                        &sockets,
-                                        &participant_a,
-                                        &participant_b,
-                                        &raw_data,
-                                        source_addr,
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                                if crate::dtls_srtp::is_unsupported_first_byte(first) {
-                                    counter!("forge_rtp_unsupported_first_byte_total").increment(1);
-                                    continue;
-                                }
-                            }
-
-                            // Determine which leg sent this packet for SRTP unprotect
-                            let srtp_ctx = {
-                                let a = participant_a.read().await;
-                                let b = participant_b.read().await;
-                                if a.remote_addr == Some(source_addr) {
-                                    session.srtp_a().clone()
-                                } else if b.remote_addr == Some(source_addr) {
-                                    session.srtp_b().clone()
-                                } else {
-                                    // Unknown source — use srtp_a by default for first-packet learning
-                                    session.srtp_a().clone()
-                                }
-                            };
-
-                            // SRTP unprotect (passthrough if no keys set)
-                            let plain_data = {
-                                let mut ctx = srtp_ctx.lock().await;
-                                match ctx.unprotect_rtp(&raw_data) {
-                                    Ok(data) => data,
-                                    Err(e) => {
-                                        tracing::warn!("SRTP unprotect failed for session {}: {}", call_id.0, e);
-                                        counter!("forge_srtp_unprotect_errors_total").increment(1);
-                                        continue;
-                                    }
-                                }
-                            };
-
-                            // Parse plain RTP
-                            match forge_rtp::RtpPacket::parse(bytes::Bytes::from(plain_data)) {
-                                Ok(packet) => {
-                                    Self::handle_rtp_packet(
-                                        &session,
-                                        &sockets,
-                                        &participant_a,
-                                        &participant_b,
-                                        packet,
-                                        source_addr,
-                                    )
-                                    .await;
-                                }
-                                Err(e) => {
-                                    tracing::error!("RTP parse after SRTP unprotect failed for session {}: {}", call_id.0, e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Error receiving RTP packet for session {}: {}", call_id.0, e);
-                        }
-                    }
+                // RTP (raw receive for SRTP support)
+                result = slot_0.recv_rtp_raw() => {
+                    Self::on_rtp_datagram(
+                        &session,
+                        &sockets,
+                        &participant_a,
+                        &participant_b,
+                        result,
+                        Side::from_label(sockets.leg_of_slot(0)),
+                    )
+                    .await;
                 }
-                // Handle RTCP packets (with SRTP unprotect)
-                result = sockets.recv_rtcp() => {
-                    match result {
-                        Ok((raw_data, source_addr)) => {
-                            // Determine which leg sent this RTCP
-                            let rtcp_srtp_ctx = {
-                                let a = participant_a.read().await;
-                                if let Some(rtp_addr) = a.remote_addr {
-                                    if rtp_addr.ip() == source_addr.ip()
-                                        && (rtp_addr.port() + 1 == source_addr.port()
-                                            || rtp_addr.port() == source_addr.port())
-                                    {
-                                        session.srtp_a().clone()
-                                    } else {
-                                        session.srtp_b().clone()
-                                    }
-                                } else {
-                                    session.srtp_a().clone()
-                                }
-                            };
-
-                            // SRTCP unprotect (passthrough if no keys)
-                            let plain_data = {
-                                let mut ctx = rtcp_srtp_ctx.lock().await;
-                                match ctx.unprotect_rtcp(&raw_data) {
-                                    Ok(data) => bytes::Bytes::from(data),
-                                    Err(e) => {
-                                        tracing::warn!("SRTCP unprotect failed for session {}: {}", call_id.0, e);
-                                        counter!("forge_srtcp_unprotect_errors_total").increment(1);
-                                        continue;
-                                    }
-                                }
-                            };
-
-                            // HEP3 capture (chunk 0x05 = RTCP). Hook
-                            // after SRTCP unprotect so Homer sees the
-                            // plaintext payload. No-op (one atomic
-                            // load + null-check) when no emitter is
-                            // installed. Local-addr lookup goes
-                            // through the cached SocketPair handle so
-                            // we don't pay a syscall per RTCP packet
-                            // beyond what `local_rtcp_addr()` already
-                            // does internally on the cached socket.
-                            if let Some(emitter) = forge_hep::forge_hep() {
-                                if let Ok(local) = sockets.local_rtcp_addr() {
-                                    emitter.emit_rtcp(
-                                        forge_hep::Direction::Inbound,
-                                        forge_hep::IpProto::Udp,
-                                        source_addr,
-                                        local,
-                                        &plain_data,
-                                        Some(session.hep_correlation_id()),
-                                    );
-                                }
-                            }
-
-                            Self::handle_rtcp_packet(
-                                &session,
-                                &sockets,
-                                &participant_a,
-                                &participant_b,
-                                &plain_data,
-                                source_addr,
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            tracing::error!("Error receiving RTCP packet for session {}: {}", call_id.0, e);
-                        }
-                    }
+                result = slot_1.recv_rtp_raw() => {
+                    Self::on_rtp_datagram(
+                        &session,
+                        &sockets,
+                        &participant_a,
+                        &participant_b,
+                        result,
+                        Side::from_label(sockets.leg_of_slot(1)),
+                    )
+                    .await;
+                }
+                // RTCP (with SRTCP unprotect)
+                result = slot_0.recv_rtcp() => {
+                    Self::on_rtcp_datagram(
+                        &session,
+                        &sockets,
+                        &participant_a,
+                        &participant_b,
+                        result,
+                        Side::from_label(sockets.leg_of_slot(0)),
+                    )
+                    .await;
+                }
+                result = slot_1.recv_rtcp() => {
+                    Self::on_rtcp_datagram(
+                        &session,
+                        &sockets,
+                        &participant_a,
+                        &participant_b,
+                        result,
+                        Side::from_label(sockets.leg_of_slot(1)),
+                    )
+                    .await;
                 }
                 // Timeout check and generated audio playout (run periodically).
                 // Tick is pinned outside the loop; reset on fire so it
@@ -309,14 +213,166 @@ impl ForwardingEngine {
         tracing::info!("Forwarding loop terminated for session {}", call_id.0);
     }
 
+    /// One datagram from an RTP socket: DTLS demux, SRTP unprotect with the
+    /// arrival leg's keys, then [`Self::handle_rtp_packet`].
+    async fn on_rtp_datagram(
+        session: &Arc<MediaSession>,
+        sockets: &LegSockets,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        result: Result<(bytes::Bytes, std::net::SocketAddr)>,
+        arrival: Side,
+    ) {
+        let call_id = session.call_id();
+        let (raw_data, source_addr) = match result {
+            Ok(received) => received,
+            Err(e) => {
+                tracing::error!(
+                    "Error receiving RTP packet for session {}: {}",
+                    call_id.0,
+                    e
+                );
+                return;
+            }
+        };
+
+        // RFC 5764 §5.1.2 demux: peek the first byte to route DTLS
+        // handshake bytes away from the SRTP/RTP path. DTLS packets would
+        // otherwise crash `unprotect_rtp` with a parse error.
+        #[cfg(feature = "dtls")]
+        if let Some(first) = raw_data.first().copied() {
+            if crate::dtls_srtp::is_dtls_packet(first) {
+                Self::handle_dtls_packet(session, sockets, &raw_data, source_addr, arrival).await;
+                return;
+            }
+            if crate::dtls_srtp::is_unsupported_first_byte(first) {
+                counter!("forge_rtp_unsupported_first_byte_total").increment(1);
+                return;
+            }
+        }
+
+        // The arrival leg's keys: its socket says who sent it, even before
+        // its address is learned.
+        let srtp_ctx = match arrival {
+            Side::A => session.srtp_a().clone(),
+            Side::B => session.srtp_b().clone(),
+        };
+
+        // SRTP unprotect (passthrough if no keys set)
+        let plain_data = {
+            let mut ctx = srtp_ctx.lock().await;
+            match ctx.unprotect_rtp(&raw_data) {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::warn!("SRTP unprotect failed for session {}: {}", call_id.0, e);
+                    counter!("forge_srtp_unprotect_errors_total").increment(1);
+                    return;
+                }
+            }
+        };
+
+        // Parse plain RTP
+        match forge_rtp::RtpPacket::parse(bytes::Bytes::from(plain_data)) {
+            Ok(packet) => {
+                Self::handle_rtp_packet(
+                    session,
+                    sockets,
+                    participant_a,
+                    participant_b,
+                    packet,
+                    source_addr,
+                    arrival,
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "RTP parse after SRTP unprotect failed for session {}: {}",
+                    call_id.0,
+                    e
+                );
+            }
+        }
+    }
+
+    /// One datagram from an RTCP socket: SRTCP unprotect with the arrival
+    /// leg's keys, HEP, then [`Self::handle_rtcp_packet`].
+    async fn on_rtcp_datagram(
+        session: &Arc<MediaSession>,
+        sockets: &LegSockets,
+        participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
+        result: Result<(bytes::Bytes, std::net::SocketAddr)>,
+        arrival: Side,
+    ) {
+        let call_id = session.call_id();
+        let (raw_data, source_addr) = match result {
+            Ok(received) => received,
+            Err(e) => {
+                tracing::error!(
+                    "Error receiving RTCP packet for session {}: {}",
+                    call_id.0,
+                    e
+                );
+                return;
+            }
+        };
+
+        let rtcp_srtp_ctx = match arrival {
+            Side::A => session.srtp_a().clone(),
+            Side::B => session.srtp_b().clone(),
+        };
+
+        // SRTCP unprotect (passthrough if no keys)
+        let plain_data = {
+            let mut ctx = rtcp_srtp_ctx.lock().await;
+            match ctx.unprotect_rtcp(&raw_data) {
+                Ok(data) => bytes::Bytes::from(data),
+                Err(e) => {
+                    tracing::warn!("SRTCP unprotect failed for session {}: {}", call_id.0, e);
+                    counter!("forge_srtcp_unprotect_errors_total").increment(1);
+                    return;
+                }
+            }
+        };
+
+        // HEP3 capture (chunk 0x05 = RTCP). Hook after SRTCP unprotect so
+        // Homer sees the plaintext payload. No-op (one atomic load +
+        // null-check) when no emitter is installed.
+        if let Some(emitter) = forge_hep::forge_hep() {
+            if let Ok(local) = sockets.for_leg(arrival.label()).local_rtcp_addr() {
+                emitter.emit_rtcp(
+                    forge_hep::Direction::Inbound,
+                    forge_hep::IpProto::Udp,
+                    source_addr,
+                    local,
+                    &plain_data,
+                    Some(session.hep_correlation_id()),
+                );
+            }
+        }
+
+        Self::handle_rtcp_packet(
+            session,
+            sockets,
+            participant_a,
+            participant_b,
+            &plain_data,
+            source_addr,
+            arrival,
+        )
+        .await;
+    }
+
     /// Handle an RTP packet
     async fn handle_rtp_packet(
         session: &Arc<MediaSession>,
-        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        sockets: &LegSockets,
         participant_a: &Arc<RwLock<Participant>>,
         participant_b: &Arc<RwLock<Participant>>,
         packet: forge_rtp::RtpPacket,
         source_addr: std::net::SocketAddr,
+        arrival: Side,
     ) {
         let call_id = session.call_id();
 
@@ -327,9 +383,14 @@ impl ForwardingEngine {
         if (pkt_pt == te_pt_a || pkt_pt == te_pt_b) && session.dtmf_config().enable_rfc2833 {
             // Which leg sent it decides where it may be relayed, and is
             // what a subscriber to the session's digits is told.
-            let sides =
-                Self::determine_packet_sides(session, participant_a, participant_b, source_addr)
-                    .await;
+            let sides = Self::determine_packet_sides(
+                session,
+                participant_a,
+                participant_b,
+                source_addr,
+                arrival,
+            )
+            .await;
             tracing::debug!(
                 "Received RFC 2833 telephone-event packet for session {} from {}",
                 call_id.0,
@@ -396,8 +457,14 @@ impl ForwardingEngine {
             counter!("forge_dtmf_rfc2833_relayed_total").increment(1);
         }
 
-        let Some((sender, receiver)) =
-            Self::determine_packet_sides(session, participant_a, participant_b, source_addr).await
+        let Some((sender, receiver)) = Self::determine_packet_sides(
+            session,
+            participant_a,
+            participant_b,
+            source_addr,
+            arrival,
+        )
+        .await
         else {
             return;
         };
@@ -645,7 +712,11 @@ impl ForwardingEngine {
                 }
             };
 
-            if let Err(e) = sockets.send_rtp_to(&send_data, addr).await {
+            if let Err(e) = sockets
+                .for_leg(receiver.label())
+                .send_rtp_to(&send_data, addr)
+                .await
+            {
                 tracing::error!(
                     "Failed to forward RTP packet for session {}: {}",
                     call_id.0,
@@ -678,7 +749,7 @@ impl ForwardingEngine {
     #[cfg(feature = "ai")]
     async fn drain_ai_audio_responses(
         session: &Arc<MediaSession>,
-        _sockets: &Arc<forge_rtp::RtpSocketPair>,
+        _sockets: &LegSockets,
         _participant_a: &Arc<RwLock<Participant>>,
         _participant_b: &Arc<RwLock<Participant>>,
     ) {
@@ -709,7 +780,7 @@ impl ForwardingEngine {
 
     async fn drain_media_bridge_outbound(
         session: &Arc<MediaSession>,
-        _sockets: &Arc<forge_rtp::RtpSocketPair>,
+        _sockets: &LegSockets,
         _participant_a: &Arc<RwLock<Participant>>,
         _participant_b: &Arc<RwLock<Participant>>,
     ) {
@@ -770,7 +841,7 @@ impl ForwardingEngine {
 
     async fn drain_scheduled_playout(
         session: &Arc<MediaSession>,
-        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        sockets: &LegSockets,
         participant_a: &Arc<RwLock<Participant>>,
         participant_b: &Arc<RwLock<Participant>>,
     ) {
@@ -877,7 +948,7 @@ impl ForwardingEngine {
     /// once a leg has actually generated RTP and has a known remote address.
     async fn maybe_emit_sender_reports(
         session: &Arc<MediaSession>,
-        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        sockets: &LegSockets,
         participant_a: &Arc<RwLock<Participant>>,
         participant_b: &Arc<RwLock<Participant>>,
     ) {
@@ -960,7 +1031,11 @@ impl ForwardingEngine {
 
             let rtcp_addr =
                 std::net::SocketAddr::new(remote_rtp.ip(), remote_rtp.port().wrapping_add(1));
-            if let Err(e) = sockets.send_rtcp_to(&send_data, rtcp_addr).await {
+            if let Err(e) = sockets
+                .for_leg(leg)
+                .send_rtcp_to(&send_data, rtcp_addr)
+                .await
+            {
                 tracing::warn!(
                     "Failed to send generated SR for session {} leg {}: {}",
                     session.call_id().0,
@@ -974,140 +1049,76 @@ impl ForwardingEngine {
         }
     }
 
+    /// The sender is the leg whose socket the packet arrived on; whether
+    /// that leg takes it is its peer's address and latch. A leg takes a
+    /// packet from its peer's address, from the peer's IP on another port
+    /// (a NAT rebinding), or — while its address is unknown — from
+    /// wherever its latch allows, learning the address from it. Anything
+    /// else is a stranger on this leg's port and is dropped.
     async fn determine_packet_sides(
         session: &Arc<MediaSession>,
         participant_a: &Arc<RwLock<Participant>>,
         participant_b: &Arc<RwLock<Participant>>,
         source_addr: std::net::SocketAddr,
+        arrival: Side,
     ) -> Option<(Side, Side)> {
         let call_id = session.call_id();
-        let a = participant_a.read().await;
-        let b = participant_b.read().await;
+        let sides = Some((arrival, arrival.other()));
+        let participant = match arrival {
+            Side::A => participant_a,
+            Side::B => participant_b,
+        };
 
-        // A packet from exactly where a leg's peer is, is that leg's.
-        if a.remote_addr == Some(source_addr) {
-            return Some((Side::A, Side::B));
-        }
-        if b.remote_addr == Some(source_addr) {
-            return Some((Side::B, Side::A));
-        }
-
-        // A leg told to learn its peer from a named address claims the
-        // first packet from there, even when the other leg's peer shares
-        // the address: the other leg's packets come from its exact
-        // address, checked above, and this one did not. Without this, two
-        // peers on one address — a site and a carrier behind the same
-        // NAT, every node on a loopback — leave the learning leg deaf.
-        let source_ip = source_addr.ip();
-        let a_named_latch = a.remote_addr.is_none()
-            && a.latch_allowed_ips
-                .as_ref()
-                .is_some_and(|allowed| allowed.contains(&source_ip));
-        let b_named_latch = b.remote_addr.is_none()
-            && b.latch_allowed_ips
-                .as_ref()
-                .is_some_and(|allowed| allowed.contains(&source_ip));
-        if a_named_latch {
-            tracing::info!(
-                "Learning remote RTP endpoint for session {} leg A from its named address: {}",
-                call_id.0,
-                source_addr
-            );
-            counter!("forge_rtp_latch_learned_total").increment(1);
-            drop(a);
-            drop(b);
-            participant_a.write().await.remote_addr = Some(source_addr);
-            return Some((Side::A, Side::B));
-        }
-        if b_named_latch {
-            tracing::info!(
-                "Learning remote RTP endpoint for session {} leg B from its named address: {}",
-                call_id.0,
-                source_addr
-            );
-            counter!("forge_rtp_latch_learned_total").increment(1);
-            drop(a);
-            drop(b);
-            participant_b.write().await.remote_addr = Some(source_addr);
-            return Some((Side::B, Side::A));
-        }
-
-        let a_ip_match = a
-            .remote_addr
-            .map(|addr| addr.ip() == source_addr.ip())
-            .unwrap_or(false);
-        let b_ip_match = b
-            .remote_addr
-            .map(|addr| addr.ip() == source_addr.ip())
-            .unwrap_or(false);
-
-        if a_ip_match && !b_ip_match {
-            return Some((Side::A, Side::B));
-        }
-        if b_ip_match && !a_ip_match {
-            return Some((Side::B, Side::A));
-        }
-        if a_ip_match && b_ip_match {
-            if a.remote_addr == Some(source_addr) {
-                return Some((Side::A, Side::B));
+        {
+            let p = participant.read().await;
+            match p.remote_addr {
+                Some(addr) if addr == source_addr || addr.ip() == source_addr.ip() => {
+                    return sides;
+                }
+                Some(_) => {
+                    drop(p);
+                    tracing::warn!(
+                        "Rejected RTP packet from {} for session {} leg {} (not its peer)",
+                        source_addr,
+                        call_id.0,
+                        arrival.label().as_str()
+                    );
+                    counter!("forge_rtp_latch_rejected_total").increment(1);
+                    return None;
+                }
+                None => {
+                    let allowed = p
+                        .latch_allowed_ips
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(&source_addr.ip()));
+                    if !allowed {
+                        drop(p);
+                        tracing::warn!(
+                            "Rejected RTP packet from {} for session {} leg {} (disallowed by latch policy)",
+                            source_addr,
+                            call_id.0,
+                            arrival.label().as_str()
+                        );
+                        counter!("forge_rtp_latch_rejected_total").increment(1);
+                        return None;
+                    }
+                }
             }
-            if b.remote_addr == Some(source_addr) {
-                return Some((Side::B, Side::A));
-            }
-
-            let a_port = a.remote_addr.map(|addr| addr.port()).unwrap_or(0);
-            let b_port = b.remote_addr.map(|addr| addr.port()).unwrap_or(0);
-            let src_port = source_addr.port();
-            let a_diff = (a_port as i32 - src_port as i32).abs();
-            let b_diff = (b_port as i32 - src_port as i32).abs();
-            return Some(if a_diff <= b_diff {
-                (Side::A, Side::B)
-            } else {
-                (Side::B, Side::A)
-            });
         }
 
-        let a_can_latch = a.remote_addr.is_none()
-            && a.latch_allowed_ips
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(&source_ip));
-        let b_can_latch = b.remote_addr.is_none()
-            && b.latch_allowed_ips
-                .as_ref()
-                .is_none_or(|allowed| allowed.contains(&source_ip));
-
-        if a_can_latch {
+        let mut p = participant.write().await;
+        // Another packet may have taught it first.
+        if p.remote_addr.is_none() {
             tracing::info!(
-                "Learning remote RTP endpoint for session {} leg A: {}",
+                "Learning remote RTP endpoint for session {} leg {}: {}",
                 call_id.0,
+                arrival.label().as_str(),
                 source_addr
             );
             counter!("forge_rtp_latch_learned_total").increment(1);
-            drop(a);
-            drop(b);
-            participant_a.write().await.remote_addr = Some(source_addr);
-            return Some((Side::A, Side::B));
+            p.remote_addr = Some(source_addr);
         }
-        if b_can_latch {
-            tracing::info!(
-                "Learning remote RTP endpoint for session {} leg B: {}",
-                call_id.0,
-                source_addr
-            );
-            counter!("forge_rtp_latch_learned_total").increment(1);
-            drop(a);
-            drop(b);
-            participant_b.write().await.remote_addr = Some(source_addr);
-            return Some((Side::B, Side::A));
-        }
-
-        tracing::warn!(
-            "Rejected RTP packet from {} for session {} (unknown source or disallowed by latch policy)",
-            source_addr,
-            call_id.0
-        );
-        counter!("forge_rtp_latch_rejected_total").increment(1);
-        None
+        sides
     }
 
     async fn decode_audio_payload(
@@ -1140,7 +1151,7 @@ impl ForwardingEngine {
 
     async fn send_scheduled_playout_item(
         session: &Arc<MediaSession>,
-        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        sockets: &LegSockets,
         participant_a: &Arc<RwLock<Participant>>,
         participant_b: &Arc<RwLock<Participant>>,
         leg: ParticipantLabel,
@@ -1231,7 +1242,7 @@ impl ForwardingEngine {
 
     async fn send_generated_rtp_packet(
         session: &Arc<MediaSession>,
-        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        sockets: &LegSockets,
         participant_a: &Arc<RwLock<Participant>>,
         participant_b: &Arc<RwLock<Participant>>,
         leg: ParticipantLabel,
@@ -1282,6 +1293,7 @@ impl ForwardingEngine {
         };
 
         sockets
+            .for_leg(leg)
             .send_rtp_to(&send_data, remote_addr)
             .await
             .map_err(|e| ForgeError::Network(e.to_string()))?;
@@ -1314,13 +1326,19 @@ impl ForwardingEngine {
         mut packet: forge_rtp::RtpPacket,
     ) -> forge_rtp::RtpPacket {
         // Get payload types for both participants
-        let (src_pt, dst_pt) = {
+        let (src_pt, dst_pt, src_clock, dst_clock) = {
             let a = participant_a.read().await;
             let b = participant_b.read().await;
-            match sender {
-                Side::A => (a.payload_type, b.payload_type),
-                Side::B => (b.payload_type, a.payload_type),
-            }
+            let (from, to) = match sender {
+                Side::A => (&*a, &*b),
+                Side::B => (&*b, &*a),
+            };
+            (
+                from.payload_type,
+                to.payload_type,
+                from.codec_config.clock_rate,
+                to.codec_config.clock_rate,
+            )
         };
 
         // Check if transcoding is needed
@@ -1417,6 +1435,15 @@ impl ForwardingEngine {
                         packet.header.marker_payload_type =
                             (packet.header.marker_payload_type & 0x80) | dst_pt;
 
+                        // And the timestamp onto the new codec's clock: a
+                        // receiver times playout by it.
+                        packet.header.timestamp = session.map_transcoded_timestamp(
+                            sender.label(),
+                            packet.header.timestamp,
+                            src_clock,
+                            dst_clock,
+                        );
+
                         // Record transcoding metrics with codec labels
                         counter!("forge_transcoding_packets_total", "from_codec" => codec_name(src_codec), "to_codec" => codec_name(dst_codec)).increment(1);
                         counter!("forge_transcoding_bytes_total", "from_codec" => codec_name(src_codec), "to_codec" => codec_name(dst_codec)).increment(output_len as u64);
@@ -1444,11 +1471,12 @@ impl ForwardingEngine {
     /// Handle an RTCP packet
     async fn handle_rtcp_packet(
         session: &Arc<MediaSession>,
-        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        sockets: &LegSockets,
         participant_a: &Arc<RwLock<Participant>>,
         participant_b: &Arc<RwLock<Participant>>,
         data: &bytes::Bytes,
         source_addr: std::net::SocketAddr,
+        arrival: Side,
     ) {
         let call_id = session.call_id();
 
@@ -1485,7 +1513,9 @@ impl ForwardingEngine {
                             session,
                             sockets,
                             participant_a,
+                            participant_b,
                             source_addr,
+                            arrival,
                             &sr.report_blocks,
                         )
                         .await;
@@ -1495,7 +1525,9 @@ impl ForwardingEngine {
                             session,
                             sockets,
                             participant_a,
+                            participant_b,
                             source_addr,
+                            arrival,
                             &rr.report_blocks,
                         )
                         .await;
@@ -1516,54 +1548,19 @@ impl ForwardingEngine {
             }
         }
 
-        // Determine which participant sent this packet and forward to the other
+        // The arrival socket says who sent it; it goes to the other leg's
+        // RTCP address (RTP port + 1).
+        let receiver = arrival.other();
         let receiver_addr = {
-            let a = participant_a.read().await;
-            let b = participant_b.read().await;
-
-            // Check if this is from participant A (matching RTP port + 1)
-            if let Some(rtp_addr) = a.remote_addr {
-                if rtp_addr.ip() == source_addr.ip()
-                    && (rtp_addr.port() + 1 == source_addr.port()
-                        || rtp_addr.port() == source_addr.port())
-                {
-                    // From A, forward to B
-                    b.remote_addr
-                        .map(|addr| std::net::SocketAddr::new(addr.ip(), addr.port() + 1))
-                } else if let Some(rtp_addr_b) = b.remote_addr {
-                    if rtp_addr_b.ip() == source_addr.ip()
-                        && (rtp_addr_b.port() + 1 == source_addr.port()
-                            || rtp_addr_b.port() == source_addr.port())
-                    {
-                        // From B, forward to A
-                        Some(std::net::SocketAddr::new(
-                            rtp_addr.ip(),
-                            rtp_addr.port() + 1,
-                        ))
-                    } else {
-                        tracing::debug!(
-                            "Received RTCP from unknown source {} for session {}",
-                            source_addr,
-                            call_id.0
-                        );
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else if let Some(rtp_addr_b) = b.remote_addr {
-                if rtp_addr_b.ip() == source_addr.ip()
-                    && (rtp_addr_b.port() + 1 == source_addr.port()
-                        || rtp_addr_b.port() == source_addr.port())
-                {
-                    // From B, but A doesn't have an endpoint yet
-                    None
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            let participant = match receiver {
+                Side::A => participant_a,
+                Side::B => participant_b,
+            };
+            participant
+                .read()
+                .await
+                .remote_addr
+                .map(|addr| std::net::SocketAddr::new(addr.ip(), addr.port().wrapping_add(1)))
         };
 
         // Update session activity
@@ -1571,22 +1568,9 @@ impl ForwardingEngine {
 
         // SRTP protect RTCP before forwarding
         if let Some(addr) = receiver_addr {
-            // Determine receiver side for SRTP context
-            let rtcp_srtp_ctx = {
-                let a = participant_a.read().await;
-                if let Some(rtp_addr) = a.remote_addr {
-                    if rtp_addr.ip() == source_addr.ip()
-                        && (rtp_addr.port() + 1 == source_addr.port()
-                            || rtp_addr.port() == source_addr.port())
-                    {
-                        // From A → forward to B
-                        session.srtp_b().clone()
-                    } else {
-                        session.srtp_a().clone()
-                    }
-                } else {
-                    session.srtp_b().clone()
-                }
+            let rtcp_srtp_ctx = match receiver {
+                Side::A => session.srtp_a().clone(),
+                Side::B => session.srtp_b().clone(),
             };
 
             let send_data = {
@@ -1601,7 +1585,11 @@ impl ForwardingEngine {
                 }
             };
 
-            if let Err(e) = sockets.send_rtcp_to(&send_data, addr).await {
+            if let Err(e) = sockets
+                .for_leg(receiver.label())
+                .send_rtcp_to(&send_data, addr)
+                .await
+            {
                 tracing::error!(
                     "Failed to forward RTCP packet for session {}: {}",
                     call_id.0,
@@ -1622,7 +1610,7 @@ impl ForwardingEngine {
                 // bytes (`data`) so Homer shows the SR/RR contents
                 // rather than the SRTCP-protected blob.
                 if let Some(emitter) = forge_hep::forge_hep() {
-                    if let Ok(local) = sockets.local_rtcp_addr() {
+                    if let Ok(local) = sockets.for_leg(receiver.label()).local_rtcp_addr() {
                         emitter.emit_rtcp(
                             forge_hep::Direction::Outbound,
                             forge_hep::IpProto::Udp,
@@ -1728,7 +1716,7 @@ impl ForwardingEngine {
     /// legs with the same codec, so this is the right value there.
     /// Drive a DTLS-SRTP handshake step on the RTP socket. Called from
     /// the recv-loop demux when the first byte falls in the RFC 5764
-    /// §5.1.2 DTLS range (20-63). Picks the leg by `source_addr`,
+    /// §5.1.2 DTLS range (20-63). Picks the leg by the arrival socket,
     /// feeds the packet into the per-leg `DtlsLeg`, ships any
     /// outgoing DTLS bytes back to the peer, and on handshake
     /// completion installs the derived SRTP keys into the existing
@@ -1742,29 +1730,19 @@ impl ForwardingEngine {
     #[cfg(feature = "dtls")]
     async fn handle_dtls_packet(
         session: &Arc<MediaSession>,
-        sockets: &Arc<forge_rtp::RtpSocketPair>,
-        participant_a: &Arc<RwLock<Participant>>,
-        participant_b: &Arc<RwLock<Participant>>,
+        sockets: &LegSockets,
         raw_data: &[u8],
         source_addr: std::net::SocketAddr,
+        arrival: Side,
     ) {
         use crate::dtls_srtp::HandshakeOutcome;
 
         counter!("forge_dtls_packets_received_total").increment(1);
 
-        // Pick the side by source_addr. Same shape as the SRTP-context
-        // selection above. Default to A if neither participant has
-        // learned a remote_addr yet (very early in the call).
-        let (dtls_slot, srtp_ctx) = {
-            let a = participant_a.read().await;
-            let b = participant_b.read().await;
-            if a.remote_addr == Some(source_addr) {
-                (session.dtls_a().clone(), session.srtp_a().clone())
-            } else if b.remote_addr == Some(source_addr) {
-                (session.dtls_b().clone(), session.srtp_b().clone())
-            } else {
-                (session.dtls_a().clone(), session.srtp_a().clone())
-            }
+        // The arrival socket's leg.
+        let (dtls_slot, srtp_ctx) = match arrival {
+            Side::A => (session.dtls_a().clone(), session.srtp_a().clone()),
+            Side::B => (session.dtls_b().clone(), session.srtp_b().clone()),
         };
 
         let outcome = {
@@ -1787,7 +1765,11 @@ impl ForwardingEngine {
             HandshakeOutcome::Failed(_) => Vec::new(),
         };
         if !outgoing.is_empty() {
-            if let Err(e) = sockets.send_rtp_to(&outgoing, source_addr).await {
+            if let Err(e) = sockets
+                .for_leg(arrival.label())
+                .send_rtp_to(&outgoing, source_addr)
+                .await
+            {
                 tracing::warn!(
                     call_id = %session.call_id().0,
                     error = %e,
@@ -1825,25 +1807,30 @@ impl ForwardingEngine {
         }
     }
 
-    /// A future refinement disambiguates by `source_addr` for true
-    /// B2BUA setups with mixed clock rates between legs.
+    /// The reporter is the arrival leg: its blocks report on what we send
+    /// it, so the clock is that leg's codec's and the generated stream is
+    /// the one toward that leg.
     async fn process_report_blocks(
         session: &Arc<MediaSession>,
-        sockets: &Arc<forge_rtp::RtpSocketPair>,
+        sockets: &LegSockets,
         participant_a: &Arc<RwLock<Participant>>,
+        participant_b: &Arc<RwLock<Participant>>,
         source_addr: std::net::SocketAddr,
+        arrival: Side,
         blocks: &[forge_rtp::rtcp::ReceptionReportBlock],
     ) {
         let call_id = session.call_id();
-        let clock_rate = participant_a.read().await.codec_config.clock_rate;
+        let reporter = match arrival {
+            Side::A => participant_a,
+            Side::B => participant_b,
+        };
+        let clock_rate = reporter.read().await.codec_config.clock_rate;
         let bus = session.event_bus().cloned();
-        // The carrier's RR reports on the stream we *generate* toward it,
-        // which lives on leg A in siphon-ai's terminator model (matching
-        // this function's existing leg-A assumption).
-        let generated = session.generated_rtp_state(ParticipantLabel::A);
+        let generated = session.generated_rtp_state(arrival.label());
+        let socket = sockets.for_leg(arrival.label());
         for block in blocks {
             Self::record_report_block_metrics(block);
-            Self::emit_qos_report(sockets, source_addr, session.hep_correlation_id(), block);
+            Self::emit_qos_report(socket, source_addr, session.hep_correlation_id(), block);
             // RTT (RFC 3550 §A.7): only when the block reports on our
             // generated SSRC and carries the echo of an SR we sent. A
             // non-matching SSRC or `last_sr == 0` yields `None`.
@@ -1976,6 +1963,13 @@ impl Side {
             ParticipantLabel::B => Self::B,
         }
     }
+
+    fn other(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
 }
 
 /// Helper function to get codec name for logging
@@ -2085,40 +2079,314 @@ mod tests {
         session
     }
 
-    /// A leg learning its peer from a named address gets the first packet
-    /// from there, even though the other leg's peer shares the address:
-    /// that leg's packets come from its exact address.
+    /// Two peers behind one address: each leg's packets come in on its own
+    /// socket, so each learns its own peer whichever sends first, and
+    /// neither takes the other's.
     #[tokio::test]
-    async fn a_named_latch_claims_its_packets_beside_a_peer_on_the_same_address() {
+    async fn each_leg_learns_its_own_peer_beside_a_peer_on_the_same_address() {
         let shared = IpAddr::V4(Ipv4Addr::LOCALHOST);
         let a_remote: std::net::SocketAddr = (shared, 4000).into();
         let session = latching_session(a_remote, shared).await;
+        {
+            let mut a = session.participant_a().write().await;
+            a.remote_addr = None;
+            a.latch_allowed_ips = Some(std::iter::once(shared).collect());
+        }
         let (pa, pb) = (
             Arc::clone(session.participant_a()),
             Arc::clone(session.participant_b()),
         );
 
-        // A's own packet is A's.
-        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, a_remote).await;
-        assert_eq!(sides, Some((Side::A, Side::B)));
-        assert_eq!(
-            pb.read().await.remote_addr,
-            None,
-            "nothing learned from A's packet"
-        );
-
-        // A packet from the shared address, not from A's port, is B's
-        // first: B learns it.
+        // B's peer speaks first: B learns it, A learns nothing.
         let b_source: std::net::SocketAddr = (shared, 5000).into();
-        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, b_source).await;
+        let sides =
+            ForwardingEngine::determine_packet_sides(&session, &pa, &pb, b_source, Side::B).await;
         assert_eq!(sides, Some((Side::B, Side::A)));
         assert_eq!(pb.read().await.remote_addr, Some(b_source));
+        assert_eq!(pa.read().await.remote_addr, None);
 
-        // Learned, B is exact too; A is still A.
-        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, b_source).await;
-        assert_eq!(sides, Some((Side::B, Side::A)));
-        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, a_remote).await;
+        // Then A's.
+        let sides =
+            ForwardingEngine::determine_packet_sides(&session, &pa, &pb, a_remote, Side::A).await;
         assert_eq!(sides, Some((Side::A, Side::B)));
+        assert_eq!(pa.read().await.remote_addr, Some(a_remote));
+        assert_eq!(pb.read().await.remote_addr, Some(b_source));
+    }
+
+    /// A forwarding session whose legs both learn their peers from
+    /// 127.0.0.1, as two phones behind one router naming addresses they
+    /// cannot be reached at.
+    async fn two_peers_behind_one_address(pool_start: u16) -> Arc<MediaSession> {
+        let config = PortPoolConfig::new(pool_start, pool_start + 200).unwrap();
+        let port_pool = Arc::new(PortPool::new(config));
+        let session_config = MediaSessionConfig {
+            socket_config: forge_rtp::RtpSocketConfig {
+                bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let session = Arc::new(
+            MediaSession::new(
+                CallId::generate(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                &port_pool,
+                session_config,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let shared = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        for participant in [session.participant_a(), session.participant_b()] {
+            let mut p = participant.write().await;
+            p.remote_addr = None;
+            p.latch_allowed_ips = Some(std::iter::once(shared).collect());
+        }
+        session.start_forwarding().await.unwrap();
+        session
+    }
+
+    fn pcmu_packet(ssrc: u32, sequence: u16) -> Vec<u8> {
+        forge_rtp::RtpPacket::build(
+            0,
+            sequence,
+            u32::from(sequence) * 160,
+            ssrc,
+            bytes::Bytes::from(vec![0xffu8; 160]),
+            false,
+        )
+        .to_bytes()
+        .to_vec()
+    }
+
+    /// The SSRC and source of the next RTP packet `phone` hears.
+    async fn hears(phone: &tokio::net::UdpSocket) -> Option<(u32, std::net::SocketAddr)> {
+        let mut buf = [0u8; 2048];
+        let (len, from) = tokio::time::timeout(Duration::from_secs(1), phone.recv_from(&mut buf))
+            .await
+            .ok()?
+            .ok()?;
+        (len >= 12).then(|| (u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]), from))
+    }
+
+    /// Two phones behind one address, each told its own leg's port: the
+    /// one that speaks second is not mistaken for the first's leg, and
+    /// each hears the other from the port it sends to — what a
+    /// port-restricted NAT lets through.
+    #[tokio::test]
+    async fn two_phones_behind_one_address_each_hear_the_other_from_their_own_port() {
+        let session = two_peers_behind_one_address(43000).await;
+        let a_port = session.ports_for(ParticipantLabel::A).rtp_port;
+        let b_port = session.ports_for(ParticipantLabel::B).rtp_port;
+        assert_ne!(a_port, b_port, "a port per leg");
+        let a_server: std::net::SocketAddr = (Ipv4Addr::LOCALHOST, a_port).into();
+        let b_server: std::net::SocketAddr = (Ipv4Addr::LOCALHOST, b_port).into();
+        let phone_a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let phone_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        const SSRC_A: u32 = 0xA;
+        const SSRC_B: u32 = 0xB;
+
+        // B speaks first, as the VVX did on D8.
+        phone_b
+            .send_to(&pcmu_packet(SSRC_B, 1), b_server)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for sequence in 2..6 {
+            phone_a
+                .send_to(&pcmu_packet(SSRC_A, sequence), a_server)
+                .await
+                .unwrap();
+            phone_b
+                .send_to(&pcmu_packet(SSRC_B, sequence), b_server)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(
+            hears(&phone_a).await,
+            Some((SSRC_B, a_server)),
+            "A hears B, from A's port"
+        );
+        assert_eq!(
+            hears(&phone_b).await,
+            Some((SSRC_A, b_server)),
+            "B hears A, from B's port"
+        );
+        assert_eq!(
+            session.participant_a().read().await.remote_addr,
+            Some(phone_a.local_addr().unwrap())
+        );
+        assert_eq!(
+            session.participant_b().read().await.remote_addr,
+            Some(phone_b.local_addr().unwrap())
+        );
+        session.stop_forwarding().await.unwrap();
+    }
+
+    /// Swapping the legs' sockets moves each port with its phone: a phone
+    /// moved from leg B to leg A (park) still sends to, and hears from,
+    /// the port it was told.
+    #[tokio::test]
+    async fn a_swap_moves_each_port_with_its_phone() {
+        let session = two_peers_behind_one_address(43400).await;
+        let (a_ports, b_ports) = (
+            session.ports_for(ParticipantLabel::A),
+            session.ports_for(ParticipantLabel::B),
+        );
+        session.swap_leg_sockets();
+        assert_eq!(session.ports_for(ParticipantLabel::A), b_ports);
+        assert_eq!(session.ports_for(ParticipantLabel::B), a_ports);
+        assert_eq!(session.ports(), b_ports, "ports() is leg A's");
+
+        // The phone on B's old port now speaks as leg A, and is heard by
+        // the phone on A's old port, now leg B.
+        let old_b: std::net::SocketAddr = (Ipv4Addr::LOCALHOST, b_ports.rtp_port).into();
+        let old_a: std::net::SocketAddr = (Ipv4Addr::LOCALHOST, a_ports.rtp_port).into();
+        let moved = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let other = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        for sequence in 1..5 {
+            moved
+                .send_to(&pcmu_packet(0x1, sequence), old_b)
+                .await
+                .unwrap();
+            other
+                .send_to(&pcmu_packet(0x2, sequence), old_a)
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            session.participant_a().read().await.remote_addr,
+            Some(moved.local_addr().unwrap()),
+            "the moved phone is leg A"
+        );
+        assert_eq!(hears(&moved).await, Some((0x2, old_b)));
+        assert_eq!(hears(&other).await, Some((0x1, old_a)));
+        session.stop_forwarding().await.unwrap();
+    }
+
+    /// An encrypted B leg whose phone speaks before its address is known:
+    /// its first packet is decrypted with B's keys (it came in on B's
+    /// socket), so B learns its address and A hears it. With one socket
+    /// the unknown source got A's keys and was dropped.
+    #[tokio::test]
+    async fn an_encrypted_leg_is_learned_from_its_first_packet() {
+        use forge_rtp::{SrtpContext, SrtpKeyMaterial, SrtpProfile};
+        let key = |byte: u8| {
+            SrtpKeyMaterial::new(
+                vec![byte; 16],
+                vec![byte; 14],
+                SrtpProfile::Aes128CmHmacSha1_80,
+            )
+            .unwrap()
+        };
+        let session = two_peers_behind_one_address(44200).await;
+        // The node sends B with key 1 and hears B with key 2.
+        *session.srtp_b().lock().await = SrtpContext::with_keys(key(1), key(2));
+        let mut phone_b_srtp = SrtpContext::with_keys(key(2), key(1));
+
+        let a_server: std::net::SocketAddr = (
+            Ipv4Addr::LOCALHOST,
+            session.ports_for(ParticipantLabel::A).rtp_port,
+        )
+            .into();
+        let b_server: std::net::SocketAddr = (
+            Ipv4Addr::LOCALHOST,
+            session.ports_for(ParticipantLabel::B).rtp_port,
+        )
+            .into();
+        let phone_a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let phone_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        // A has spoken, so the node knows where A is; B speaks encrypted.
+        phone_a
+            .send_to(&pcmu_packet(0xA, 1), a_server)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for sequence in 1..5 {
+            let protected = phone_b_srtp
+                .protect_rtp(&pcmu_packet(0xB, sequence))
+                .unwrap();
+            phone_b.send_to(&protected, b_server).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            session.participant_b().read().await.remote_addr,
+            Some(phone_b.local_addr().unwrap()),
+            "B learned from its encrypted first packet"
+        );
+        // In the clear: the header and the 160 bytes B sent, no auth tag.
+        let mut buf = [0u8; 2048];
+        let (len, from) = tokio::time::timeout(Duration::from_secs(1), phone_a.recv_from(&mut buf))
+            .await
+            .expect("A hears B")
+            .unwrap();
+        assert_eq!(from, a_server);
+        assert_eq!(len, 12 + 160, "decrypted, not relayed as ciphertext");
+        assert!(buf[12..len].iter().all(|&b| b == 0xff), "B's audio");
+        session.stop_forwarding().await.unwrap();
+    }
+
+    /// A session's two pairs both go back to the pool when it ends.
+    #[tokio::test]
+    async fn a_session_takes_two_pairs_and_gives_both_back() {
+        let config = PortPoolConfig::new(43800, 44000).unwrap();
+        let port_pool = Arc::new(PortPool::new(config));
+        let session_config = MediaSessionConfig {
+            socket_config: forge_rtp::RtpSocketConfig {
+                bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let session = Arc::new(
+            MediaSession::new(
+                CallId::generate(),
+                ParticipantId::generate(),
+                ParticipantId::generate(),
+                &port_pool,
+                session_config,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(port_pool.allocated_count().await, 2);
+        session.start_forwarding().await.unwrap();
+        session.stop_forwarding().await.unwrap();
+        assert_eq!(port_pool.allocated_count().await, 0);
+    }
+
+    /// A leg takes its peer's packets from another port on the same IP (a
+    /// NAT rebinding) but not a stranger's on its port.
+    #[tokio::test]
+    async fn a_known_peer_keeps_its_leg_and_a_stranger_is_refused() {
+        let a_remote: std::net::SocketAddr = (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4000).into();
+        let session = latching_session(a_remote, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))).await;
+        let (pa, pb) = (
+            Arc::clone(session.participant_a()),
+            Arc::clone(session.participant_b()),
+        );
+        let rebound: std::net::SocketAddr = (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 4002).into();
+        let sides =
+            ForwardingEngine::determine_packet_sides(&session, &pa, &pb, rebound, Side::A).await;
+        assert_eq!(sides, Some((Side::A, Side::B)));
+        let stranger: std::net::SocketAddr =
+            (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 5000).into();
+        let sides =
+            ForwardingEngine::determine_packet_sides(&session, &pa, &pb, stranger, Side::A).await;
+        assert_eq!(sides, None);
     }
 
     /// A leg that may learn from a named address learns from nowhere
@@ -2133,12 +2401,14 @@ mod tests {
         );
         let stranger: std::net::SocketAddr =
             (IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 5000).into();
-        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, stranger).await;
+        let sides =
+            ForwardingEngine::determine_packet_sides(&session, &pa, &pb, stranger, Side::B).await;
         assert_eq!(sides, None);
         assert_eq!(pb.read().await.remote_addr, None);
         let from_site: std::net::SocketAddr =
             (IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)), 6000).into();
-        let sides = ForwardingEngine::determine_packet_sides(&session, &pa, &pb, from_site).await;
+        let sides =
+            ForwardingEngine::determine_packet_sides(&session, &pa, &pb, from_site, Side::B).await;
         assert_eq!(sides, Some((Side::B, Side::A)));
     }
 
@@ -2400,7 +2670,7 @@ mod tests {
         let sink_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let a_addr: std::net::SocketAddr = "127.0.0.1:41990".parse().unwrap();
         let (sockets, pa, pb) = (
-            session.sockets().clone(),
+            session.leg_sockets().clone(),
             session.participant_a().clone(),
             session.participant_b().clone(),
         );
@@ -2418,7 +2688,16 @@ mod tests {
             (5, true, 480),
         ] {
             let packet = telephone_event_packet(101, seq, 8000, 5, end, duration);
-            ForwardingEngine::handle_rtp_packet(&session, &sockets, &pa, &pb, packet, a_addr).await;
+            ForwardingEngine::handle_rtp_packet(
+                &session,
+                &sockets,
+                &pa,
+                &pb,
+                packet,
+                a_addr,
+                Side::A,
+            )
+            .await;
         }
 
         let digit = digits.try_recv().expect("the digit is published");
@@ -2440,7 +2719,8 @@ mod tests {
 
         session.set_rfc2833_relay_to(ParticipantLabel::B, true);
         let packet = telephone_event_packet(101, 6, 16000, 7, false, 160);
-        ForwardingEngine::handle_rtp_packet(&session, &sockets, &pa, &pb, packet, a_addr).await;
+        ForwardingEngine::handle_rtp_packet(&session, &sockets, &pa, &pb, packet, a_addr, Side::A)
+            .await;
         let (len, _) = tokio::time::timeout(Duration::from_secs(1), sink_b.recv_from(&mut buf))
             .await
             .expect("relayed once allowed")
@@ -2459,7 +2739,7 @@ mod tests {
         let sink_a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let sink_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let (sockets, pa, pb) = (
-            session.sockets().clone(),
+            session.leg_sockets().clone(),
             session.participant_a().clone(),
             session.participant_b().clone(),
         );
@@ -2524,7 +2804,7 @@ mod tests {
         within: Duration,
     ) -> bool {
         let (sockets, pa, pb) = (
-            session.sockets().clone(),
+            session.leg_sockets().clone(),
             session.participant_a().clone(),
             session.participant_b().clone(),
         );
@@ -2555,7 +2835,7 @@ mod tests {
         let sink_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let supervisor = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let (sockets, pa, pb) = (
-            session.sockets().clone(),
+            session.leg_sockets().clone(),
             session.participant_a().clone(),
             session.participant_b().clone(),
         );
@@ -2586,7 +2866,13 @@ mod tests {
                 for seq in 0..200u16 {
                     let packet = forge_rtp::RtpPacket::parse(loud_pcmu(seq, 0xA)).unwrap();
                     ForwardingEngine::handle_rtp_packet(
-                        &session, &sockets, &pa, &pb, packet, a_addr,
+                        &session,
+                        &sockets,
+                        &pa,
+                        &pb,
+                        packet,
+                        a_addr,
+                        Side::A,
                     )
                     .await;
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2716,13 +3002,15 @@ mod tests {
         block.delay_since_last_sr = 0;
 
         let mut rx = bus.subscribe();
-        let sockets = session.sockets().clone();
+        let sockets = session.leg_sockets().clone();
         let participant_a = session.participant_a().clone();
         ForwardingEngine::process_report_blocks(
             &session,
             &sockets,
             &participant_a,
+            session.participant_b(),
             "127.0.0.1:10000".parse().unwrap(),
+            Side::A,
             &[block],
         )
         .await;
@@ -2757,13 +3045,15 @@ mod tests {
         block.delay_since_last_sr = 0;
 
         let mut rx = bus.subscribe();
-        let sockets = session.sockets().clone();
+        let sockets = session.leg_sockets().clone();
         let participant_a = session.participant_a().clone();
         ForwardingEngine::process_report_blocks(
             &session,
             &sockets,
             &participant_a,
+            session.participant_b(),
             "127.0.0.1:10000".parse().unwrap(),
+            Side::A,
             &[block],
         )
         .await;
@@ -2779,7 +3069,7 @@ mod tests {
     #[tokio::test]
     async fn sender_report_gated_on_audio_and_remote_addr() {
         let session = make_rtcp_test_session(41600, None).await;
-        let sockets = session.sockets().clone();
+        let sockets = session.leg_sockets().clone();
         let pa = session.participant_a().clone();
         let pb = session.participant_b().clone();
 

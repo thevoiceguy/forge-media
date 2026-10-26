@@ -112,7 +112,7 @@ validator = { version = "0.21", features = ["derive"] }
 zeroize = "1.7"
 
 # Benchmarking
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # eBPF/XDP (Linux only)
 aya = { version = "0.12", features = ["async_tokio"] }

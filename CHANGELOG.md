@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-11-01] — workspace release
+
+**Crate versions:** **forge-engine 0.8.1**, **forge-conference 0.14.3**,
+**forge-webrtc 0.8.1**, **forge-mixer 0.5.1**, **forge-recorder 0.2.1**,
+**forge-siprec 0.2.2**. Unchanged: bcg729-sys 0.1.0, forge-ai-stream 0.2.0,
+forge-api 0.5.0, forge-bfcp 0.1.1, forge-codecs 0.2.0, forge-core 0.2.2,
+forge-dtmf 0.2.1, forge-ha 0.3.0, forge-hep 0.0.1, forge-ice 0.3.0,
+forge-injection 0.2.0, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0,
+forge-mp4 0.1.1, forge-resampler 0.2.0, forge-rtp 0.7.1, forge-sdp 0.2.2,
+forge-storage 0.2.0, forge-transcoder 0.2.0, forge-transcription 0.2.0,
+forge-vad 0.2.0, forge-video 0.6.1, forge-video-codecs 0.1.4,
+forge-video-hw 0.3.0, forge-webm 0.1.0. Embeds siphon-rs **v2026.10.22.2**
+(unchanged).
+
+Dependencies and CI only; no API changes.
+
+### Changed
+
+- **parking_lot 0.13** (#191) in forge-engine, forge-conference,
+  forge-webrtc, forge-mixer and forge-recorder; none of them names a
+  parking_lot type in its public API.
+- **quick-xml 0.42** (#193) in forge-siprec.
+- **criterion 0.8** (#192), benchmarks only.
+- Sixteen patch-level updates (#190): serde, serde_json, tokio-util,
+  reqwest, aes, aes-gcm, sha2, zeroize, toml, thiserror, smol_str, libc,
+  lazy_static, clap, aya-build, openh264.
+
+### Fixed
+
+- **CI on the Ubuntu 26.04 runners** (#194): CMake 4 refuses projects
+  declaring compatibility below 3.5 (SVT-AV1's bundled cpuinfo,
+  audiopus_sys's bundled opus). The `video-codecs` action sets
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5` for the rest of the job and keys its
+  SVT-AV1 cache by runner image; `ci.yml` sets it too.
+
 ## [2026-10-24] — workspace release
 
 **Crate versions:** **forge-engine 0.8.0**, **forge-ha 0.3.0**, **forge-api

@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference"
-version = "0.14.2"
+version = "0.14.3"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "forge-engine"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1858,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mixer"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1881,7 +1881,7 @@ dependencies = [
 
 [[package]]
 name = "forge-recorder"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "audiopus",
  "bytes",
@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "forge-siprec"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "forge-webrtc"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bytes",
  "dashmap",

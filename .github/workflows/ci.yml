@@ -28,6 +28,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # CMake 4 on ubuntu-latest (26.04 since 2026-11) refuses projects
+  # declaring compatibility below 3.5, as audiopus_sys's bundled opus does.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 

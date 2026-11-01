@@ -7,7 +7,11 @@ description: >
   finds it with pkg-config; without it the crate builds its bundled opus
   1.3 with CMake, which CMake 4 refuses), and SVT-AV1 built from source
   at a pinned tag because Ubuntu's package is older than the 2.x API the
-  binding uses. The SVT-AV1 install is cached by tag.
+  binding uses. The SVT-AV1 install is cached by tag and runner image.
+  CMake 4 (ubuntu-latest is 26.04 since 2026-11) refuses a project
+  declaring compatibility below 3.5, as SVT-AV1's bundled cpuinfo and
+  audiopus_sys's bundled opus do; CMAKE_POLICY_VERSION_MINIMUM is set for
+  the rest of the job so CMake configures them anyway.
 inputs:
   svt-av1-tag:
     description: SVT-AV1 git tag to build
@@ -16,6 +20,13 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Let CMake 4 configure older projects
+      id: image
+      shell: bash
+      run: |
+        echo "CMAKE_POLICY_VERSION_MINIMUM=3.5" >> "$GITHUB_ENV"
+        echo "name=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
     - name: Install packaged codec libraries
       shell: bash
       run: |
@@ -28,7 +39,7 @@ runs:
       uses: actions/cache@v6
       with:
         path: /opt/svt-av1
-        key: svt-av1-${{ inputs.svt-av1-tag }}-${{ runner.os }}-${{ runner.arch }}
+        key: svt-av1-${{ inputs.svt-av1-tag }}-${{ steps.image.outputs.name }}-${{ runner.arch }}
 
     - name: Build SVT-AV1 from source
       if: steps.svt.outputs.cache-hit != 'true'

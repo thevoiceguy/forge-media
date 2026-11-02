@@ -37,10 +37,10 @@ subtle = { workspace = true }
 bytes = { workspace = true }
 hex = "0.4"
 # TURN long-term credential key = MD5(username:realm:password) (RFC 8489 §9.2.3)
-md5 = "0.7"
+md5 = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
 hex = "0.4"
 # TURN long-term credential key = MD5(username:realm:password) (RFC 8489 §9.2.3)
-md5 = "0.7"
+md5 = "0.8"

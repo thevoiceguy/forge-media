@@ -1269,17 +1269,23 @@ impl VideoRoom {
 
     /// Give the floor up, whoever holds it. Returns who did.
     fn release_floor(&self, reason: ContentStop) -> Option<String> {
-        let f = self.floor.lock().take()?;
+        // Hold the floor until `Stopped` is out. A packet that finds the
+        // floor free is refused (or granted) only after this, so nobody
+        // sees a `Refused` — or a new `Started` — before the `Stopped`
+        // that made it, and the refusal is not lost to the clear below.
+        let mut floor = self.floor.lock();
+        let f = floor.take()?;
         self.refused_told.lock().clear();
+        let _ = self.events.send(VideoRoomEvent::Content {
+            participant_id: f.participant_id.clone(),
+            event: ContentEvent::Stopped(reason),
+        });
+        drop(floor);
         counter!("forge_conference_video_content_stopped_total", "room_id" => self.id.clone(), "reason" => reason.name())
             .increment(1);
         gauge!("forge_conference_video_content_rooms").decrement(1.0);
         info!(room = %self.id, presenter = %f.participant_id, %reason, "screen share stopped");
         self.request_keyframes_for_content_change();
-        let _ = self.events.send(VideoRoomEvent::Content {
-            participant_id: f.participant_id.clone(),
-            event: ContentEvent::Stopped(reason),
-        });
         Some(f.participant_id)
     }
 

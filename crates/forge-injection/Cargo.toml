@@ -16,7 +16,7 @@ thiserror = { workspace = true }
 symphonia = { version = "0.6", features = ["all"] }
 
 # Resampling
-rubato = "0.15"
+rubato = "5.0"
 
 [features]
 default = []

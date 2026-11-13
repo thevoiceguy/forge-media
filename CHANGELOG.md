@@ -63,6 +63,9 @@ it needs.
 
 ### Fixed
 
+- **CI on Rust 1.100.**
+  - clippy's new `needless_bool` lint in forge-ai-stream's barge-in check.
+  - quinn-udp 0.5.16 (RUSTSEC-2026-0538) in the lockfile.
 - **forge-conference** (#200): a presenter's `Stopped` is sent before a
   refusal it causes. A content packet arriving while the floor was being
   released used to be refused ahead of the `Stopped`, or the refusal was

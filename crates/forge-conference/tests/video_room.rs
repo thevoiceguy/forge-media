@@ -8,14 +8,14 @@ use std::time::Duration;
 use bytes::Bytes;
 use forge_conference::video::{
     ContentEvent, ContentLayout, ContentRefusal, ContentStop, OutputScope, PassthroughMode,
-    RemoteSpeaker, SourceKey, StreamKind, SubscribeRequest, VideoBackend, VideoRoomEvent,
-    VideoRoomSettings, VideoState, View,
+    RemoteSpeaker, Simulcast, SourceKey, StreamKind, SubscribeRequest, VideoBackend,
+    VideoRoomEvent, VideoRoomSettings, VideoState, View,
 };
 use forge_conference::{AudioFormat, ConferenceRoom};
 use forge_core::VideoCodec;
 use forge_rtp::rtcp::{PsFeedback, RtcpPacket, RtpFeedback};
 use forge_rtp::video::payload::packetize;
-use forge_rtp::{AssemblerEvent, FrameAssembler, RtpPacket};
+use forge_rtp::{AssemblerEvent, FrameAssembler, RtpExtension, RtpPacket};
 use forge_video::codec::{EncoderSettings, VideoDecoder, VideoEncoder};
 use forge_video::frame::{HostFrame, Resolution, VideoFrame};
 use forge_video::layout::Layout;
@@ -267,6 +267,105 @@ async fn two_cameras_are_composited_into_a_grid_for_a_subscriber() {
     );
     audio.disable_video();
     assert!(audio.video().is_none());
+}
+
+/// The rid header extension's id in the simulcast test.
+const RID_EXT: u8 = 4;
+
+/// Name a packet's layer in the rid header extension, as a simulcast
+/// sender does on its first packets.
+fn with_rid(mut p: RtpPacket, rid: &str) -> RtpPacket {
+    p.header.version_flags |= 0x10;
+    p.extension = Some(RtpExtension::one_byte(&[(RID_EXT, rid.as_bytes())]));
+    p
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_simulcast_camera_is_decoded_from_one_layer_and_falls_back_when_it_stops() {
+    let audio = audio_room("simulcast");
+    audio.add_participant("alice", true).unwrap();
+    audio.add_participant("bob", false).unwrap();
+    let video = audio.enable_video(settings(256, 72, 30), &VideoBackend::raw());
+
+    video
+        .add_source_layered(
+            "alice",
+            StreamKind::Camera,
+            VideoCodec::VP8,
+            "",
+            Some(&Simulcast {
+                rids: vec!["h".into(), "l".into()],
+                rid_extension: Some(RID_EXT),
+            }),
+        )
+        .unwrap();
+    let mut sub = video
+        .subscribe("bob", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+
+    // Two sizes of the same camera, told apart in the composite by
+    // brightness. The raw codec's frames have no header the room can read
+    // a size from, so it ranks the layers by bitrate: the larger first.
+    let mut high = Camera::new(0x1111, 128, 72);
+    let mut low = Camera::new(0x2222, 64, 36);
+    // A packet naming no layer the room knows is dropped.
+    assert!(video
+        .push_rtp("alice", with_rid(low.frame(10).remove(0), "x"))
+        .is_empty());
+    let (both_tx, both_rx) = tokio::sync::oneshot::channel::<()>();
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            // Both layers, the rid only on the first frames' packets:
+            // after that the SSRC says which layer a packet is.
+            for i in 0..60 {
+                for p in high.frame(200) {
+                    let p = if i < 3 { with_rid(p, "h") } else { p };
+                    video.push_rtp("alice", p);
+                }
+                for p in low.frame(60) {
+                    let p = if i < 3 { with_rid(p, "l") } else { p };
+                    video.push_rtp("alice", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+            let _ = both_tx.send(());
+            // The sender's uplink sheds the large layer.
+            for _ in 0..90 {
+                for p in low.frame(60) {
+                    video.push_rtp("alice", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+
+    let mut screen = Screen::new();
+    // Alice's tile is the left half of a grid with Bob's avatar.
+    wait_for_composite(&mut sub.packets, &mut screen, |f| f.luma(64, 36) == 200).await;
+    let src = video.participant("alice").unwrap().source.unwrap();
+    assert_eq!(src.layers.len(), 2, "{:?}", src.layers);
+    let h = &src.layers[0];
+    let l = &src.layers[1];
+    assert_eq!((h.rid.as_deref(), h.ssrc), (Some("h"), 0x1111));
+    assert_eq!((l.rid.as_deref(), l.ssrc), (Some("l"), 0x2222));
+    assert!(h.decoding && !l.decoding, "{:?}", src.layers);
+    assert!(h.live && l.live);
+    assert_eq!(
+        src.resolution,
+        Resolution::new(128, 72),
+        "only the large layer is decoded"
+    );
+
+    both_rx.await.unwrap();
+    // What was composed before the large layer stopped is not the answer.
+    while sub.packets.try_recv().is_ok() {}
+    wait_for_composite(&mut sub.packets, &mut screen, |f| f.luma(64, 36) == 60).await;
+    let src = video.participant("alice").unwrap().source.unwrap();
+    assert!(src.layers[1].decoding, "{:?}", src.layers);
+    assert!(!src.layers[0].live);
+    assert_eq!(src.resolution, Resolution::new(64, 36));
+    feeder.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

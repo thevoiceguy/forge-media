@@ -50,7 +50,7 @@ use super::egress::{
     default_kbps, FlavorEncoder, OutputKey, OutputScope, Subscriber, VideoSubscription,
 };
 use super::pool::CodecPool;
-use super::source::{SourceLimits, VideoSource};
+use super::source::{LayerInfo, Simulcast, SourceLimits, VideoSource};
 use super::speaker::{ActiveSpeaker, Level};
 use crate::{ConferenceError, ConferenceRoom, Result};
 
@@ -638,6 +638,8 @@ pub struct VideoSourceInfo {
     pub decode_errors: u64,
     pub nacks_sent: u64,
     pub plis_sent: u64,
+    /// The sender's RTP streams: one, or a layer per simulcast rid.
+    pub layers: Vec<LayerInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1071,6 +1073,21 @@ impl VideoRoom {
         codec: VideoCodec,
         profile: &str,
     ) -> Result<()> {
+        self.add_source_layered(id, kind, codec, profile, None)
+    }
+
+    /// [`add_source_kind`](Self::add_source_kind) for a sender that
+    /// negotiated simulcast: a layer per rid, of which the room decodes
+    /// the smallest that fills the tallest tile it draws the source at.
+    /// `None`, or fewer than two rids, is a sender without simulcast.
+    pub fn add_source_layered(
+        &self,
+        id: &str,
+        kind: StreamKind,
+        codec: VideoCodec,
+        profile: &str,
+        simulcast: Option<&Simulcast>,
+    ) -> Result<()> {
         if !self.participants.contains_key(id) {
             return Err(ConferenceError::Internal(format!(
                 "participant {id} is not in room {}",
@@ -1091,7 +1108,7 @@ impl VideoRoom {
             // A screen is capped on its own terms, not the meeting's.
             StreamKind::Content => limits.max_resolution = settings.content_max_resolution,
         }
-        let source = Arc::new(VideoSource::new(
+        let source = Arc::new(VideoSource::layered(
             id,
             &self.id,
             kind,
@@ -1101,6 +1118,7 @@ impl VideoRoom {
             Arc::clone(&self.backend.hw),
             limits,
             rand::random(),
+            simulcast,
         ));
         if self
             .sources
@@ -1943,6 +1961,7 @@ impl VideoRoom {
             decode_errors: st.decode_errors.load(Ordering::Relaxed),
             nacks_sent: st.nacks_sent.load(Ordering::Relaxed),
             plis_sent: st.plis_sent.load(Ordering::Relaxed),
+            layers: s.layers(Instant::now()),
         }
     }
 
@@ -2338,6 +2357,7 @@ impl VideoRoom {
             self.walk_the_ladder(&settings, now);
         }
         let composing = self.decide_forwarding(&settings, &plans, &with_frames);
+        self.tell_sources_their_size(&plans, &composing, now);
 
         // Render each output and encode each flavor.
         let pts = (now.duration_since(self.started).as_secs_f64() * 90_000.0) as u32;
@@ -2797,6 +2817,33 @@ impl VideoRoom {
     /// any mode but `Off`, since there is no banner on it to lose
     /// (§15.6). Anything else — two tiles, a codec mismatch — is
     /// composed as before.
+    /// Tell each source the tallest it is drawn this tick, over every
+    /// output being composed, so a simulcast source decodes the smallest
+    /// layer that fills it. A camera is fitted 16:9 into its tile.
+    fn tell_sources_their_size(
+        &self,
+        plans: &HashMap<OutputKey, Plan>,
+        composing: &HashSet<OutputKey>,
+        now: Instant,
+    ) {
+        let mut wanted: HashMap<&SourceKey, u32> = HashMap::new();
+        for (key, plan) in plans.iter().filter(|(k, _)| composing.contains(*k)) {
+            let res = key.resolution;
+            let rects =
+                plan.layout
+                    .tiles(plan.tiles.len(), res.width, res.height, TILE_GAP_ESTIMATE);
+            for (tile, rect) in plan.tiles.iter().zip(rects) {
+                let fitted = rect.h.min(rect.w * 9 / 16);
+                let entry = wanted.entry(tile).or_insert(0);
+                *entry = (*entry).max(fitted);
+            }
+        }
+        for source in self.sources.iter() {
+            let height = wanted.get(source.key()).copied().unwrap_or(0);
+            source.value().set_wanted_height(height, now);
+        }
+    }
+
     fn decide_forwarding(
         &self,
         settings: &VideoRoomSettings,
@@ -2938,6 +2985,10 @@ impl VideoRoom {
         }
     }
 }
+
+/// The space between tiles, for sizing them before the compositor draws
+/// them: a few pixels either way do not change which layer fills a tile.
+const TILE_GAP_ESTIMATE: u32 = 4;
 
 /// What one output shows this tick: the arrangement and the tiles in it.
 struct Plan {

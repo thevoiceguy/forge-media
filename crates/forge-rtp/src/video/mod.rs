@@ -27,6 +27,7 @@
 
 pub mod assembler;
 pub mod cache;
+pub mod dimensions;
 pub mod payload;
 
 pub use assembler::{AssemblerEvent, FrameAssembler};

@@ -25,5 +25,5 @@ pub use room::{
     VideoRoom, VideoRoomEvent, VideoRoomSettings, VideoRoomStatus, VideoSourceInfo, VideoState,
     VideoSubscriberInfo,
 };
-pub use source::{SourceLimits, SourceStats};
+pub use source::{LayerInfo, Simulcast, SourceLimits, SourceStats};
 pub use speaker::{ActiveSpeaker, Level};

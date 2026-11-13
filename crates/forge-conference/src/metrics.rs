@@ -39,6 +39,7 @@ pub const M_VIDEO_TICKS: &str = "forge_conference_video_ticks_total";
 pub const M_VIDEO_FRAMES_DECODED: &str = "forge_conference_video_frames_decoded_total";
 pub const M_VIDEO_FRAMES_LOST: &str = "forge_conference_video_frames_lost_total";
 pub const M_VIDEO_FRAMES_DROPPED: &str = "forge_conference_video_frames_dropped_total";
+pub const M_VIDEO_PACKETS_UNMATCHED: &str = "forge_conference_video_packets_unmatched_total";
 pub const M_VIDEO_FRAMES_MOVED: &str = "forge_conference_video_frames_moved_total";
 pub const M_VIDEO_DECODE_ERRORS: &str = "forge_conference_video_decode_errors_total";
 pub const M_VIDEO_ENCODE_ERRORS: &str = "forge_conference_video_encode_errors_total";
@@ -76,6 +77,7 @@ pub const ALL_COUNTERS: &[&str] = &[
     M_VIDEO_FRAMES_DECODED,
     M_VIDEO_FRAMES_LOST,
     M_VIDEO_FRAMES_DROPPED,
+    M_VIDEO_PACKETS_UNMATCHED,
     M_VIDEO_FRAMES_MOVED,
     M_VIDEO_DECODE_ERRORS,
     M_VIDEO_ENCODE_ERRORS,
@@ -230,6 +232,10 @@ pub fn describe_metrics() {
     describe_counter!(
         M_VIDEO_FRAMES_DROPPED,
         "Video frames not decoded (invalid picture, queue, rate or size limit), by room_id."
+    );
+    describe_counter!(
+        M_VIDEO_PACKETS_UNMATCHED,
+        "Simulcast video packets dropped because neither their SSRC nor a rid named one of the sender's layers, by room_id."
     );
     describe_counter!(
         M_VIDEO_FRAMES_MOVED,

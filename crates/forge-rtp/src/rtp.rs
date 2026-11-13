@@ -91,6 +91,19 @@ pub struct RtpPacket {
 }
 
 impl RtpPacket {
+    /// The rid this packet names in the RFC 8852 RTP stream id header
+    /// extension negotiated as `extension_id`, if it carries one. A
+    /// simulcast sender puts it on its first packets (at least) so a
+    /// receiver can tell its streams apart before it knows their SSRCs.
+    pub fn stream_id(&self, extension_id: u8) -> Option<&str> {
+        let data = self.extension.as_ref()?.element(extension_id)?;
+        // The value is the rid itself, padded with NULs to a word.
+        let end = data.iter().position(|b| *b == 0).unwrap_or(data.len());
+        std::str::from_utf8(&data[..end])
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+
     /// Parse an RTP packet from bytes
     pub fn parse(data: Bytes) -> Result<Self, ForgeError> {
         if data.len() < RtpHeader::SIZE {
@@ -486,5 +499,27 @@ mod tests {
         assert_eq!(ext.profile, 0xBEDE);
         assert_eq!(ext.data.len(), 4);
         assert_eq!(&ext.data[..], &[0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn a_packet_names_its_rid_in_the_negotiated_extension() {
+        let header = RtpHeader {
+            version_flags: 0x90,
+            marker_payload_type: 96,
+            sequence_number: 1,
+            timestamp: 0,
+            ssrc: 7,
+        };
+        let packet = RtpPacket {
+            header,
+            csrc_list: Vec::new(),
+            extension: Some(RtpExtension::one_byte(&[(1, b"x"), (4, b"hi\0\0")])),
+            payload: Bytes::from_static(&[0]),
+            padding_len: 0,
+        };
+        assert_eq!(packet.stream_id(4), Some("hi"));
+        assert_eq!(packet.stream_id(2), None);
+        let reparsed = RtpPacket::parse(packet.to_bytes().freeze()).unwrap();
+        assert_eq!(reparsed.stream_id(4), Some("hi"));
     }
 }

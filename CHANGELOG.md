@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-11-13] — workspace release
+
+**Crate versions:** **forge-sdp 0.2.3**, **forge-rtp 0.7.2**,
+**forge-conference 0.15.0**. Every other crate is unchanged from 2026-11-01.
+Embeds siphon-rs **v2026.10.22.2** (unchanged).
+
+Simulcast in: phase R1a of FCP's `docs/FORWARDING_ROOMS.md`. A sender may
+now send its camera at up to three sizes, and a room decodes only the size
+it needs.
+
+### Added
+
+- **forge-sdp: `simulcast`.**
+  - Parses `a=rid` (RFC 8851) and `a=simulcast` (RFC 8853), with
+    alternatives and paused streams.
+  - Reads `a=extmap` ids at section or session level.
+  - `simulcast_layers` gives the streams a section sends or receives,
+    keeping only those with a matching `a=rid`.
+  - `write_simulcast` writes an offer or the answer that reverses one.
+  - Constants for the RFC 8852 rid header extensions.
+- **forge-rtp.**
+  - `RtpPacket::stream_id` reads a packet's rid from the negotiated header
+    extension.
+  - `video::dimensions::keyframe_dimensions` reads a keyframe's picture size
+    without decoding. For H.264 it parses the SPS: high-profile scaling lists,
+    both picture order count types and frame cropping. For VP8 it reads the
+    key frame header.
+- **forge-conference: layered sources.**
+  - `VideoRoom::add_source_layered` takes a `Simulcast` (rids and the rid
+    extension's id).
+  - Each layer has its own assembler, NACK and PLI state, bound to its SSRC
+    by the rid of its first packets.
+  - Only one layer is decoded: the smallest that fills the tallest tile the
+    room draws the source at, worked out every tick from the composed
+    outputs' layouts.
+  - A move up starts at once. A move down waits two seconds. A layer the
+    sender stops is left at once.
+  - A switch asks the new layer for a keyframe, again if none comes within a
+    second, and goes on decoding the old layer until the keyframe arrives.
+  - Heights come from keyframes. Where they cannot be read, the layer with
+    the highest bitrate stands for the tallest.
+  - `VideoSourceInfo.layers` (`LayerInfo`) reports each layer's rid, SSRC,
+    size, bitrate, liveness and whether it is decoded.
+  - `remote_ssrc` names the decoded layer, so the passthrough fast path
+    forwards that layer alone.
+  - A packet that names no layer is dropped and counted in
+    `forge_conference_video_packets_unmatched_total`.
+
+### Changed
+
+- **forge-conference: breaking.** `VideoSourceInfo` has a new `layers` field.
+- **Dependencies** (#196–#199): uuid 1.29, md5 0.8.1, dashmap 6.2.1 and
+  tokio-tungstenite 0.30.
+
+### Fixed
+
+- **CI on Rust 1.100.**
+  - clippy's new `needless_bool` lint in forge-ai-stream's barge-in check.
+  - quinn-udp 0.5.16 (RUSTSEC-2026-0538) in the lockfile.
+- **forge-conference** (#200): a presenter's `Stopped` is sent before a
+  refusal it causes. A content packet arriving while the floor was being
+  released used to be refused ahead of the `Stopped`, or the refusal was
+  never told.
+
 ## [2026-11-01] — workspace release
 
 **Crate versions:** **forge-engine 0.8.1**, **forge-conference 0.14.3**,

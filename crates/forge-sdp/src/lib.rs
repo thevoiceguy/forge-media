@@ -37,6 +37,7 @@ pub mod dtls;
 pub mod ice;
 pub mod profiles;
 pub mod sdes;
+pub mod simulcast;
 pub mod video;
 
 use thiserror::Error;
@@ -52,6 +53,11 @@ pub use ice::{IceAttributesExt, IceCandidateParams, MediaIceAttributesExt};
 
 // Re-export DTLS attribute helpers
 pub use dtls::{DtlsAttributesExt, DtlsSetup, MediaDtlsAttributesExt};
+pub use simulcast::{
+    extmap_id, media_extmap_id, push_extmap, rids, simulcast, simulcast_layers, write_simulcast,
+    Rid, RidDirection, Simulcast, SimulcastLayers, SimulcastStream, REPAIRED_RTP_STREAM_ID_URI,
+    RTP_STREAM_ID_URI,
+};
 pub use video::{
     active_video, answer_direction, answer_video, choose_video_codec, contents, direction_of,
     is_slides, label, reject_section, set_content, set_label, video_sections, Content, H264Fmtp,

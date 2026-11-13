@@ -162,12 +162,8 @@ impl BargeInDetector {
             return false;
         }
 
-        // In cooldown period?
-        if self.state == BargeInState::Cooldown {
-            return false;
-        }
-
-        true
+        // Not in the cooldown period.
+        self.state != BargeInState::Cooldown
     }
 
     /// Get current barge-in state

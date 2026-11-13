@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-11-13.1] — workspace release
+
+**Crate versions:** **forge-webrtc 0.9.0**. Every other crate is unchanged
+from 2026-11-13. Embeds siphon-rs **v2026.10.22.2** (unchanged).
+
+Simulcast from a browser: phase R1b of FCP's `docs/FORWARDING_ROOMS.md`.
+
+### Added
+
+- **forge-webrtc: simulcast on the camera's section.**
+  - `VideoConfig::simulcast` names the rids to ask for. An offer writes
+    `a=rid:<rid> recv`, `a=simulcast:recv …` and the RFC 8852 rid header
+    extension (`RID_EXTENSION_ID`, 2; `sdes:mid` stays 1).
+  - An answer takes up to that many streams of a remote that offers to send
+    simulcast, under the remote's own extension id.
+  - `RemoteVideo::simulcast` is what a remote says it sends.
+    `NegotiatedVideo::simulcast` is what was agreed: only rids we asked
+    for, and at least two.
+  - Chromium 153, given such an offer, answers `a=simulcast:send` and
+    makes one encoding per rid. Their sizes are left to the page.
+
+### Changed
+
+- **forge-webrtc: breaking.**
+  - `VideoConfig` and `LocalVideo` have a `simulcast` field.
+  - `NegotiatedVideo` has a `simulcast` field.
+  - `video_from_answer` takes the rids asked for.
+
 ## [2026-11-13] — workspace release
 
 **Crate versions:** **forge-sdp 0.2.3**, **forge-rtp 0.7.2**,

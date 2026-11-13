@@ -114,6 +114,13 @@ pub struct VideoConfig {
     /// direction. Its packets arrive as [`TransportEvent::ContentRtp`]
     /// and leave through [`PeerConnection::content_sender`].
     pub content: bool,
+    /// Simulcast to take on the camera's section (RFC 8853): the rids of
+    /// the streams we ask the remote to send, in order. Offered as
+    /// `a=rid:<rid> recv` and `a=simulcast:recv …` with the RFC 8852 rid
+    /// header extension; an answer takes up to this many of what a
+    /// remote offers. Empty asks for none. What was agreed is
+    /// [`NegotiatedVideo::simulcast`](crate::sdp::NegotiatedVideo::simulcast).
+    pub simulcast: Vec<String>,
 }
 
 impl Default for VideoConfig {
@@ -132,6 +139,7 @@ impl Default for VideoConfig {
             h264_profile_level_id: "42e01f".to_string(),
             max_kbps: None,
             content: false,
+            simulcast: Vec::new(),
         }
     }
 }
@@ -319,6 +327,7 @@ impl PeerConnection {
                 h264_profile_level_id: &v.h264_profile_level_id,
                 max_kbps: v.max_kbps,
                 content: false,
+                simulcast: &v.simulcast,
             }),
             content: self
                 .cfg
@@ -333,6 +342,7 @@ impl PeerConnection {
                     h264_profile_level_id: &v.h264_profile_level_id,
                     max_kbps: v.max_kbps,
                     content: true,
+                    simulcast: &[],
                 }),
             mid_ext,
             session_id: self.session_id,
@@ -504,12 +514,14 @@ impl PeerConnection {
         // of our codecs; a rejected section (or one we never offered)
         // leaves it unset.
         let video = match (&self.cfg.video, remote.video.as_ref()) {
-            (Some(cfg), Some(rv)) => video_from_answer(&cfg.codecs, cfg.direction, rv),
+            (Some(cfg), Some(rv)) => {
+                video_from_answer(&cfg.codecs, cfg.direction, &cfg.simulcast, rv)
+            }
             _ => None,
         };
         let content = match (&self.cfg.video, remote.content.as_ref()) {
             (Some(cfg), Some(rv)) if cfg.content => {
-                video_from_answer(&cfg.codecs, cfg.direction, rv)
+                video_from_answer(&cfg.codecs, cfg.direction, &[], rv)
             }
             _ => None,
         };

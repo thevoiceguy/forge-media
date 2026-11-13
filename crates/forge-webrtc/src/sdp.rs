@@ -29,7 +29,7 @@ use forge_ice::IceCandidate;
 use forge_sdp::{
     Attribute, Connection, DtlsAttributesExt, DtlsSetup, IceAttributesExt, MediaDescription,
     MediaDtlsAttributesExt, MediaIceAttributesExt, MediaType, Protocol, RtcpFeedbackAttr, SdpError,
-    SessionDescription, SessionDescriptionExt, VideoAttributesExt,
+    SessionDescription, SessionDescriptionExt, SimulcastLayers, VideoAttributesExt,
 };
 use smol_str::SmolStr;
 
@@ -113,6 +113,14 @@ pub fn rtp_clock(codec: AudioCodec) -> u32 {
 /// offer chose.
 pub const MID_EXTENSION_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
 
+/// The id the RFC 8852 rid header extension is offered under on a camera
+/// section that asks for simulcast; the `sdes:mid` extension is 1, and
+/// with BUNDLE every section shares one id space.
+pub const RID_EXTENSION_ID: u8 = 2;
+
+/// The most simulcast streams read from a remote's section.
+const MAX_SIMULCAST_STREAMS: usize = 4;
+
 /// The feedback messages this endpoint sends and acts on (RFC 4585 NACK
 /// and PLI, RFC 5104 FIR, REMB). Anything else a peer offers — notably
 /// `transport-cc`, which needs a header extension this endpoint does not
@@ -157,6 +165,8 @@ pub struct LocalVideo<'a> {
     /// A shared screen's section rather than the camera's: marked
     /// `a=content:slides` (RFC 4796).
     pub content: bool,
+    /// The simulcast streams to take, by rid (RFC 8853); empty for none.
+    pub simulcast: &'a [String],
 }
 
 /// Everything local that goes into an offer or answer.
@@ -251,6 +261,9 @@ pub struct RemoteVideo {
     pub protocol: Protocol,
     /// The section itself, for `fmtp` and `rtcp-fb` lookups.
     pub media: MediaDescription,
+    /// The simulcast streams the remote says it sends (RFC 8853), with
+    /// the id of its rid header extension.
+    pub simulcast: Option<SimulcastLayers>,
 }
 
 /// What the transport and the answer builder need from a remote description.
@@ -362,6 +375,10 @@ pub struct NegotiatedVideo {
     /// The section's `a=mid`, by which the `sdes:mid` header extension
     /// names its packets.
     pub mid: Option<String>,
+    /// The simulcast streams the remote sends us, when we asked for them
+    /// and it agreed: their rids in order and the id of the rid header
+    /// extension its first packets carry (RFC 8852).
+    pub simulcast: Option<SimulcastLayers>,
 }
 
 impl NegotiatedVideo {
@@ -371,8 +388,10 @@ impl NegotiatedVideo {
         direction: Direction,
         remote: &RemoteVideo,
         feedback: &[RtcpFeedbackAttr],
+        simulcast: Option<SimulcastLayers>,
     ) -> Self {
         Self {
+            simulcast,
             codec,
             payload_type,
             direction,
@@ -426,6 +445,7 @@ pub fn select_video_codec(
 pub fn video_from_answer(
     prefs: &[(VideoCodec, u8)],
     want: Direction,
+    simulcast: &[String],
     answer: &RemoteVideo,
 ) -> Option<NegotiatedVideo> {
     let &(codec, pt) = prefs.iter().find(|(c, pt)| answer.pt_of(*c) == Some(*pt))?;
@@ -437,8 +457,33 @@ pub fn video_from_answer(
     // The answer's direction is from the remote's point of view; ours is
     // what we offered, narrowed by what the answer allows.
     let direction = Direction::answer_for(answer.direction, want);
+    // Simulcast we asked for, as far as the answer agreed: only rids we
+    // offered, at most as many as we asked for.
+    let taken = answer
+        .simulcast
+        .clone()
+        .filter(|_| !simulcast.is_empty())
+        .map(|mut layers| {
+            let keep: Vec<bool> = layers
+                .rids
+                .iter()
+                .map(|r| simulcast.iter().any(|s| s == r.id.as_str()))
+                .collect();
+            let mut i = 0;
+            layers.rids.retain(|_| {
+                i += 1;
+                keep[i - 1]
+            });
+            let mut j = 0;
+            layers.paused.retain(|_| {
+                j += 1;
+                keep[j - 1]
+            });
+            layers
+        })
+        .filter(|l| l.rids.len() >= 2);
     Some(NegotiatedVideo::from_feedback(
-        codec, pt, direction, answer, &feedback,
+        codec, pt, direction, answer, &feedback, taken,
     ))
 }
 
@@ -611,6 +656,12 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
             ssrc: first_ssrc(&m.attributes),
             protocol: m.protocol.clone(),
             media: m.clone(),
+            simulcast: forge_sdp::simulcast_layers(
+                &desc,
+                m,
+                forge_sdp::RidDirection::Send,
+                MAX_SIMULCAST_STREAMS,
+            ),
         }
     };
     let video = video_index.map(remote_video);
@@ -855,6 +906,26 @@ fn video_section(
             push_value(a, "rtcp-fb", format!("{} {}{param}", f.pt, fb.kind));
         }
     }
+    // Simulcast asked for, when this section receives (RFC 8853 §5.3).
+    if !lv.simulcast.is_empty() && direction.receives() {
+        forge_sdp::write_simulcast(
+            &mut media,
+            forge_sdp::RidDirection::Recv,
+            &forge_sdp::SimulcastLayers {
+                rids: lv
+                    .simulcast
+                    .iter()
+                    .map(|id| forge_sdp::Rid {
+                        id: SmolStr::new(id),
+                        direction: forge_sdp::RidDirection::Recv,
+                        restrictions: SmolStr::default(),
+                    })
+                    .collect(),
+                paused: vec![false; lv.simulcast.len()],
+                rid_extension: Some(RID_EXTENSION_ID),
+            },
+        );
+    }
     source_attrs(
         &mut media,
         p,
@@ -1045,8 +1116,41 @@ pub fn build_answer(
             fmtp: rv.fmtp_of(pt),
             feedback: feedback.clone(),
         };
-        let section = video_section(p, lv, port, rv.protocol.clone(), &mid, direction, &[format]);
-        let negotiated = NegotiatedVideo::from_feedback(codec, pt, direction, rv, &feedback);
+        // Simulcast the remote offers to send, taken when we asked for it:
+        // its streams in its order, as many as we asked for, under its
+        // rid extension id.
+        let taken = rv
+            .simulcast
+            .clone()
+            .filter(|_| !lv.simulcast.is_empty() && direction.receives())
+            .map(|mut layers| {
+                layers.rids.truncate(lv.simulcast.len());
+                layers.paused.truncate(lv.simulcast.len());
+                for rid in &mut layers.rids {
+                    rid.restrictions = SmolStr::default();
+                }
+                layers
+            })
+            .filter(|l| l.rids.len() >= 2);
+        // The section writes no simulcast of its own in an answer; the
+        // offer's, reversed, goes in below.
+        let quiet = LocalVideo {
+            simulcast: &[],
+            ..lv.clone()
+        };
+        let mut section = video_section(
+            p,
+            &quiet,
+            port,
+            rv.protocol.clone(),
+            &mid,
+            direction,
+            &[format],
+        );
+        if let Some(layers) = &taken {
+            forge_sdp::write_simulcast(&mut section, forge_sdp::RidDirection::Recv, layers);
+        }
+        let negotiated = NegotiatedVideo::from_feedback(codec, pt, direction, rv, &feedback, taken);
         Some((rv.index, section, mid, negotiated))
     };
     let accepted_video = match (&p.video, &remote.video) {
@@ -1176,6 +1280,7 @@ a=fmtp:97 apt=96\r\n";
             h264_profile_level_id: "42e01f",
             max_kbps: Some(1200),
             content: false,
+            simulcast: &[],
         }
     }
 
@@ -1557,6 +1662,127 @@ a=ssrc:2222 cname:user@example.com\r\n";
         assert_eq!(v.feedback_for(96).len(), 4);
     }
 
+    /// Add a browser's simulcast send lines (as Chromium 153 writes them in
+    /// an answer to a `simulcast:recv` offer) to the camera's section.
+    fn with_browser_simulcast(sdp: &str, ext: u8) -> String {
+        let at = sdp.find("m=video").expect("a video section");
+        let (head, video) = sdp.split_at(at);
+        // Before the next section, or at the end.
+        let end = video[1..].find("m=").map(|i| i + 1).unwrap_or(video.len());
+        let (camera, rest) = video.split_at(end);
+        format!(
+            "{head}{camera}a=extmap:{ext} urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\r\n\
+             a=rid:h send\r\na=rid:l send\r\na=simulcast:send h;l\r\n{rest}"
+        )
+    }
+
+    #[test]
+    fn an_offer_asks_for_simulcast_and_a_browser_s_answer_agrees() {
+        let cands = one_cand();
+        let prefs = [(VideoCodec::H264, 96), (VideoCodec::VP8, 97)];
+        let rids = ["h".to_string(), "l".to_string()];
+        let mut offerer = local(&cands);
+        offerer.video = Some(LocalVideo {
+            simulcast: &rids,
+            ..local_video(&prefs)
+        });
+        let offer = build_offer(&offerer);
+        let camera = &offer[offer.find("m=video").unwrap()..];
+        assert!(
+            camera.contains("a=extmap:2 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\r\n"),
+            "{camera}"
+        );
+        assert!(
+            camera.contains("a=rid:h recv\r\na=rid:l recv\r\na=simulcast:recv h;l\r\n"),
+            "{camera}"
+        );
+
+        // The browser's answer: our codec, its two encodings named.
+        let remote_offer = parse_remote(&offer).unwrap();
+        let mut answerer = local(&cands);
+        answerer.setup = DtlsSetup::Active;
+        answerer.video = Some(local_video(&prefs));
+        let (answer, _) = build_answer(&answerer, &remote_offer).unwrap();
+        assert!(
+            !answer.contains("a=simulcast"),
+            "forge-webrtc sends no simulcast: {answer}"
+        );
+        let answer = with_browser_simulcast(&answer, 2);
+
+        let remote_answer = parse_remote(&answer).unwrap();
+        let v = video_from_answer(
+            &prefs,
+            Direction::SendRecv,
+            &rids,
+            remote_answer.video.as_ref().unwrap(),
+        )
+        .expect("video accepted");
+        let layers = v.simulcast.expect("simulcast agreed");
+        let ids: Vec<&str> = layers.rids.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["h", "l"]);
+        assert_eq!(layers.rid_extension, Some(2));
+
+        // Not asked for: an answer's simulcast is ignored.
+        let v = video_from_answer(
+            &prefs,
+            Direction::SendRecv,
+            &[],
+            remote_answer.video.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert!(v.simulcast.is_none());
+        // Only rids we offered count, and one is not simulcast.
+        let only_h = ["h".to_string(), "x".to_string()];
+        let v = video_from_answer(
+            &prefs,
+            Direction::SendRecv,
+            &only_h,
+            remote_answer.video.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert!(v.simulcast.is_none());
+    }
+
+    #[test]
+    fn a_remote_offering_simulcast_is_answered_with_it_when_asked_for() {
+        let cands = one_cand();
+        let prefs = [(VideoCodec::VP8, 97)];
+        let mut offerer = local(&cands);
+        offerer.video = Some(local_video(&prefs));
+        let offer = with_browser_simulcast(&build_offer(&offerer), 9);
+        let remote_offer = parse_remote(&offer).unwrap();
+
+        let rids = ["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut answerer = local(&cands);
+        answerer.setup = DtlsSetup::Active;
+        answerer.video = Some(LocalVideo {
+            simulcast: &rids,
+            ..local_video(&prefs)
+        });
+        let (answer, negotiated) = build_answer(&answerer, &remote_offer).unwrap();
+        let camera = &answer[answer.find("m=video").unwrap()..];
+        // The offer's streams received, under the offer's extension id.
+        assert!(
+            camera.contains("a=extmap:9 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\r\n"),
+            "{camera}"
+        );
+        assert!(
+            camera.contains("a=rid:h recv\r\na=rid:l recv\r\na=simulcast:recv h;l\r\n"),
+            "{camera}"
+        );
+        let layers = negotiated.video.unwrap().simulcast.expect("taken");
+        assert_eq!(layers.rids.len(), 2);
+        assert_eq!(layers.rid_extension, Some(9));
+
+        // Not asked for: no simulcast in the answer.
+        let mut plain = local(&cands);
+        plain.setup = DtlsSetup::Active;
+        plain.video = Some(local_video(&prefs));
+        let (answer, negotiated) = build_answer(&plain, &remote_offer).unwrap();
+        assert!(!answer.contains("a=simulcast"), "{answer}");
+        assert!(negotiated.video.unwrap().simulcast.is_none());
+    }
+
     #[test]
     fn video_from_answer_pins_our_payload_type_and_their_feedback() {
         // Offerer prefers H.264; answerer only carries VP8 and does not
@@ -1584,6 +1810,7 @@ a=ssrc:2222 cname:user@example.com\r\n";
         let v = video_from_answer(
             &prefs,
             Direction::SendRecv,
+            &[],
             remote_answer.video.as_ref().unwrap(),
         )
         .expect("video accepted");
@@ -1691,6 +1918,7 @@ a=ssrc:2222 cname:x\r\n";
             h264_profile_level_id: "42e01f",
             max_kbps: None,
             content: false,
+            simulcast: &[],
         });
         p.content = Some(LocalVideo {
             ssrc: 20,
@@ -1700,6 +1928,7 @@ a=ssrc:2222 cname:x\r\n";
             h264_profile_level_id: "42e01f",
             max_kbps: None,
             content: true,
+            simulcast: &[],
         });
         let (answer, negotiated) = build_answer(&p, &remote).unwrap();
         let v = negotiated.video.expect("camera pinned");
@@ -1745,6 +1974,7 @@ a=ssrc:2222 cname:x\r\n";
             h264_profile_level_id: "42e01f",
             max_kbps: None,
             content: true,
+            simulcast: &[],
         });
         p.mid_ext = Some(1);
         let offer = build_offer(&p);

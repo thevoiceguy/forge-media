@@ -122,7 +122,7 @@ aya-build = "0.2"
 
 # Audio processing
 symphonia = { version = "0.6", features = ["all"] }
-rubato = "0.15"
+rubato = "5.0"
 
 # Codecs
 opus = "0.3"

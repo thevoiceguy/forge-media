@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "aes",
  "aes-gcm",

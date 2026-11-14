@@ -11,6 +11,7 @@ use forge_conference::video::{
     RemoteSpeaker, Simulcast, SourceKey, StreamKind, SubscribeRequest, VideoBackend,
     VideoRoomEvent, VideoRoomSettings, VideoState, View,
 };
+use forge_conference::video::{ForwardRequest, StreamTarget, StreamWant, ViewRequest};
 use forge_conference::{AudioFormat, ConferenceRoom};
 use forge_core::VideoCodec;
 use forge_rtp::rtcp::{PsFeedback, RtcpPacket, RtpFeedback};
@@ -1890,4 +1891,355 @@ async fn a_host_stops_a_share_and_the_presenter_cannot_take_it_back_by_sending()
         }
     ));
     audio.disable_video();
+}
+
+/// What a forwarding viewer receives, stream by stream: each SSRC
+/// reassembled and decoded on its own, as a client with one decoder per
+/// stream does.
+struct Viewer {
+    rx: tokio::sync::mpsc::Receiver<Bytes>,
+    screens: std::collections::HashMap<u32, Screen>,
+    /// The last picture of each stream, and every sequence number seen.
+    last: std::collections::HashMap<u32, HostFrame>,
+    seqs: std::collections::HashMap<u32, Vec<u16>>,
+}
+
+impl Viewer {
+    fn new(rx: tokio::sync::mpsc::Receiver<Bytes>) -> Self {
+        Self {
+            rx,
+            screens: Default::default(),
+            last: Default::default(),
+            seqs: Default::default(),
+        }
+    }
+
+    /// Take packets until `check` holds of the pictures so far.
+    async fn until(&mut self, what: &str, check: impl Fn(&Self) -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while !check(self) {
+            let bytes = timeout(deadline - tokio::time::Instant::now(), self.rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("never: {what}"))
+                .expect("forwarding open");
+            self.take(bytes);
+        }
+    }
+
+    fn take(&mut self, bytes: Bytes) {
+        let p = RtpPacket::parse(bytes.clone()).unwrap();
+        assert!(
+            !p.header.extension(),
+            "no sender's extension reaches a viewer"
+        );
+        assert_eq!(p.header.payload_type(), 96, "the viewer's payload type");
+        let ssrc = p.header.ssrc;
+        self.seqs
+            .entry(ssrc)
+            .or_default()
+            .push(p.header.sequence_number);
+        if let Some(f) = self
+            .screens
+            .entry(ssrc)
+            .or_insert_with(Screen::new)
+            .push(bytes)
+        {
+            self.last.insert(ssrc, f);
+        }
+    }
+
+    fn luma(&self, ssrc: u32) -> Option<u8> {
+        self.last.get(&ssrc).map(|f| f.luma(2, 2))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_viewer_is_forwarded_each_camera_at_the_layer_its_budget_reaches() {
+    let audio = audio_room("forwarding");
+    for id in ["alice", "carol", "bob"] {
+        audio.add_participant(id, false).unwrap();
+    }
+    let video = audio.enable_video(settings(256, 144, 30), &VideoBackend::raw());
+    let mut events = video.events();
+    video
+        .add_source_layered(
+            "alice",
+            StreamKind::Camera,
+            VideoCodec::VP8,
+            "",
+            Some(&Simulcast {
+                rids: vec!["h".into(), "l".into()],
+                rid_extension: Some(RID_EXT),
+            }),
+        )
+        .unwrap();
+    video.add_source("carol", VideoCodec::VP8, "").unwrap();
+    let sub = video
+        .forward(
+            "bob",
+            ForwardRequest {
+                codec: VideoCodec::VP8,
+                profile: String::new(),
+                payload_type: 96,
+            },
+        )
+        .unwrap();
+    assert!(video.is_forwarding("bob"));
+    let want = |id: &str, priority| StreamWant {
+        target: StreamTarget::Participant(id.into()),
+        max_height: None,
+        priority,
+    };
+    video
+        .set_view(
+            "bob",
+            ViewRequest {
+                streams: Some(vec![want("carol", None), want("alice", Some(1))]),
+                max_streams: None,
+            },
+        )
+        .unwrap();
+
+    let mut high = Camera::new(0x1111, 128, 72);
+    let mut low = Camera::new(0x2222, 64, 36);
+    let mut carol = Camera::new(0x3333, 64, 36);
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            for i in 0..600 {
+                for p in high.frame(200) {
+                    video.push_rtp("alice", if i < 3 { with_rid(p, "h") } else { p });
+                }
+                for p in low.frame(60) {
+                    video.push_rtp("alice", if i < 3 { with_rid(p, "l") } else { p });
+                }
+                for p in carol.frame(120) {
+                    video.push_rtp("carol", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+
+    // Without a REMB there is no limit: Alice's large layer, and Carol.
+    let mut bob = Viewer::new(sub.packets);
+    let streams = loop {
+        let s = video.forwarded_streams("bob");
+        if s.iter().all(|s| !s.paused && s.participant.is_some()) && s.len() == 2 {
+            break s;
+        }
+        let _ = timeout(Duration::from_millis(50), bob.rx.recv()).await;
+    };
+    let (carol_ssrc, alice_ssrc) = (streams[0].ssrc, streams[1].ssrc);
+    assert_ne!(carol_ssrc, alice_ssrc);
+    assert_eq!(streams[1].participant.as_deref(), Some("alice"));
+    assert_eq!(streams[0].participant.as_deref(), Some("carol"));
+    bob.until("Alice's large layer and Carol", |b| {
+        b.luma(alice_ssrc) == Some(200) && b.luma(carol_ssrc) == Some(120)
+    })
+    .await;
+    assert_eq!(
+        bob.last[&alice_ssrc].resolution(),
+        Resolution::new(128, 72),
+        "her own picture, as she sent it"
+    );
+    assert_eq!(video.forwarded_streams("bob")[1].rid.as_deref(), Some("h"));
+    // The roster heard whose each SSRC is.
+    let mut told = None;
+    while let Ok(ev) = events.try_recv() {
+        if let VideoRoomEvent::Streams {
+            participant_id,
+            streams,
+        } = ev
+        {
+            assert_eq!(participant_id, "bob");
+            told = Some(streams);
+        }
+    }
+    let told = told.expect("a Streams event");
+    assert!(told.iter().any(|s| s.ssrc == alice_ssrc));
+
+    // Nobody takes the composite: nothing is encoded, nothing decoded.
+    let status = video.status();
+    assert_eq!(status.encoders, 0);
+    let decoded = |id: &str| {
+        video
+            .participant(id)
+            .unwrap()
+            .source
+            .unwrap()
+            .frames_decoded
+    };
+    let before = (decoded("alice"), decoded("carol"));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!((decoded("alice"), decoded("carol")), before, "no decoding");
+    assert_eq!(
+        video.participant("alice").unwrap().state,
+        VideoState::On,
+        "on while her packets come"
+    );
+
+    // A lost packet is sent again from the stream's own cache.
+    let seq = *bob.seqs[&alice_ssrc].last().unwrap();
+    video.handle_feedback(
+        "bob",
+        &RtcpPacket::TransportFeedback(RtpFeedback::nack(9, alice_ssrc, &[seq])),
+    );
+    let info = video.participant("bob").unwrap().viewer.unwrap();
+    assert_eq!(info.packets_retransmitted, 1, "{info:?}");
+
+    // A budget that covers both small layers but not Alice's large one:
+    // she drops to her small layer at once, under the same SSRC.
+    let layers = video.participant("alice").unwrap().source.unwrap().layers;
+    let carol_kbps = video
+        .participant("carol")
+        .unwrap()
+        .source
+        .unwrap()
+        .bitrate_kbps;
+    let (h_kbps, l_kbps) = (layers[0].bitrate_kbps, layers[1].bitrate_kbps);
+    assert!(h_kbps > l_kbps && l_kbps > 0, "{layers:?}");
+    let remb = |kbps: u32| {
+        RtcpPacket::PayloadFeedback(PsFeedback::remb(9, u64::from(kbps) * 1000, vec![]))
+    };
+    video.handle_feedback("bob", &remb(l_kbps + carol_kbps + (h_kbps - l_kbps) / 2));
+    while bob.rx.try_recv().is_ok() {}
+    bob.last.clear();
+    bob.until("Alice's small layer on her stream", |b| {
+        b.luma(alice_ssrc) == Some(60)
+    })
+    .await;
+    assert_eq!(bob.last[&alice_ssrc].resolution(), Resolution::new(64, 36));
+    let s = video.forwarded_streams("bob");
+    assert_eq!((s[1].ssrc, s[1].rid.as_deref()), (alice_ssrc, Some("l")));
+
+    // Room for Alice alone, the first priority: Carol is paused.
+    video.handle_feedback("bob", &remb(l_kbps + carol_kbps / 2));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !video.forwarded_streams("bob")[0].paused && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let s = video.forwarded_streams("bob");
+    assert!(s[0].paused && !s[1].paused, "{s:?}");
+    assert_eq!(s[0].ssrc, carol_ssrc, "a paused stream keeps its SSRC");
+
+    // Someone composing again brings decoding back.
+    let _composite = video
+        .subscribe("carol", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while decoded("alice") == before.0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(decoded("alice") > before.0, "decoding again");
+
+    video.unforward("bob");
+    assert!(!video.is_forwarding("bob"));
+    feeder.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_default_view_follows_the_speaker_and_a_hidden_camera_is_paused() {
+    let audio = audio_room("default-view");
+    // Bob, the viewer, joined first: the speaker stream is never his own.
+    for id in ["bob", "alice", "carol"] {
+        audio.add_participant(id, false).unwrap();
+    }
+    let video = audio.enable_video(settings(256, 144, 30), &VideoBackend::raw());
+    for id in ["bob", "alice", "carol"] {
+        video.add_source(id, VideoCodec::VP8, "").unwrap();
+    }
+    let sub = video
+        .forward(
+            "bob",
+            ForwardRequest {
+                codec: VideoCodec::VP8,
+                profile: String::new(),
+                payload_type: 96,
+            },
+        )
+        .unwrap();
+    let mut cams: Vec<(&str, Camera, u8)> = vec![
+        ("bob", Camera::new(0xB0B, 64, 36), 30),
+        ("alice", Camera::new(0xA11CE, 64, 36), 200),
+        ("carol", Camera::new(0xCA401, 64, 36), 120),
+    ];
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            loop {
+                for (id, cam, luma) in cams.iter_mut() {
+                    for p in cam.frame(*luma) {
+                        video.push_rtp(id, p);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+    let mut bob = Viewer::new(sub.packets);
+    let wait_for =
+        |what: &'static str,
+         check: Box<dyn Fn(&[forge_conference::video::ForwardedStreamInfo]) -> bool>| {
+            let video = Arc::clone(&video);
+            async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let s = video.forwarded_streams("bob");
+                    if check(&s) {
+                        return s;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "never: {what}: {s:?}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+    // The speaker, then everyone else; nobody has spoken, so the speaker
+    // stream shows whoever joined first who is not Bob.
+    let s = wait_for(
+        "the default view",
+        Box::new(|s| s.len() == 3 && s.iter().all(|s| s.participant.is_some())),
+    )
+    .await;
+    assert_eq!(s[0].target, StreamTarget::Speaker);
+    assert_eq!(s[0].participant.as_deref(), Some("alice"));
+    assert_eq!(
+        s[1..]
+            .iter()
+            .map(|s| s.participant.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("alice"), Some("carol")]
+    );
+    let speaker_ssrc = s[0].ssrc;
+    bob.until("the speaker's stream", |b| {
+        b.luma(speaker_ssrc) == Some(200)
+    })
+    .await;
+
+    // A host hides Alice: her own stream pauses, and the speaker stream
+    // moves to someone who can be seen.
+    video.set_participant_video_enabled("alice", false);
+    let s = wait_for(
+        "Alice paused",
+        Box::new(|s| s[1].paused && s[0].participant.as_deref() == Some("carol")),
+    )
+    .await;
+    assert_eq!(s[0].ssrc, speaker_ssrc, "the speaker stream keeps its SSRC");
+    bob.until("Carol on the speaker stream", |b| {
+        b.luma(speaker_ssrc) == Some(120)
+    })
+    .await;
+
+    // Carol leaves: her stream goes.
+    let carol_ssrc = s[2].ssrc;
+    video.participant_left("carol");
+    wait_for(
+        "Carol's stream gone",
+        Box::new(move |s| s.iter().all(|s| s.ssrc != carol_ssrc)),
+    )
+    .await;
+    feeder.abort();
 }

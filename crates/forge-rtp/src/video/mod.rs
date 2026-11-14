@@ -241,6 +241,68 @@ pub mod vp8 {
         (len <= p.len()).then_some(len)
     }
 
+    /// Where a descriptor's picture indices are: the PictureID's offset
+    /// and whether it is 15 bits wide (`M`), and TL0PICIDX's offset.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct Indices {
+        pub picture_id: Option<(usize, bool)>,
+        pub tl0_pic_idx: Option<usize>,
+    }
+
+    /// The picture indices a descriptor carries, or `None` when it is
+    /// truncated.
+    pub fn indices(p: &[u8]) -> Option<Indices> {
+        descriptor_len(p)?;
+        let mut found = Indices::default();
+        if p[0] & 0x80 == 0 {
+            return Some(found);
+        }
+        let x = p[1];
+        let mut off = 2;
+        if x & 0x80 != 0 {
+            let wide = p[off] & 0x80 != 0;
+            found.picture_id = Some((off, wide));
+            off += if wide { 2 } else { 1 };
+        }
+        if x & 0x40 != 0 {
+            found.tl0_pic_idx = Some(off);
+        }
+        Some(found)
+    }
+
+    /// The PictureID, 7 or 15 bits as sent.
+    pub fn picture_id(p: &[u8]) -> Option<u16> {
+        let (off, wide) = indices(p)?.picture_id?;
+        Some(if wide {
+            u16::from_be_bytes([p[off] & 0x7F, p[off + 1]])
+        } else {
+            (p[off] & 0x7F) as u16
+        })
+    }
+
+    /// The TL0PICIDX, if the descriptor carries one.
+    pub fn tl0_pic_idx(p: &[u8]) -> Option<u8> {
+        Some(p[indices(p)?.tl0_pic_idx?])
+    }
+
+    /// Write `picture_id` (kept to the field's width) and `tl0_pic_idx`
+    /// into a descriptor that carries them; a field it lacks is left out.
+    pub fn set_indices(p: &mut [u8], picture_id: Option<u16>, tl0_pic_idx: Option<u8>) {
+        let Some(at) = indices(p) else { return };
+        if let (Some((off, wide)), Some(id)) = (at.picture_id, picture_id) {
+            if wide {
+                let [hi, lo] = (id & 0x7FFF).to_be_bytes();
+                p[off] = 0x80 | hi;
+                p[off + 1] = lo;
+            } else {
+                p[off] = (id & 0x7F) as u8;
+            }
+        }
+        if let (Some(off), Some(idx)) = (at.tl0_pic_idx, tl0_pic_idx) {
+            p[off] = idx;
+        }
+    }
+
     pub fn inspect(payload: &[u8]) -> PayloadInfo {
         let Some(len) = descriptor_len(payload) else {
             return PayloadInfo::NONE;
@@ -327,6 +389,13 @@ pub mod av1 {
 /// then the old source keeps flowing and the new source's packets are
 /// dropped, so the receiver never decodes a frame whose references it
 /// has not seen.
+///
+/// Two more things keep a switch invisible. VP8's PictureID and
+/// TL0PICIDX are rewritten to carry on from the last ones sent: a
+/// receiver that sees them jump takes the gap for lost frames and asks
+/// for a keyframe. And the sender's header extensions are taken off: they
+/// were negotiated with the sender, and a receiver would read its ids as
+/// its own (a simulcast rid among them).
 #[derive(Debug)]
 pub struct StreamRewriter {
     codec: VideoCodec,
@@ -339,6 +408,9 @@ pub struct StreamRewriter {
     last_seq: u16,
     last_ts: u32,
     last_sent: Option<Instant>,
+    /// VP8's last PictureID (15 bits) and TL0PICIDX written.
+    last_picture_id: Option<u16>,
+    last_tl0_pic_idx: Option<u8>,
     switches: u64,
 }
 
@@ -347,6 +419,9 @@ struct Source {
     ssrc: u32,
     seq_offset: u16,
     ts_offset: u32,
+    /// Added to VP8's PictureID (mod 2^15) and TL0PICIDX (mod 2^8).
+    picture_id_offset: u16,
+    tl0_offset: u8,
 }
 
 impl StreamRewriter {
@@ -361,6 +436,8 @@ impl StreamRewriter {
             last_seq: first_seq.wrapping_sub(1),
             last_ts: first_ts,
             last_sent: None,
+            last_picture_id: None,
+            last_tl0_pic_idx: None,
             switches: 0,
         }
     }
@@ -396,7 +473,9 @@ impl StreamRewriter {
         true
     }
 
-    /// Stop forwarding anything (the source left).
+    /// Stop forwarding anything (the source left, or the stream is
+    /// paused). A later [`select`](Self::select) carries the stream on
+    /// from where it stopped, its timestamps advanced by the time between.
     pub fn clear(&mut self) {
         self.current = None;
         self.pending = None;
@@ -425,7 +504,44 @@ impl StreamRewriter {
         out.header.ssrc = self.out_ssrc;
         out.header.sequence_number = seq;
         out.header.timestamp = ts;
+        out.extension = None;
+        if self.codec == VideoCodec::VP8 {
+            self.rewrite_vp8(&mut out, source);
+        }
         Some(out)
+    }
+
+    /// Carry VP8's PictureID and TL0PICIDX on by the source's offsets,
+    /// and remember the newest written so the next switch follows them.
+    fn rewrite_vp8(&mut self, out: &mut RtpPacket, source: Source) {
+        let id = vp8::picture_id(&out.payload)
+            .map(|id| id.wrapping_add(source.picture_id_offset) & 0x7FFF);
+        let idx = vp8::tl0_pic_idx(&out.payload).map(|i| i.wrapping_add(source.tl0_offset));
+        if id.is_none() && idx.is_none() {
+            return;
+        }
+        if source.picture_id_offset != 0 || source.tl0_offset != 0 {
+            let mut payload = out.payload.to_vec();
+            vp8::set_indices(&mut payload, id, idx);
+            out.payload = payload.into();
+        }
+        if let Some(id) = id {
+            // Newer by serial-number arithmetic over 15 bits.
+            let newer = self
+                .last_picture_id
+                .is_none_or(|last| id.wrapping_sub(last) & 0x7FFF < 0x4000);
+            if newer {
+                self.last_picture_id = Some(id);
+            }
+        }
+        if let Some(idx) = idx {
+            let newer = self
+                .last_tl0_pic_idx
+                .is_none_or(|last| idx.wrapping_sub(last) < 0x80);
+            if newer {
+                self.last_tl0_pic_idx = Some(idx);
+            }
+        }
     }
 
     /// Make `ssrc` current, with offsets so that `packet` continues the
@@ -440,15 +556,33 @@ impl StreamRewriter {
             .unwrap_or(0)
             .max(3000);
         let next_seq = self.last_seq.wrapping_add(1);
-        let next_ts = if self.current.is_some() {
+        // Anything sent before — from another source, or from this one
+        // before a pause — means time has moved on since.
+        let next_ts = if self.last_sent.is_some() {
             self.last_ts.wrapping_add(gap_ticks)
         } else {
             self.last_ts
         };
+        // VP8's indices carry on from the last written: the keyframe is
+        // the next picture, and the next TL0 picture.
+        let (mut picture_id_offset, mut tl0_offset) = (0, 0);
+        if self.codec == VideoCodec::VP8 {
+            if let (Some(last), Some(id)) = (self.last_picture_id, vp8::picture_id(&packet.payload))
+            {
+                picture_id_offset = last.wrapping_add(1).wrapping_sub(id) & 0x7FFF;
+            }
+            if let (Some(last), Some(idx)) =
+                (self.last_tl0_pic_idx, vp8::tl0_pic_idx(&packet.payload))
+            {
+                tl0_offset = last.wrapping_add(1).wrapping_sub(idx);
+            }
+        }
         self.current = Some(Source {
             ssrc,
             seq_offset: next_seq.wrapping_sub(packet.header.sequence_number),
             ts_offset: next_ts.wrapping_sub(packet.header.timestamp),
+            picture_id_offset,
+            tl0_offset,
         });
         self.pending = None;
         self.switches += 1;
@@ -628,6 +762,123 @@ mod tests {
         assert_eq!(seq(&c), 0);
         assert_eq!(ts(&c).wrapping_sub(ts(&a)), 6000);
         assert!(ts(&c) < ts(&a), "wrapped");
+    }
+
+    /// A VP8 packet with an extended descriptor: a 15-bit PictureID (or a
+    /// 7-bit one), a TL0PICIDX, and a payload header whose P bit says
+    /// whether it is a keyframe.
+    fn vp8(picture_id: u16, wide: bool, tl0: u8, keyframe: bool) -> Vec<u8> {
+        let mut d = vec![0x90, 0xC0];
+        if wide {
+            d.extend_from_slice(&(0x8000 | picture_id).to_be_bytes());
+        } else {
+            d.push((picture_id & 0x7F) as u8);
+        }
+        d.push(tl0);
+        d.push(if keyframe { 0x00 } else { 0x01 });
+        d
+    }
+
+    fn indices_of(p: &RtpPacket) -> (u16, u8) {
+        (
+            vp8::picture_id(&p.payload).unwrap(),
+            vp8::tl0_pic_idx(&p.payload).unwrap(),
+        )
+    }
+
+    #[test]
+    fn vp8_indices_are_read_and_written_where_the_descriptor_has_them() {
+        let mut p = vp8(0x1234, true, 7, true);
+        assert_eq!(vp8::picture_id(&p), Some(0x1234));
+        assert_eq!(vp8::tl0_pic_idx(&p), Some(7));
+        vp8::set_indices(&mut p, Some(0x7FFF), Some(255));
+        assert_eq!(vp8::picture_id(&p), Some(0x7FFF));
+        assert_eq!(vp8::tl0_pic_idx(&p), Some(255));
+        assert!(inspect(VideoCodec::VP8, &p).keyframe, "payload untouched");
+
+        let mut narrow = vp8(100, false, 3, false);
+        assert_eq!(vp8::picture_id(&narrow), Some(100));
+        vp8::set_indices(&mut narrow, Some(130), None);
+        assert_eq!(vp8::picture_id(&narrow), Some(130 & 0x7F), "kept to 7 bits");
+        assert_eq!(vp8::tl0_pic_idx(&narrow), Some(3));
+
+        // The minimal descriptor carries neither.
+        assert_eq!(vp8::picture_id(&[0x10, 0x00]), None);
+        assert_eq!(vp8::tl0_pic_idx(&[0x10, 0x00]), None);
+        assert_eq!(vp8::picture_id(&[0x90]), None, "truncated");
+    }
+
+    #[test]
+    fn a_switch_carries_vp8_s_picture_indices_on_from_the_last_sent() {
+        let mut rw = StreamRewriter::new(VideoCodec::VP8, 1, 0, 0);
+        rw.select(0xA);
+        // A's own numbering is forwarded as it is.
+        let a0 = rw
+            .feed(&pkt(0xA, 10, 0, &vp8(500, true, 40, true)))
+            .unwrap();
+        assert_eq!(indices_of(&a0), (500, 40));
+        let a1 = rw
+            .feed(&pkt(0xA, 11, 3000, &vp8(501, true, 41, false)))
+            .unwrap();
+        assert_eq!(indices_of(&a1), (501, 41));
+
+        // B numbers its pictures its own way; after the switch they carry
+        // on from A's: the keyframe is the next picture and TL0 picture.
+        rw.select(0xB);
+        let b0 = rw
+            .feed(&pkt(0xB, 90, 0, &vp8(30_000, true, 200, true)))
+            .unwrap();
+        assert_eq!(indices_of(&b0), (502, 42));
+        // A second packet of the same picture keeps its index.
+        let b0b = rw
+            .feed(&pkt(0xB, 91, 0, &vp8(30_000, true, 200, false)))
+            .unwrap();
+        assert_eq!(indices_of(&b0b), (502, 42));
+        // Across B's own wrap of both fields.
+        let mut rw2 = StreamRewriter::new(VideoCodec::VP8, 1, 0, 0);
+        rw2.select(0xA);
+        rw2.feed(&pkt(0xA, 1, 0, &vp8(0x7FFE, true, 254, true)))
+            .unwrap();
+        rw2.select(0xB);
+        let b = rw2.feed(&pkt(0xB, 5, 0, &vp8(9, true, 9, true))).unwrap();
+        assert_eq!(indices_of(&b), (0x7FFF, 255));
+        let b = rw2
+            .feed(&pkt(0xB, 6, 3000, &vp8(10, true, 10, false)))
+            .unwrap();
+        assert_eq!(indices_of(&b), (0, 0), "both wrap");
+
+        // A 7-bit sender after a 15-bit one carries on within its 7 bits.
+        rw.select(0xC);
+        let c = rw.feed(&pkt(0xC, 1, 0, &vp8(5, false, 1, true))).unwrap();
+        assert_eq!(indices_of(&c), (503 & 0x7F, 43));
+    }
+
+    #[test]
+    fn the_senders_header_extensions_do_not_reach_the_receiver() {
+        let mut rw = StreamRewriter::new(VideoCodec::H264, 1, 0, 0);
+        rw.select(0xA);
+        let mut p = pkt(0xA, 1, 0, IDR);
+        p.extension = Some(crate::rtp::RtpExtension::one_byte(&[(2, b"h")]));
+        let out = rw.feed(&p).unwrap();
+        assert!(out.extension.is_none());
+        let back = RtpPacket::parse(out.to_bytes().freeze()).unwrap();
+        assert!(!back.header.extension(), "the X bit goes with it");
+        assert_eq!(&back.payload[..], IDR);
+    }
+
+    #[test]
+    fn a_stream_resumed_after_a_pause_moves_its_clock_on() {
+        let mut rw = StreamRewriter::new(VideoCodec::H264, 1, 0, 0);
+        rw.select(0xA);
+        let before = rw.feed(&pkt(0xA, 1, 1000, IDR)).unwrap();
+        rw.clear();
+        assert!(rw.select(0xA), "a keyframe is needed again");
+        let after = rw.feed(&pkt(0xA, 50, 1000 + 90_000, IDR)).unwrap();
+        assert_eq!(seq(&after), seq(&before).wrapping_add(1));
+        assert!(
+            ts(&after).wrapping_sub(ts(&before)) >= 3000,
+            "a new picture, not the old one's timestamp"
+        );
     }
 
     #[test]

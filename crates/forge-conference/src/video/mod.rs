@@ -8,6 +8,7 @@
 
 pub mod content;
 pub mod egress;
+pub mod forward;
 pub mod pool;
 pub mod room;
 pub mod source;
@@ -18,6 +19,10 @@ pub use content::{
     ContentStop, SourceKey, StreamKind, View,
 };
 pub use egress::{default_kbps, OutputKey, OutputScope, SubscriberStats, VideoSubscription};
+pub use forward::{
+    allocate, Ask, ForwardRequest, ForwardSubscription, ForwardedStreamInfo, LayerOption,
+    StreamTarget, StreamWant, VideoViewerInfo, ViewRequest,
+};
 pub use pool::CodecPool;
 pub use room::{
     PassthroughMode, RecordRequest, RecordedFrame, RecordingSink, RemoteSpeaker, SubscribeRequest,

@@ -94,6 +94,9 @@ pub fn default_kbps(res: Resolution) -> u32 {
     }
 }
 
+/// One frame at 30 fps on the 90 kHz clock.
+const FRAME_TICKS: u32 = 3000;
+
 /// Counters the room reports per subscriber.
 #[derive(Debug, Default)]
 pub struct SubscriberStats {
@@ -378,7 +381,11 @@ impl Subscriber {
         }
         let s = self.seq.lock();
         let codec = self.watching.lock().flavor.codec;
-        let mut rewriter = StreamRewriter::new(codec, self.ssrc, s.seq, s.ts);
+        // The first forwarded picture comes after the last composed one,
+        // never on its timestamp: two pictures sharing one would be put
+        // together as one frame by the receiver.
+        let mut rewriter =
+            StreamRewriter::new(codec, self.ssrc, s.seq, s.ts.wrapping_add(FRAME_TICKS));
         drop(s);
         let wants_keyframe = rewriter.select(source_ssrc);
         *f = Some(Forwarding {

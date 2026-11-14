@@ -49,6 +49,10 @@ use super::content::{
 use super::egress::{
     default_kbps, FlavorEncoder, OutputKey, OutputScope, Subscriber, VideoSubscription,
 };
+use super::forward::{
+    allocate, Ask, ForwardRequest, ForwardSubscription, ForwardedStreamInfo, LayerOption, Step,
+    Stream, StreamTarget, VideoViewerInfo, ViewRequest, Viewer,
+};
 use super::pool::CodecPool;
 use super::source::{LayerInfo, Simulcast, SourceLimits, VideoSource};
 use super::speaker::{ActiveSpeaker, Level};
@@ -416,6 +420,13 @@ pub enum VideoRoomEvent {
         from: Resolution,
         to: Resolution,
     },
+    /// What a forwarding viewer is sent changed: a stream came or went,
+    /// moved to another person, or paused or resumed. What a roster says
+    /// about the viewer's streams (FORWARDING_ROOMS §2.2).
+    Streams {
+        participant_id: String,
+        streams: Vec<ForwardedStreamInfo>,
+    },
     /// Layout, pin, spotlight or content layout changed.
     LayoutChanged {
         layout: Layout,
@@ -620,6 +631,9 @@ pub struct VideoParticipantInfo {
     pub subscription: Option<VideoSubscriberInfo>,
     /// The content section's egress side, when the participant has one.
     pub content_subscription: Option<VideoSubscriberInfo>,
+    /// The main section's egress side when it takes streams rather than
+    /// the composite (FORWARDING_ROOMS §2.1).
+    pub viewer: Option<VideoViewerInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -745,6 +759,11 @@ pub struct VideoRoom {
     /// Subscribers on the passthrough path, so ingress can skip the scan
     /// entirely in the ordinary case where nobody is.
     forwarders: AtomicU32,
+    /// Participants whose camera section takes streams, by participant.
+    viewers: DashMap<String, Arc<Viewer>>,
+    /// For each source, the viewers' streams its packets are offered to:
+    /// made again each tick, read for every packet.
+    routes: RwLock<Arc<HashMap<SourceKey, Vec<(Arc<Viewer>, Arc<Stream>)>>>>,
     /// This node's name, which settles a tie against a peer's claim.
     local_node: Mutex<String>,
     control: Mutex<Control>,
@@ -797,6 +816,8 @@ impl VideoRoom {
             speaker: Mutex::new(ActiveSpeaker::default()),
             remote_speakers: DashMap::new(),
             forwarders: AtomicU32::new(0),
+            viewers: DashMap::new(),
+            routes: RwLock::new(Arc::new(HashMap::new())),
             local_node: Mutex::new(String::new()),
             control: Mutex::new(Control::default()),
             fps: AtomicU32::new(fps),
@@ -891,6 +912,7 @@ impl VideoRoom {
         self.remove_source_kind(id, StreamKind::Content);
         self.unsubscribe_kind(id, StreamKind::Camera);
         self.unsubscribe_kind(id, StreamKind::Content);
+        self.unforward(id);
         self.refused_told.lock().remove(id);
         self.speaker.lock().remove(id);
         let mut c = self.control.lock();
@@ -1188,6 +1210,15 @@ impl VideoRoom {
             for sub in self.subscribers.iter() {
                 if sub.forwards_from(&key) {
                     sub.send_forwarded(&packet);
+                }
+            }
+        }
+        // Forwarding viewers: only the streams that carry this source.
+        let routes = Arc::clone(&self.routes.read());
+        if let Some(streams) = routes.get(&key) {
+            for (viewer, stream) in streams {
+                if let Some(bytes) = stream.offer(&packet, &key, viewer.payload_type) {
+                    viewer.deliver(bytes);
                 }
             }
         }
@@ -1498,6 +1529,9 @@ impl VideoRoom {
         };
 
         self.unsubscribe_kind(id, kind);
+        if kind == StreamKind::Camera {
+            self.unforward(id);
+        }
 
         let wants_keyframe = self.ensure_encoder(&output, &flavor, &settings)?;
 
@@ -1535,6 +1569,314 @@ impl VideoRoom {
         };
         self.release_flavor(&sub.output(), &sub.flavor());
         debug!(room = %self.id, participant = %id, %kind, "video subscriber removed");
+    }
+
+    // ---- forwarding viewers (FORWARDING_ROOMS §2.1–§2.6) -----------------
+
+    /// The participant's camera section takes each person's own stream
+    /// instead of the composite, from the next tick: the default view
+    /// until [`set_view`](Self::set_view) says otherwise. Replaces a
+    /// composite subscription on that section.
+    pub fn forward(&self, id: &str, req: ForwardRequest) -> Result<ForwardSubscription> {
+        if !self.participants.contains_key(id) {
+            return Err(ConferenceError::Internal(format!(
+                "participant {id} is not in room {}",
+                self.id
+            )));
+        }
+        self.unsubscribe_kind(id, StreamKind::Camera);
+        let settings = self.settings.read().clone();
+        let (viewer, rx) = Viewer::new(
+            id,
+            &req,
+            settings.rtx_cache_packets,
+            // Several streams share the channel.
+            settings.egress_queue_packets.saturating_mul(4),
+        );
+        self.viewers.insert(id.to_string(), viewer);
+        info!(room = %self.id, participant = %id, codec = %req.codec, "video viewer forwarding");
+        Ok(ForwardSubscription {
+            payload_type: req.payload_type,
+            packets: rx,
+        })
+    }
+
+    /// Stop forwarding to the participant.
+    pub fn unforward(&self, id: &str) {
+        if self.viewers.remove(id).is_some() {
+            debug!(room = %self.id, participant = %id, "video viewer removed");
+        }
+    }
+
+    pub fn is_forwarding(&self, id: &str) -> bool {
+        self.viewers.contains_key(id)
+    }
+
+    /// What the viewer asks to be sent (the `fcp-view` INFO, §2.3). It
+    /// takes effect on the next tick; [`VideoRoomEvent::Streams`] says
+    /// what was granted.
+    pub fn set_view(&self, id: &str, view: ViewRequest) -> Result<()> {
+        let Some(viewer) = self.viewers.get(id) else {
+            return Err(ConferenceError::Internal(format!(
+                "participant {id} is not forwarding in room {}",
+                self.id
+            )));
+        };
+        *viewer.view.lock() = view;
+        Ok(())
+    }
+
+    /// The viewer's streams as they stand.
+    pub fn forwarded_streams(&self, id: &str) -> Vec<ForwardedStreamInfo> {
+        self.viewers
+            .get(id)
+            .map(|v| v.streams.lock().iter().map(|s| s.info()).collect())
+            .unwrap_or_default()
+    }
+
+    fn viewer_info(v: &Viewer) -> VideoViewerInfo {
+        VideoViewerInfo {
+            codec: v.codec,
+            streams: v.streams.lock().iter().map(|s| s.info()).collect(),
+            remb_kbps: v.remb_kbps.load(Ordering::Relaxed),
+            packets_sent: v.stats.packets_sent.load(Ordering::Relaxed),
+            packets_dropped: v.stats.packets_dropped.load(Ordering::Relaxed),
+            nacks_received: v.stats.nacks_received.load(Ordering::Relaxed),
+            packets_retransmitted: v.stats.packets_retransmitted.load(Ordering::Relaxed),
+            plis_received: v.stats.plis_received.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Whether a source's own stream is something this viewer can take
+    /// as it stands.
+    fn forwardable_to_viewer(&self, source: &VideoSource, viewer: &Viewer) -> bool {
+        if source.codec() != viewer.codec {
+            return false;
+        }
+        if viewer.codec == VideoCodec::H264 {
+            let from = forge_sdp::video::H264Fmtp::parse(source.profile());
+            let to = forge_sdp::video::H264Fmtp::parse(&viewer.profile);
+            return from.forwardable_to(&to);
+        }
+        true
+    }
+
+    /// The camera a viewer can be sent for this participant: there, not
+    /// hidden by a host, sending, in a codec the viewer takes.
+    fn camera_for_viewer(&self, participant: &str, viewer: &Viewer) -> Option<Arc<VideoSource>> {
+        if !self.participants.get(participant)?.enabled {
+            return None;
+        }
+        let source = self.sources.get(&SourceKey::camera(participant))?;
+        self.forwardable_to_viewer(&source, viewer)
+            .then(|| Arc::clone(source.value()))
+    }
+
+    /// Whom a viewer's speaker stream shows: the active speaker unless it
+    /// is the viewer; then whoever it shows already; then whoever spoke
+    /// last; then whoever joined first.
+    fn speaker_for(
+        &self,
+        viewer: &Viewer,
+        stream: &Stream,
+        speaker: Option<&str>,
+        recent: &[String],
+        join_order: &[String],
+    ) -> Option<String> {
+        let usable = |id: &str| id != viewer.id && self.camera_for_viewer(id, viewer).is_some();
+        if let Some(s) = speaker.filter(|s| usable(s)) {
+            return Some(s.to_string());
+        }
+        let shown = {
+            let st = stream.state.lock();
+            st.pending
+                .clone()
+                .or_else(|| st.source.clone())
+                .map(|k| k.participant)
+        };
+        if let Some(s) = shown.filter(|s| usable(s)) {
+            return Some(s);
+        }
+        recent
+            .iter()
+            .chain(join_order)
+            .find(|id| usable(id))
+            .cloned()
+    }
+
+    /// One tick of forwarding: each viewer's view resolved into streams,
+    /// the budget spent across them, layers switched, and the routes
+    /// ingress uses made again.
+    fn forward_tick(
+        &self,
+        speaker: Option<&str>,
+        recent: &[String],
+        join_order: &[String],
+        now: Instant,
+    ) {
+        if self.viewers.is_empty() {
+            if !self.routes.read().is_empty() {
+                *self.routes.write() = Arc::new(HashMap::new());
+                for s in self.sources.iter() {
+                    s.set_forwarded_layers(&[]);
+                }
+            }
+            return;
+        }
+        let mut routes: HashMap<SourceKey, Vec<(Arc<Viewer>, Arc<Stream>)>> = HashMap::new();
+        let mut forwarded: HashMap<SourceKey, Vec<usize>> = HashMap::new();
+        // Everyone by recency of speech, then join order.
+        let mut by_recency: Vec<String> = Vec::new();
+        for id in recent.iter().chain(join_order) {
+            if !by_recency.contains(id) {
+                by_recency.push(id.clone());
+            }
+        }
+        let viewers: Vec<Arc<Viewer>> = self.viewers.iter().map(|v| Arc::clone(&v)).collect();
+        for viewer in viewers {
+            let others: Vec<String> = by_recency
+                .iter()
+                .filter(|id| **id != viewer.id && self.sources.contains_key(&SourceKey::camera(id)))
+                .cloned()
+                .collect();
+            let wants = viewer.view.lock().resolve(&others);
+            // A target asked for keeps its stream, and so its SSRC.
+            let streams: Vec<Arc<Stream>> = {
+                let mut current = viewer.streams.lock();
+                let mut next: Vec<Arc<Stream>> = Vec::with_capacity(wants.len());
+                for w in &wants {
+                    match current.iter().find(|s| s.target == w.target) {
+                        Some(s) => next.push(Arc::clone(s)),
+                        None => {
+                            let taken: Vec<u32> =
+                                current.iter().chain(next.iter()).map(|s| s.ssrc).collect();
+                            next.push(Arc::new(viewer.new_stream(w.target.clone(), &taken)));
+                        }
+                    }
+                }
+                *current = next.clone();
+                next
+            };
+            let resolved: Vec<Option<(SourceKey, Vec<LayerOption>)>> = wants
+                .iter()
+                .zip(&streams)
+                .map(|(w, stream)| {
+                    let participant = match &w.target {
+                        StreamTarget::Participant(p) => Some(p.clone()).filter(|p| *p != viewer.id),
+                        StreamTarget::Speaker => {
+                            self.speaker_for(&viewer, stream, speaker, recent, join_order)
+                        }
+                    }?;
+                    let source = self.camera_for_viewer(&participant, &viewer)?;
+                    Some((
+                        SourceKey::camera(&participant),
+                        source.forwardable_layers(now),
+                    ))
+                })
+                .collect();
+            let asks: Vec<Ask<'_>> = wants
+                .iter()
+                .zip(&resolved)
+                .map(|(w, r)| Ask {
+                    priority: w.priority,
+                    max_height: w.max_height.unwrap_or(u32::MAX),
+                    layers: r.as_ref().map(|(_, l)| l.as_slice()).unwrap_or(&[]),
+                })
+                .collect();
+            let chosen = allocate(viewer.budget_kbps(), &asks);
+            for ((stream, r), pick) in streams.iter().zip(&resolved).zip(chosen) {
+                let want = r
+                    .as_ref()
+                    .zip(pick)
+                    .map(|((key, layers), j)| (key.clone(), layers[j].clone()));
+                if let Step::Select(key, layer, true) = stream.step(want, now) {
+                    if let Some(s) = self.sources.get(&key) {
+                        s.request_layer_keyframe(layer.index);
+                    }
+                }
+                for key in stream.routes() {
+                    routes
+                        .entry(key)
+                        .or_default()
+                        .push((Arc::clone(&viewer), Arc::clone(stream)));
+                }
+                if let Some((key, index)) = stream.keyframe_target() {
+                    forwarded.entry(key).or_default().push(index);
+                }
+            }
+            let infos: Vec<ForwardedStreamInfo> = streams.iter().map(|s| s.info()).collect();
+            let keys: Vec<_> = infos.iter().map(ForwardedStreamInfo::roster_key).collect();
+            let changed = {
+                let mut reported = viewer.reported.lock();
+                let changed = *reported != keys;
+                if changed {
+                    *reported = keys;
+                }
+                changed
+            };
+            if changed {
+                let _ = self.events.send(VideoRoomEvent::Streams {
+                    participant_id: viewer.id.clone(),
+                    streams: infos,
+                });
+            }
+        }
+        *self.routes.write() = Arc::new(routes);
+        for s in self.sources.iter() {
+            s.set_forwarded_layers(forwarded.get(s.key()).map(Vec::as_slice).unwrap_or(&[]));
+        }
+    }
+
+    /// RTCP from a forwarding viewer: a PLI or FIR asks the layer its
+    /// stream carries for a keyframe, a NACK is answered from that
+    /// stream's cache, and REMB is the budget.
+    fn viewer_feedback(&self, viewer: &Viewer, packet: &RtcpPacket) {
+        let keyframe = |ssrc: u32| {
+            if let Some((key, index)) = viewer.stream(ssrc).and_then(|s| s.keyframe_target()) {
+                if let Some(s) = self.sources.get(&key) {
+                    s.request_layer_keyframe(index);
+                }
+            }
+        };
+        match packet {
+            RtcpPacket::PayloadFeedback(fb) => match &fb.kind {
+                PayloadFeedback::Pli => {
+                    viewer.stats.plis_received.fetch_add(1, Ordering::Relaxed);
+                    keyframe(fb.media_ssrc);
+                }
+                PayloadFeedback::Fir(entries) => {
+                    viewer.stats.plis_received.fetch_add(1, Ordering::Relaxed);
+                    for e in entries {
+                        keyframe(e.ssrc);
+                    }
+                }
+                PayloadFeedback::Remb { bitrate_bps, .. } => {
+                    let kbps = (*bitrate_bps / 1000).min(u32::MAX as u64) as u32;
+                    viewer.remb_kbps.store(kbps, Ordering::Relaxed);
+                }
+                PayloadFeedback::Other { .. } => {}
+            },
+            RtcpPacket::TransportFeedback(fb) => {
+                if let TransportFeedback::Nack(entries) = &fb.kind {
+                    viewer.stats.nacks_received.fetch_add(1, Ordering::Relaxed);
+                    let Some(stream) = viewer.stream(fb.media_ssrc) else {
+                        return;
+                    };
+                    let mut seqs: Vec<u16> = entries.iter().flat_map(|e| e.lost()).collect();
+                    seqs.sort_unstable();
+                    seqs.dedup();
+                    for b in stream.retransmit(&seqs) {
+                        if viewer.deliver(b) {
+                            viewer
+                                .stats
+                                .packets_retransmitted
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     // ---- placing stages on the device, or the host ----------------------------
@@ -1786,6 +2128,12 @@ impl VideoRoom {
 
     /// [`handle_feedback`](Self::handle_feedback) for either channel.
     pub fn handle_feedback_kind(&self, id: &str, kind: StreamKind, packet: &RtcpPacket) {
+        if kind == StreamKind::Camera {
+            if let Some(viewer) = self.viewers.get(id).map(|v| Arc::clone(&v)) {
+                self.viewer_feedback(&viewer, packet);
+                return;
+            }
+        }
         let Some(sub) = self.subscribers.get(&SourceKey::new(id, kind)) else {
             return;
         };
@@ -2012,6 +2360,7 @@ impl VideoRoom {
             content,
             subscription,
             content_subscription,
+            viewer: self.viewers.get(id).map(|v| Self::viewer_info(&v)),
         }
     }
 
@@ -2209,6 +2558,7 @@ impl VideoRoom {
             .collect();
         ordered.sort();
         let join_order: Vec<String> = ordered.into_iter().map(|(_, id)| id).collect();
+        self.forward_tick(speaker.as_deref(), &recent, &join_order, now);
 
         struct Tile {
             key: SourceKey,
@@ -2228,6 +2578,12 @@ impl VideoRoom {
             let (frame, state) = match self.sources.get(&camera) {
                 Some(_) if !p.enabled => (None, VideoState::Disabled),
                 Some(s) if s.failed() => (None, VideoState::Failed),
+                // Not decoded while nothing composes it: on while its
+                // packets keep coming.
+                Some(s) if !s.is_decoding() => match s.last_packet_age(now) {
+                    Some(age) if age <= settings.freeze_timeout => (None, VideoState::On),
+                    _ => (None, VideoState::Lost),
+                },
                 Some(s) => match s.frame(now, settings.freeze_timeout) {
                     Some(f) => (Some(f), VideoState::On),
                     None => (None, VideoState::Lost),
@@ -2241,6 +2597,10 @@ impl VideoRoom {
             let (content_frame, content_state) = match self.sources.get(&content) {
                 Some(_) if !p.content_enabled => (None, VideoState::Disabled),
                 Some(s) if s.failed() => (None, VideoState::Failed),
+                Some(s) if !s.is_decoding() => match s.last_packet_age(now) {
+                    Some(_) => (None, VideoState::On),
+                    None => (None, VideoState::Lost),
+                },
                 Some(s) => match s.frame(now, Duration::MAX) {
                     Some(f) => (Some(f), VideoState::On),
                     None => (None, VideoState::Lost),
@@ -2355,6 +2715,12 @@ impl VideoRoom {
             .collect();
         if settings.ladder {
             self.walk_the_ladder(&settings, now);
+        }
+        // Nothing composed at all — every viewer forwarded, no recording,
+        // no phone — is nothing decoded either (FORWARDING_ROOMS §2.1).
+        let compose_any = !plans.is_empty();
+        for s in self.sources.iter() {
+            s.set_decoding(compose_any);
         }
         let composing = self.decide_forwarding(&settings, &plans, &with_frames);
         self.tell_sources_their_size(&plans, &composing, now);

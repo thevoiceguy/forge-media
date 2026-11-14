@@ -190,6 +190,9 @@ struct Layer {
     /// From the last keyframe whose header could be read.
     width: AtomicU32,
     height: AtomicU32,
+    /// Whether a viewer is being sent this layer's packets: its losses
+    /// are then worth a NACK even when it is not decoded.
+    forwarded: AtomicBool,
 }
 
 impl Layer {
@@ -214,6 +217,7 @@ impl Layer {
             bitrate_kbps: AtomicU32::new(0),
             width: AtomicU32::new(0),
             height: AtomicU32::new(0),
+            forwarded: AtomicBool::new(false),
         }
     }
 
@@ -294,6 +298,9 @@ pub struct VideoSource {
     /// A decoder error on the pool asks the decoded layer for a keyframe
     /// on its next packet.
     decode_error: Arc<AtomicBool>,
+    /// Whether frames are decoded at all: not while the room composes
+    /// nothing, where every viewer is forwarded (FORWARDING_ROOMS §2.1).
+    decoding_on: AtomicBool,
     rate: Mutex<RateWindow>,
     /// Frames accepted in the current second, for the fps limit.
     accepted_this_second: Mutex<(Instant, u32)>,
@@ -369,6 +376,7 @@ impl VideoSource {
             failed: Arc::new(AtomicBool::new(false)),
             // The first packet of the decoded layer asks for a keyframe.
             decode_error: Arc::new(AtomicBool::new(true)),
+            decoding_on: AtomicBool::new(true),
             rate: Mutex::new(RateWindow {
                 since: now,
                 bytes: 0,
@@ -601,10 +609,15 @@ impl VideoSource {
 
         // Whether this layer's frames are decoded, or it is the one a
         // switch is waiting on: only those are worth NACKs and PLIs.
+        let on = self.decoding_on.load(Ordering::Relaxed);
         let (decoding, target) = {
             let c = self.choice.lock();
-            (c.decoding == index, c.target.map(|t| t.0) == Some(index))
+            (
+                on && c.decoding == index,
+                on && c.target.map(|t| t.0) == Some(index),
+            )
         };
+        let forwarded = layer.forwarded.load(Ordering::Relaxed);
         let mut want_keyframe = false;
         let mut to_decode: Vec<CodedFrame> = Vec::new();
         let mut switched = false;
@@ -694,7 +707,7 @@ impl VideoSource {
 
         let ssrc = layer.ssrc.load(Ordering::Relaxed);
         let mut out = Vec::new();
-        if decoding || target || switched {
+        if decoding || target || switched || forwarded {
             let lost = self.nack_list(layer, &missing, now);
             if !lost.is_empty() {
                 self.stats.nacks_sent.fetch_add(1, Ordering::Relaxed);
@@ -737,6 +750,72 @@ impl VideoSource {
         if let Some((t, _)) = c.target {
             self.layers[t].pli_pending.store(true, Ordering::Release);
         }
+    }
+
+    /// Ask one layer for a keyframe at its next packet: a viewer's stream
+    /// is switching to it. The layer's gate keeps many such asks to one
+    /// PLI.
+    pub fn request_layer_keyframe(&self, index: usize) {
+        if let Some(l) = self.layers.get(index) {
+            l.pli_pending.store(true, Ordering::Release);
+        }
+    }
+
+    /// Which layers viewers are being sent.
+    pub fn set_forwarded_layers(&self, forwarded: &[usize]) {
+        for (i, l) in self.layers.iter().enumerate() {
+            l.forwarded.store(forwarded.contains(&i), Ordering::Relaxed);
+        }
+    }
+
+    /// Decode, or stop decoding while nothing composes the source. On
+    /// again, every layer waits for a keyframe — the decoder has not seen
+    /// the pictures that came meanwhile — and the decoded layer is asked
+    /// for one.
+    pub fn set_decoding(&self, on: bool) {
+        if self.decoding_on.swap(on, Ordering::AcqRel) == on {
+            return;
+        }
+        if on {
+            for l in &self.layers {
+                l.valid.store(false, Ordering::Relaxed);
+            }
+            self.request_keyframe();
+        }
+        debug!(participant = %self.id, on, "video source decoding");
+    }
+
+    pub fn is_decoding(&self) -> bool {
+        self.decoding_on.load(Ordering::Relaxed)
+    }
+
+    /// The live layers a viewer could be sent, smallest first.
+    pub fn forwardable_layers(&self, now: Instant) -> Vec<super::forward::LayerOption> {
+        let mut v: Vec<_> = self
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.live(now) && l.ssrc.load(Ordering::Relaxed) != 0)
+            .map(|(index, l)| {
+                let width = l.width.load(Ordering::Relaxed);
+                let height = l.height.load(Ordering::Relaxed);
+                let measured = l.bitrate_kbps.load(Ordering::Relaxed);
+                super::forward::LayerOption {
+                    index,
+                    ssrc: l.ssrc.load(Ordering::Relaxed),
+                    rid: l.rid.clone(),
+                    width,
+                    height,
+                    kbps: if measured > 0 {
+                        measured
+                    } else {
+                        super::forward::LayerOption::estimated_kbps(width, height)
+                    },
+                }
+            })
+            .collect();
+        v.sort_by_key(|o| (o.height, o.kbps));
+        v
     }
 
     /// The frame-rate limit: at most `max_fps` accepted frames per second.

@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-11-13.2] — workspace release
+
+**Crate versions:** **forge-rtp 0.7.3**, **forge-conference 0.16.0**. Every
+other crate is unchanged from 2026-11-13.1. Embeds siphon-rs
+**v2026.10.22.2** (unchanged).
+
+Forwarding in the room: phase R2 of FCP's `docs/FORWARDING_ROOMS.md`. A
+participant can now be sent each person's own stream instead of the
+composite, and a room where nobody takes the composite decodes and encodes
+nothing.
+
+### Added
+
+- **forge-conference: forwarding viewers** (`video::forward`).
+  - `VideoRoom::forward` makes a participant's camera section take streams
+    (`ForwardRequest`: codec, profile, payload type) and returns its packets
+    (`ForwardSubscription`). `unforward`, `is_forwarding`.
+  - `set_view` takes what the viewer asks for (`ViewRequest`, the `fcp-view`
+    INFO): a stream per participant or one that follows the speaker
+    (`StreamTarget`), each with a height limit and a priority, and a cap on
+    their number. Without one, the default view: the speaker at 720p and up
+    to eight others at 180p, those who spoke last first.
+  - Each stream has its own SSRC, fixed while it is asked for, its own
+    rewriter and its own NACK cache. A speaker stream moves to the new
+    speaker at their keyframe, and is never the viewer's own camera.
+  - The allocator (`allocate`) spends the viewer's REMB in priority order:
+    every stream's smallest layer, then upgrades within each height limit. A
+    stream it cannot reach is paused, and keeps its SSRC. A move up waits
+    three seconds (`STREAM_UP_AFTER`); a move down or a pause is at once.
+  - A switch asks that layer for a keyframe through its own gate, so many
+    viewers switching cost one PLI. A viewer's PLI or FIR asks the layer its
+    stream carries; a NACK is answered from that stream's cache.
+  - A packet is offered only to the streams that carry its source, never to
+    every subscriber.
+  - A layer a viewer is sent is NACKed at ingress even when it is not
+    decoded.
+  - `VideoRoomEvent::Streams` reports a viewer's streams when one comes,
+    goes, moves to someone else, pauses or resumes: what a roster needs.
+    `forwarded_streams` and `VideoParticipantInfo.viewer` (`VideoViewerInfo`)
+    report them.
+- **forge-conference: decoding only while something composes.** With no
+  composite subscriber and no recording, sources are not decoded, and a
+  camera is `On` while its packets arrive. When composing starts again, the
+  layers wait for a keyframe and one is asked for.
+- **forge-rtp: `StreamRewriter`.**
+  - VP8's PictureID and TL0PICIDX are rewritten to carry on from the last
+    ones sent, so a switch does not look like lost pictures. `vp8::indices`,
+    `picture_id`, `tl0_pic_idx` and `set_indices` read and write them.
+  - The sender's header extensions are taken off: they were negotiated with
+    the sender, not the receiver.
+  - A stream resumed after `clear` moves its timestamps on by the time
+    between.
+
+### Fixed
+
+- **forge-conference:** a subscriber moving from the composite to the
+  passthrough path no longer sends its first forwarded picture on the last
+  composed picture's timestamp, which a receiver could assemble into one
+  broken frame.
+
+### Changed
+
+- **forge-conference: breaking.** `VideoRoomEvent` has a `Streams` variant,
+  and `VideoParticipantInfo` a `viewer` field.
+- **forge-rtp:** forwarded packets no longer carry the sender's header
+  extensions.
+
 ## [2026-11-13.1] — workspace release
 
 **Crate versions:** **forge-webrtc 0.9.0**. Every other crate is unchanged

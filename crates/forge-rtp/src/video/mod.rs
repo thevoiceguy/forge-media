@@ -473,7 +473,9 @@ impl StreamRewriter {
         true
     }
 
-    /// Stop forwarding anything (the source left).
+    /// Stop forwarding anything (the source left, or the stream is
+    /// paused). A later [`select`](Self::select) carries the stream on
+    /// from where it stopped, its timestamps advanced by the time between.
     pub fn clear(&mut self) {
         self.current = None;
         self.pending = None;
@@ -554,7 +556,9 @@ impl StreamRewriter {
             .unwrap_or(0)
             .max(3000);
         let next_seq = self.last_seq.wrapping_add(1);
-        let next_ts = if self.current.is_some() {
+        // Anything sent before — from another source, or from this one
+        // before a pause — means time has moved on since.
+        let next_ts = if self.last_sent.is_some() {
             self.last_ts.wrapping_add(gap_ticks)
         } else {
             self.last_ts
@@ -860,6 +864,21 @@ mod tests {
         let back = RtpPacket::parse(out.to_bytes().freeze()).unwrap();
         assert!(!back.header.extension(), "the X bit goes with it");
         assert_eq!(&back.payload[..], IDR);
+    }
+
+    #[test]
+    fn a_stream_resumed_after_a_pause_moves_its_clock_on() {
+        let mut rw = StreamRewriter::new(VideoCodec::H264, 1, 0, 0);
+        rw.select(0xA);
+        let before = rw.feed(&pkt(0xA, 1, 1000, IDR)).unwrap();
+        rw.clear();
+        assert!(rw.select(0xA), "a keyframe is needed again");
+        let after = rw.feed(&pkt(0xA, 50, 1000 + 90_000, IDR)).unwrap();
+        assert_eq!(seq(&after), seq(&before).wrapping_add(1));
+        assert!(
+            ts(&after).wrapping_sub(ts(&before)) >= 3000,
+            "a new picture, not the old one's timestamp"
+        );
     }
 
     #[test]

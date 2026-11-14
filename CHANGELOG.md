@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-11-14] — workspace release
+
+**Crate versions:** **forge-conference 0.16.1**. Every other crate is
+unchanged from 2026-11-13.2. Embeds siphon-rs **v2026.10.22.2** (unchanged).
+
+For phase R3b of FCP's `docs/FORWARDING_ROOMS.md`: the node prices a room's
+codec time from what the room reports, and a room that composes nothing
+decodes nothing.
+
+### Added
+
+- **forge-conference:** `VideoSourceInfo::decoding` — whether the stream is
+  being decoded. A room where every subscriber is forwarded and nothing is
+  recorded decodes nothing, and now says so, so a capacity model can stop
+  charging those decodes.
+
 ## [2026-11-13.2] — workspace release
 
 **Crate versions:** **forge-rtp 0.7.3**, **forge-conference 0.16.0**. Every

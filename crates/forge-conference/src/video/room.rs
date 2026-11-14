@@ -654,6 +654,10 @@ pub struct VideoSourceInfo {
     pub plis_sent: u64,
     /// The sender's RTP streams: one, or a layer per simulcast rid.
     pub layers: Vec<LayerInfo>,
+    /// Whether the stream is being decoded: not while nothing in the room
+    /// composes (every subscriber forwarded, no recording), when it costs
+    /// no codec time (FORWARDING_ROOMS §2.1, §3).
+    pub decoding: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2310,6 +2314,7 @@ impl VideoRoom {
             nacks_sent: st.nacks_sent.load(Ordering::Relaxed),
             plis_sent: st.plis_sent.load(Ordering::Relaxed),
             layers: s.layers(Instant::now()),
+            decoding: s.is_decoding(),
         }
     }
 

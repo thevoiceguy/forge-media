@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "bytes",
  "dashmap",

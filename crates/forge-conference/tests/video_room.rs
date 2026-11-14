@@ -255,6 +255,7 @@ async fn two_cameras_are_composited_into_a_grid_for_a_subscriber() {
     feeder.await.unwrap();
     let src = video.participant("alice").unwrap().source.unwrap();
     assert!(src.frames_decoded >= 50, "decoded {}", src.frames_decoded);
+    assert!(src.decoding, "a composed camera is decoded");
     assert_eq!(src.frames_lost, 0);
 
     // Leaving the audio room removes bob's video with it.
@@ -2073,6 +2074,10 @@ async fn a_viewer_is_forwarded_each_camera_at_the_layer_its_budget_reaches() {
     let before = (decoded("alice"), decoded("carol"));
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!((decoded("alice"), decoded("carol")), before, "no decoding");
+    for id in ["alice", "carol"] {
+        let src = video.participant(id).unwrap().source.unwrap();
+        assert!(!src.decoding, "{id} reported as not decoding");
+    }
     assert_eq!(
         video.participant("alice").unwrap().state,
         VideoState::On,

@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unused `rubato` (forge-injection) and `aya-log` (forge-kernel) dependencies,
   along with their workspace entries. Neither was imported anywhere; dropping
   `aya-log` also removes the duplicate `aya` 0.16 it pulled into the lockfile.
+- Unused `aya`, `aya-ebpf` and `aya-build` entries in `[workspace.dependencies]`.
+  No crate inherited them: `forge-kernel` and `forge-kernel-ebpf` declare their
+  aya crates directly (the workspace `aya` entry was also stale at 0.12).
 
 ## [2026-11-16.1] — workspace release
 

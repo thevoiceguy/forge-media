@@ -128,6 +128,9 @@ struct Forwarding {
     /// The stream whose packets are going out.
     source: SourceKey,
     rewriter: StreamRewriter,
+    /// The last packet sent did not end its frame: the receiver is
+    /// holding part of a picture.
+    mid_frame: bool,
 }
 
 /// What a subscriber is watching: which composite, at which flavor. Both
@@ -391,16 +394,28 @@ impl Subscriber {
         *f = Some(Forwarding {
             source: source.clone(),
             rewriter,
+            mid_frame: false,
         });
         wants_keyframe
     }
 
     /// Go back to the composite. The encoder is asked for a keyframe,
     /// since the receiver's last frame came from somewhere else.
+    ///
+    /// The compose tick does not wait for a forwarded frame to finish, so
+    /// this can land halfway through one. The rest of that frame is never
+    /// sent, and one sequence number is skipped to say so: with the next
+    /// number following on, a receiver would take the new timestamp as
+    /// the end of a complete frame and decode half a picture.
     pub fn stop_forwarding(&self) {
-        if self.forwarding.lock().take().is_some() {
-            self.wants_keyframe.store(true, Ordering::Release);
+        let mut f = self.forwarding.lock();
+        let Some(fwd) = f.take() else { return };
+        if fwd.mid_frame {
+            let mut s = self.seq.lock();
+            s.seq = s.seq.wrapping_add(1);
         }
+        drop(f);
+        self.wants_keyframe.store(true, Ordering::Release);
     }
 
     /// The source being forwarded, if any.
@@ -432,8 +447,11 @@ impl Subscriber {
         let seq = out.header.sequence_number;
         let ts = out.header.timestamp;
         let marker = out.header.marker();
-        drop(f);
+        fwd.mid_frame = !marker;
 
+        // Still holding the forwarding lock: a stop_forwarding (and the
+        // composite after it) must not slip in between this packet taking
+        // its sequence number and the stream moving past it.
         let bytes = out.to_bytes().freeze();
         let mut s = self.seq.lock();
         s.cache.push(seq, bytes.clone());
@@ -441,6 +459,7 @@ impl Subscriber {
         s.ts = ts;
         drop(s);
         self.deliver(bytes);
+        drop(f);
         // One frame per marker, as the composed path counts them.
         if marker {
             self.stats.frames_sent.fetch_add(1, Ordering::Relaxed);
@@ -654,6 +673,88 @@ impl std::fmt::Debug for FlavorEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn going_back_to_the_composite_mid_frame_never_hands_over_half_a_picture() {
+        // The compose tick can end the fast path while a forwarded frame
+        // is only partly out. The receiver must see the rest of it as
+        // lost, not get the half it has glued to whatever comes next.
+        use forge_rtp::{AssemblerEvent, FrameAssembler};
+        use forge_video::frame::HostFrame;
+        use forge_video::raw::{decode_raw, encode_raw};
+
+        let flavor = Flavor::new(VideoCodec::VP8, "", Resolution::new(320, 180), 30, 500);
+        let key = OutputKey {
+            scope: OutputScope::All,
+            resolution: Resolution::new(320, 180),
+            view: View::Composite,
+        };
+        let (sub, mut rx) = Subscriber::new(
+            "bob",
+            StreamKind::Camera,
+            flavor,
+            key,
+            97,
+            Arc::new(AtomicBool::new(false)),
+            512,
+            512,
+            1200,
+        );
+        let source = SourceKey::camera("alice");
+        let mut seq = 1000u16;
+        let mut camera = |luma: u8, pts: u32| -> Vec<RtpPacket> {
+            let frame = encode_raw(
+                &HostFrame::solid(320, 180, luma, 128, 128).with_pts(pts),
+                true,
+            );
+            let payloads = packetize(VideoCodec::VP8, &frame, 1200).unwrap();
+            let n = payloads.len();
+            payloads
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let pkt = RtpPacket::build(96, seq, pts, 0xA11CE, p, i + 1 == n);
+                    seq = seq.wrapping_add(1);
+                    pkt
+                })
+                .collect()
+        };
+
+        sub.start_forwarding(&source, 0xA11CE);
+        for p in camera(200, 0) {
+            sub.send_forwarded(&p);
+        }
+        // The tick lands halfway through Alice's next frame.
+        let second = camera(200, 6000);
+        for p in &second[..second.len() / 2] {
+            sub.send_forwarded(p);
+        }
+        sub.stop_forwarding();
+        let composite = encode_raw(&HostFrame::solid(320, 180, 60, 128, 128), true);
+        sub.send_frame(VideoCodec::VP8, &composite, 9000);
+        // Enough composite after it for any receiver to call the gap.
+        for pts in [12000, 15000] {
+            sub.send_frame(VideoCodec::VP8, &composite, pts);
+        }
+
+        let mut asm = FrameAssembler::new(VideoCodec::VP8);
+        let mut lumas = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            let pkt = RtpPacket::parse(bytes).unwrap();
+            for ev in asm.push(pkt) {
+                if let AssemblerEvent::Frame(f) = ev {
+                    let picture = decode_raw(&f.data).expect("every frame handed over is whole");
+                    lumas.push(picture.luma(160, 90));
+                }
+            }
+        }
+        assert_eq!(lumas.first(), Some(&200), "Alice's whole frame arrives");
+        assert_eq!(lumas.last(), Some(&60), "then the composite");
+        assert!(
+            !lumas[1..].contains(&200),
+            "her half frame is not one of them"
+        );
+    }
 
     #[test]
     fn passthrough_auto_forwards_only_where_a_label_is_least_missed() {

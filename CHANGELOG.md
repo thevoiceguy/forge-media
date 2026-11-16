@@ -31,6 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **forge-conference:** a peer's own tile with no camera (a trunk carrying
   only a shared screen) is no longer drawn as an empty tile.
 
+### Fixed
+
+- **forge-conference:** ending the passthrough fast path halfway through a
+  forwarded frame no longer hands the subscriber half a picture. The rest of
+  that frame is now marked lost with a one-number sequence gap; before, the
+  composite followed on with the next number, so a receiver took the half
+  frame for a whole one (the intermittent `video_room` CI failure,
+  `Codec("raw frame truncated")`). A composite frame can also no longer take
+  the sequence number a forwarded packet is about to use.
+
 ### Removed
 
 - Unused `rubato` (forge-injection) and `aya-log` (forge-kernel) dependencies,

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- Unused `rubato` (forge-injection) and `aya-log` (forge-kernel) dependencies,
+  along with their workspace entries. Neither was imported anywhere; dropping
+  `aya-log` also removes the duplicate `aya` 0.16 it pulled into the lockfile.
+
 ## [2026-11-16.1] — workspace release
 
 **Crate versions:** **forge-rtp 0.7.4**. Every other crate is unchanged from

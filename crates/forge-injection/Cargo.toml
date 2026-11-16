@@ -15,9 +15,6 @@ thiserror = { workspace = true }
 # Audio file decoding
 symphonia = { version = "0.6", features = ["all"] }
 
-# Resampling
-rubato = "5.1"
-
 [features]
 default = []
 # TTS features are framework-only for now

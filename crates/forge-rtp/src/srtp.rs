@@ -1273,7 +1273,7 @@ impl SrtpContext {
         // Prepare payload for encryption
         let mut payload = packet[8..].to_vec();
 
-        // Encrypt and get tag separately (per RFC 7714, tag follows E|index)
+        // Encrypt; the tag is appended to the ciphertext (RFC 7714 §9.1)
         let tag = match profile {
             SrtpProfile::AeadAes128Gcm => {
                 let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key).map_err(|e| {
@@ -1296,12 +1296,14 @@ impl SrtpContext {
             _ => unreachable!(),
         };
 
-        // Build result per RFC 7714: header + encrypted_payload + E|index + auth_tag
-        let mut result = Vec::with_capacity(packet.len() + 4 + 16);
+        // RFC 7714 §9.1, Figure 3: the header, the ciphertext with its
+        // authentication tag, then E|SRTCP index last. (Unlike RFC 3711's
+        // AES-CM layout, where the tag follows the index.)
+        let mut result = Vec::with_capacity(packet.len() + 16 + 4);
         result.extend_from_slice(&packet[..8]); // Header
-        result.extend_from_slice(&payload); // Encrypted payload (without tag)
+        result.extend_from_slice(&payload); // Ciphertext
+        result.extend_from_slice(&tag); // Authentication tag
         result.extend_from_slice(&e_index_bytes); // E|index
-        result.extend_from_slice(&tag); // Auth tag
 
         Ok(result)
     }
@@ -1323,8 +1325,13 @@ impl SrtpContext {
 
         let auth_tag_len = key_material.profile.auth_tag_len();
 
-        // Extract E|index (last 4 bytes before auth tag)
-        let e_index_offset = packet.len() - auth_tag_len - 4;
+        // E|index: before the tag under AES-CM (RFC 3711 §3.4), and last
+        // under AES-GCM, where the tag belongs to the ciphertext (RFC 7714
+        // §9.1).
+        let e_index_offset = match key_material.profile {
+            SrtpProfile::AeadAes128Gcm | SrtpProfile::AeadAes256Gcm => packet.len() - 4,
+            _ => packet.len() - auth_tag_len - 4,
+        };
         let e_index = u32::from_be_bytes([
             packet[e_index_offset],
             packet[e_index_offset + 1],
@@ -1490,20 +1497,19 @@ impl SrtpContext {
             ));
         }
 
-        let tag_start = packet.len() - tag_len;
-        let tag = &packet[tag_start..];
-
-        // Extract E|index (4 bytes before tag)
-        let e_index_start = tag_start - 4;
-        let e_index_bytes = &packet[e_index_start..tag_start];
+        // RFC 7714 §9.1: header, ciphertext, tag, then E|index last.
+        let e_index_start = packet.len() - 4;
+        let e_index_bytes = &packet[e_index_start..];
+        let tag_start = e_index_start - tag_len;
+        let tag = &packet[tag_start..e_index_start];
 
         // Build AAD: header + E|index (per RFC 7714)
         let mut aad = Vec::with_capacity(12);
         aad.extend_from_slice(&packet[..8]); // Header
         aad.extend_from_slice(e_index_bytes); // E|index
 
-        // Extract encrypted payload (between header and E|index)
-        let mut ciphertext = packet[8..e_index_start].to_vec();
+        // The ciphertext: between the header and the tag.
+        let mut ciphertext = packet[8..tag_start].to_vec();
 
         // Construct nonce
         let mut nonce_bytes = [0u8; 12];
@@ -2140,6 +2146,75 @@ mod tests {
         // Decrypt
         let decrypted = decrypt_ctx.unprotect_rtp(&srtp_packet).unwrap();
         assert_eq!(decrypted, rtp_packet);
+    }
+
+    /// SRTCP under AES-GCM is laid out as RFC 7714 §9.1 has it — the
+    /// header, the ciphertext, its tag, then E|SRTCP index last — which is
+    /// what libsrtp (and so every browser) sends and expects. Built here
+    /// with the cipher directly, not with our own protect: the two ends of
+    /// ours once agreed on the index before the tag, and no browser could
+    /// read our RTCP, or we theirs.
+    #[test]
+    fn srtcp_aes_gcm_is_laid_out_as_rfc_7714_says() {
+        let ssrc = 0x1234_5678u32;
+        let rtcp = create_test_rtcp_packet(ssrc);
+        let material = || {
+            SrtpKeyMaterial::new(vec![0x11; 16], vec![0x22; 12], SrtpProfile::AeadAes128Gcm)
+                .unwrap()
+        };
+        let keys = material().derive_srtcp_session_keys(ssrc, 0).unwrap();
+        let cipher = Aes128Gcm::new_from_slice(&keys.encryption_key).unwrap();
+        // IV = (0x0000 || SSRC || 0x0000 || SRTCP index) XOR salt.
+        let iv = |index: u32| {
+            let mut iv = [0u8; 12];
+            iv.copy_from_slice(&keys.salt);
+            for (i, b) in ssrc.to_be_bytes().iter().enumerate() {
+                iv[2 + i] ^= b;
+            }
+            for (i, b) in index.to_be_bytes().iter().enumerate() {
+                iv[8 + i] ^= b;
+            }
+            Nonce::from(iv)
+        };
+
+        // A browser's packet is read.
+        let index = 7u32;
+        let e_index = ((1u32 << 31) | index).to_be_bytes();
+        let mut aad = rtcp[..8].to_vec();
+        aad.extend_from_slice(&e_index);
+        let mut body = rtcp[8..].to_vec();
+        let tag = cipher
+            .encrypt_inout_detached(&iv(index), &aad, body.as_mut_slice().into())
+            .unwrap();
+        let mut wire = rtcp[..8].to_vec();
+        wire.extend_from_slice(&body);
+        wire.extend_from_slice(&tag);
+        wire.extend_from_slice(&e_index);
+        let mut rx = SrtpContext::new();
+        rx.set_remote_key(material());
+        assert_eq!(rx.unprotect_rtcp(&wire).unwrap(), rtcp);
+
+        // Ours is laid out the same way.
+        let mut tx = SrtpContext::new();
+        tx.set_local_key(material());
+        let ours = tx.protect_rtcp(&rtcp).unwrap();
+        let n = ours.len();
+        assert_eq!(n, rtcp.len() + 16 + 4);
+        let e_index = u32::from_be_bytes(ours[n - 4..].try_into().unwrap());
+        assert_eq!(e_index >> 31, 1, "E is set");
+        let mut aad = ours[..8].to_vec();
+        aad.extend_from_slice(&ours[n - 4..]);
+        let mut body = ours[8..n - 20].to_vec();
+        let tag: [u8; 16] = ours[n - 20..n - 4].try_into().unwrap();
+        cipher
+            .decrypt_inout_detached(
+                &iv(e_index & 0x7FFF_FFFF),
+                &aad,
+                body.as_mut_slice().into(),
+                &aes_gcm::Tag::from(tag),
+            )
+            .expect("the tag before E|index verifies");
+        assert_eq!(body, rtcp[8..]);
     }
 
     /// Test SRTCP encryption/decryption round-trip

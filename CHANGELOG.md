@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-11-16.1] — workspace release
+
+**Crate versions:** **forge-rtp 0.7.4**. Every other crate is unchanged from
+2026-11-16. Embeds siphon-rs **v2026.10.22.2** (unchanged).
+
+### Fixed
+
+- **forge-rtp:** SRTCP under AES-GCM (`AEAD_AES_128_GCM`,
+  `AEAD_AES_256_GCM`) is laid out as RFC 7714 §9.1 has it: the header, the
+  ciphertext, its authentication tag, then E|SRTCP index last. We had the
+  index before the tag, as RFC 3711's AES-CM layout has it, on both ends,
+  so our own peers agreed and our tests passed, but no one else could read
+  our RTCP and we could not read theirs. Browsers negotiate AES-GCM over
+  DTLS-SRTP, so every PLI, NACK and REMB between a browser and
+  forge-webrtc was dropped both ways (seen as `SRTCP AES-GCM
+  decryption/verification failed` and `SRTCP packet not encrypted (E=0)`
+  at trace): a forwarding room's viewer could never ask for a keyframe,
+  and a simulcast layer was never re-keyed. `srtcp_aes_gcm_is_laid_out_as_rfc_7714_says`
+  builds a packet with the cipher directly, as libsrtp does, and reads
+  ours the same way. SDES offers no AES-GCM suite in FCP or Anvil, so SIP
+  calls between old and new builds are unaffected.
+
 ## [2026-11-16] — workspace release
 
 **Crate versions:** **forge-webrtc 0.10.0**. Every other crate is unchanged

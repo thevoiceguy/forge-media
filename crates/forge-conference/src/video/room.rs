@@ -451,6 +451,11 @@ struct Participant {
     /// room and a trunk's own composite leaves it out
     /// ([`OutputScope::LocalOnly`]).
     remote: bool,
+    /// A person on a peer node, named by the peer (FCP
+    /// `docs/FORWARDING_ROOMS.md` §2.8), rather than the peer's own tile:
+    /// drawn as a person is, camera or not. A peer's tile with no camera
+    /// (a trunk carrying only a shared screen) is not drawn.
+    member: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -768,6 +773,12 @@ pub struct VideoRoom {
     /// For each source, the viewers' streams its packets are offered to:
     /// made again each tick, read for every packet.
     routes: RwLock<Arc<HashMap<SourceKey, Vec<(Arc<Viewer>, Arc<Stream>)>>>>,
+    /// The tallest each peer's person is wanted at here, by participant:
+    /// what this node asks their node to forward (§2.8). Made again each
+    /// tick.
+    remote_wants: Mutex<HashMap<String, u32>>,
+    /// Whether anything was composed last tick.
+    composing_any: AtomicBool,
     /// This node's name, which settles a tie against a peer's claim.
     local_node: Mutex<String>,
     control: Mutex<Control>,
@@ -789,6 +800,10 @@ pub struct VideoRoom {
     fps_samples: Mutex<(Instant, HashMap<SourceKey, u64>)>,
     stopped: AtomicBool,
 }
+
+/// The least a composite asks a peer's person to be sent at, before their
+/// tile has been sized (§2.8).
+pub const REMOTE_COMPOSITE_FLOOR: u32 = 180;
 
 impl VideoRoom {
     /// Create the room and start its clock. `audio` supplies the
@@ -822,6 +837,8 @@ impl VideoRoom {
             forwarders: AtomicU32::new(0),
             viewers: DashMap::new(),
             routes: RwLock::new(Arc::new(HashMap::new())),
+            remote_wants: Mutex::new(HashMap::new()),
+            composing_any: AtomicBool::new(false),
             local_node: Mutex::new(String::new()),
             control: Mutex::new(Control::default()),
             fps: AtomicU32::new(fps),
@@ -902,6 +919,7 @@ impl VideoRoom {
                 content_state: VideoState::Off,
                 joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
                 remote: false,
+                member: false,
             });
     }
 
@@ -1013,6 +1031,7 @@ impl VideoRoom {
                 content_state: VideoState::Off,
                 joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
                 remote: true,
+                member: false,
             })
             .remote = true;
         let out = self.add_source_kind(id, kind, codec, profile);
@@ -1045,6 +1064,32 @@ impl VideoRoom {
         if self.participants.get(id).is_some_and(|p| p.remote) {
             self.remove_source_kind(id, StreamKind::Content);
         }
+    }
+
+    /// A person on a peer node, which forwards each of its people's own
+    /// streams over the trunk (FCP `docs/FORWARDING_ROOMS.md` §2.8): a
+    /// remote participant named as the peer names them, drawn and
+    /// forwarded like anyone here. Their camera is
+    /// [`add_remote`](Self::add_remote) under the same id;
+    /// [`remove_remote`](Self::remove_remote) takes them away. Calling it
+    /// again renames them.
+    pub fn add_remote_member(&self, id: &str, name: &str) {
+        let mut p = self
+            .participants
+            .entry(id.to_string())
+            .or_insert_with(|| Participant {
+                name: name.to_string(),
+                enabled: true,
+                content_enabled: true,
+                state: VideoState::Off,
+                content_state: VideoState::Off,
+                joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
+                remote: true,
+                member: true,
+            });
+        p.remote = true;
+        p.member = true;
+        p.name = name.to_string();
     }
 
     /// Whether the id names a peer node's tile rather than a caller here.
@@ -1596,6 +1641,7 @@ impl VideoRoom {
             settings.rtx_cache_packets,
             // Several streams share the channel.
             settings.egress_queue_packets.saturating_mul(4),
+            false,
         );
         self.viewers.insert(id.to_string(), viewer);
         info!(room = %self.id, participant = %id, codec = %req.codec, "video viewer forwarding");
@@ -1603,6 +1649,84 @@ impl VideoRoom {
             payload_type: req.payload_type,
             packets: rx,
         })
+    }
+
+    /// A trunk to a peer node as a forwarding viewer (FCP
+    /// `docs/FORWARDING_ROOMS.md` §2.8): `id` is the trunk's, not a
+    /// participant's, and it is sent this node's own people only — never a
+    /// peer's — each under an SSRC of its own for as long as the view names
+    /// them. It is sent nothing until [`set_view`](Self::set_view) says
+    /// whom: the peer asks for the people its own viewers and composites
+    /// want, at the heights they want them.
+    pub fn forward_trunk(&self, id: &str, req: ForwardRequest) -> Result<ForwardSubscription> {
+        let settings = self.settings.read().clone();
+        let (viewer, rx) = Viewer::new(
+            id,
+            &req,
+            settings.rtx_cache_packets,
+            settings.egress_queue_packets.saturating_mul(4),
+            true,
+        );
+        *viewer.view.lock() = ViewRequest {
+            streams: Some(Vec::new()),
+            max_streams: None,
+        };
+        self.viewers.insert(id.to_string(), viewer);
+        info!(room = %self.id, trunk = %id, codec = %req.codec, "video trunk forwarding");
+        Ok(ForwardSubscription {
+            payload_type: req.payload_type,
+            packets: rx,
+        })
+    }
+
+    /// The tallest each peer node's person is wanted at on this node, by
+    /// participant id: by a forwarding viewer's view (its speaker stream
+    /// counting for whoever it shows), or by a composite drawing them
+    /// (§2.8). A person nobody here wants is left out, so their node
+    /// need not send them.
+    pub fn remote_wants(&self) -> Vec<(String, u32)> {
+        let mut wants = self.remote_wants.lock().clone();
+        let composing = self.composing_any.load(Ordering::Relaxed);
+        for s in self.sources.iter() {
+            let key = s.key();
+            if key.kind != StreamKind::Camera {
+                continue;
+            }
+            let remote = self
+                .participants
+                .get(&key.participant)
+                .is_some_and(|p| p.remote && p.member);
+            if !remote {
+                continue;
+            }
+            // A composite draws everyone; until a frame arrives the tile
+            // may not have been sized, so a small layer is asked for.
+            let drawn = if composing {
+                s.wanted_height().max(REMOTE_COMPOSITE_FLOOR)
+            } else {
+                0
+            };
+            let entry = wants.entry(key.participant.clone()).or_insert(0);
+            *entry = (*entry).max(drawn);
+        }
+        let mut out: Vec<(String, u32)> = wants.into_iter().filter(|(_, h)| *h > 0).collect();
+        out.sort();
+        out
+    }
+
+    /// Each trunk forwarding from this room ([`forward_trunk`](Self::forward_trunk)),
+    /// by id, with what it is being sent: a trunk is not a participant,
+    /// so [`participants`](Self::participants) does not list it, and a
+    /// node pricing its egress has to ask here.
+    pub fn trunk_viewers(&self) -> Vec<(String, VideoViewerInfo)> {
+        let mut out: Vec<(String, VideoViewerInfo)> = self
+            .viewers
+            .iter()
+            .filter(|v| v.local_only)
+            .map(|v| (v.key().clone(), Self::viewer_info(v.value())))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// Stop forwarding to the participant.
@@ -1668,9 +1792,11 @@ impl VideoRoom {
     /// The camera a viewer can be sent for this participant: there, not
     /// hidden by a host, sending, in a codec the viewer takes.
     fn camera_for_viewer(&self, participant: &str, viewer: &Viewer) -> Option<Arc<VideoSource>> {
-        if !self.participants.get(participant)?.enabled {
+        let p = self.participants.get(participant)?;
+        if !p.enabled || (viewer.local_only && p.remote) {
             return None;
         }
+        drop(p);
         let source = self.sources.get(&SourceKey::camera(participant))?;
         self.forwardable_to_viewer(&source, viewer)
             .then(|| Arc::clone(source.value()))
@@ -1719,6 +1845,7 @@ impl VideoRoom {
         now: Instant,
     ) {
         if self.viewers.is_empty() {
+            self.remote_wants.lock().clear();
             if !self.routes.read().is_empty() {
                 *self.routes.write() = Arc::new(HashMap::new());
                 for s in self.sources.iter() {
@@ -1729,6 +1856,9 @@ impl VideoRoom {
         }
         let mut routes: HashMap<SourceKey, Vec<(Arc<Viewer>, Arc<Stream>)>> = HashMap::new();
         let mut forwarded: HashMap<SourceKey, Vec<usize>> = HashMap::new();
+        // What this node's viewers want of a peer's people, for their node.
+        let canvas = self.settings.read().resolution.height;
+        let mut remote_wants: HashMap<String, u32> = HashMap::new();
         // Everyone by recency of speech, then join order.
         let mut by_recency: Vec<String> = Vec::new();
         for id in recent.iter().chain(join_order) {
@@ -1741,6 +1871,9 @@ impl VideoRoom {
             let others: Vec<String> = by_recency
                 .iter()
                 .filter(|id| **id != viewer.id && self.sources.contains_key(&SourceKey::camera(id)))
+                .filter(|id| {
+                    !viewer.local_only || !self.participants.get(*id).is_some_and(|p| p.remote)
+                })
                 .cloned()
                 .collect();
             let wants = viewer.view.lock().resolve(&others);
@@ -1778,6 +1911,20 @@ impl VideoRoom {
                     ))
                 })
                 .collect();
+            if !viewer.local_only {
+                for (w, r) in wants.iter().zip(&resolved) {
+                    let Some((key, _)) = r else { continue };
+                    if self
+                        .participants
+                        .get(&key.participant)
+                        .is_some_and(|p| p.remote && p.member)
+                    {
+                        let h = w.max_height.unwrap_or(canvas).min(canvas);
+                        let entry = remote_wants.entry(key.participant.clone()).or_insert(0);
+                        *entry = (*entry).max(h);
+                    }
+                }
+            }
             let asks: Vec<Ask<'_>> = wants
                 .iter()
                 .zip(&resolved)
@@ -1826,6 +1973,7 @@ impl VideoRoom {
             }
         }
         *self.routes.write() = Arc::new(routes);
+        *self.remote_wants.lock() = remote_wants;
         for s in self.sources.iter() {
             s.set_forwarded_layers(forwarded.get(s.key()).map(Vec::as_slice).unwrap_or(&[]));
         }
@@ -2614,20 +2762,25 @@ impl VideoRoom {
             };
             let name = self.tile_name(id, &p);
             let remote = p.remote;
+            // A peer's own tile with no camera (a trunk carrying only a
+            // shared screen) is no one to draw.
+            let drawn = !(p.remote && !p.member && !self.sources.contains_key(&camera));
             drop(p);
             self.set_state_kind(id, StreamKind::Camera, state);
             self.set_state_kind(id, StreamKind::Content, content_state);
-            tiles.insert(
-                camera.clone(),
-                Tile {
-                    key: camera,
-                    name: name.clone(),
-                    frame,
-                    speaking: speaker.as_deref() == Some(id.as_str()),
-                    muted: muted.get(id).copied().unwrap_or(false),
-                    remote,
-                },
-            );
+            if drawn {
+                tiles.insert(
+                    camera.clone(),
+                    Tile {
+                        key: camera,
+                        name: name.clone(),
+                        frame,
+                        speaking: speaker.as_deref() == Some(id.as_str()),
+                        muted: muted.get(id).copied().unwrap_or(false),
+                        remote,
+                    },
+                );
+            }
             if let Some(f) = content_frame {
                 tiles.insert(
                     content.clone(),
@@ -2642,6 +2795,11 @@ impl VideoRoom {
                 );
             }
         }
+        // Only who has a tile is laid out.
+        let join_order: Vec<String> = join_order
+            .into_iter()
+            .filter(|id| tiles.contains_key(&SourceKey::camera(id)))
+            .collect();
         // The share on show: the floor holder's screen, once a frame of
         // it has been decoded. Before that the composites carry on as
         // they were rather than draw an empty content tile.
@@ -2728,6 +2886,8 @@ impl VideoRoom {
             s.set_decoding(compose_any);
         }
         let composing = self.decide_forwarding(&settings, &plans, &with_frames);
+        self.composing_any
+            .store(!composing.is_empty(), Ordering::Relaxed);
         self.tell_sources_their_size(&plans, &composing, now);
 
         // Render each output and encode each flavor.

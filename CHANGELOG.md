@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Crate versions:** **forge-conference 0.16.2**.
+
+### Added
+
+- **forge-conference:** forwarding across nodes (FCP
+  `docs/FORWARDING_ROOMS.md` §2.8, R7). `VideoRoom::forward_trunk` makes a
+  trunk to a peer node a forwarding viewer that is sent this node's own
+  people only — never a peer's, so a room on three nodes sends no one back
+  where they came from — and nothing until `set_view` names whom.
+  `add_remote_member` puts a peer's person in the room by the name the peer
+  gives, drawn and forwarded like anyone, camera or not; their camera is
+  `add_remote` under the same id. `remote_wants` says the tallest each
+  peer's person is wanted at here (by a viewer's view, the speaker stream
+  counting for whoever it shows, or by a composite, at least 180 lines
+  while one composes), which is what a node asks the peer to forward.
+  `VideoSource::wanted_height` reads what a composite last drew a source at.
+  `trunk_viewers` lists each trunk forwarding from the room with what it is
+  sent, for a node pricing its egress.
+
+### Changed
+
+- **forge-conference:** a peer's own tile with no camera (a trunk carrying
+  only a shared screen) is no longer drawn as an empty tile.
+
 ### Removed
 
 - Unused `rubato` (forge-injection) and `aya-log` (forge-kernel) dependencies,

@@ -489,6 +489,12 @@ impl VideoSource {
 
     /// The tallest the room draws this source now: every tick, from the
     /// tiles of the outputs it composes. Picks the layer to decode.
+    /// The tallest a composite drew this source at last tick; 0 when
+    /// nothing composes it.
+    pub fn wanted_height(&self) -> u32 {
+        self.wanted_height.load(Ordering::Relaxed)
+    }
+
     pub fn set_wanted_height(&self, height: u32, now: Instant) {
         self.wanted_height.store(height, Ordering::Relaxed);
         if self.layers.len() > 1 {

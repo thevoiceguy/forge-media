@@ -2248,3 +2248,142 @@ async fn the_default_view_follows_the_speaker_and_a_hidden_camera_is_paused() {
     .await;
     feeder.abort();
 }
+
+/// A room on two nodes that forward (FCP `docs/FORWARDING_ROOMS.md` §2.8),
+/// seen from one of them: the trunk to the peer is a viewer sent this
+/// node's own people only, and only once the peer asks; the peer's people
+/// are remote members, forwarded to this node's viewers like anyone, and
+/// what this node wants of them is what it asks the peer for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trunk_is_sent_this_node_s_people_and_a_peer_s_people_are_forwarded_here() {
+    let audio = audio_room("trunk-forwarding");
+    for id in ["alice", "carol"] {
+        audio.add_participant(id, false).unwrap();
+    }
+    let video = audio.enable_video(settings(640, 360, 30), &VideoBackend::raw());
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
+    video.add_source("carol", VideoCodec::VP8, "").unwrap();
+    // Dave is on the peer: a member by the name the peer gives, with a
+    // camera arriving over the trunk.
+    video.add_remote_member("dave", "Dave");
+    video.add_remote("dave", VideoCodec::VP8, "").unwrap();
+    assert!(video.is_remote("dave"));
+    assert_eq!(video.participant("dave").unwrap().display_name, "Dave");
+
+    let req = ForwardRequest {
+        codec: VideoCodec::VP8,
+        profile: String::new(),
+        payload_type: 96,
+    };
+    let trunk = video.forward_trunk("__trunk__node-b", req.clone()).unwrap();
+    let carol_sub = video.forward("carol", req).unwrap();
+
+    let mut cams: Vec<(&str, Camera, u8)> = vec![
+        ("alice", Camera::new(0xA11CE, 64, 36), 200),
+        ("carol", Camera::new(0xCA401, 64, 36), 120),
+        ("dave", Camera::new(0xDA4E, 64, 36), 90),
+    ];
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            loop {
+                for (id, cam, luma) in cams.iter_mut() {
+                    for p in cam.frame(*luma) {
+                        video.push_rtp(id, p);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+
+    // Until the peer asks, the trunk is sent nothing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(video.forwarded_streams("__trunk__node-b").is_empty());
+
+    // Carol forwards by the default view: Dave, a peer's person, is on
+    // it like anyone, and what she wants of him is asked of his node.
+    let mut carol = Viewer::new(carol_sub.packets);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let dave_ssrc = loop {
+        let s = video.forwarded_streams("carol");
+        if let Some(d) = s
+            .iter()
+            .find(|s| s.participant.as_deref() == Some("dave") && !s.paused)
+        {
+            break d.ssrc;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Dave never forwarded to Carol: {s:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    carol
+        .until("Dave's own picture", |c| c.luma(dave_ssrc) == Some(90))
+        .await;
+    let wants = video.remote_wants();
+    assert_eq!(wants.len(), 1, "{wants:?}");
+    assert_eq!(wants[0].0, "dave");
+    assert!(wants[0].1 >= 180, "{wants:?}");
+
+    // The peer asks for everyone it can see of this node, Dave included
+    // by mistake: Alice is sent; Dave is never sent back where he came
+    // from.
+    let want = |id: &str| StreamWant {
+        target: StreamTarget::Participant(id.into()),
+        max_height: Some(360),
+        priority: None,
+    };
+    video
+        .set_view(
+            "__trunk__node-b",
+            ViewRequest {
+                streams: Some(vec![want("alice"), want("dave")]),
+                max_streams: None,
+            },
+        )
+        .unwrap();
+    let mut peer = Viewer::new(trunk.packets);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let s = loop {
+        let s = video.forwarded_streams("__trunk__node-b");
+        if s.len() == 2 && s[0].participant.is_some() {
+            break s;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never: {s:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(s[0].participant.as_deref(), Some("alice"));
+    assert!(s[1].paused && s[1].participant.is_none(), "{s:?}");
+    let trunks = video.trunk_viewers();
+    assert_eq!(trunks.len(), 1);
+    assert_eq!(trunks[0].0, "__trunk__node-b");
+    assert_eq!(trunks[0].1.streams.len(), 2);
+    assert!(
+        video.participant("__trunk__node-b").is_none(),
+        "a trunk is no participant"
+    );
+    let alice_ssrc = s[0].ssrc;
+    peer.until("Alice down the trunk", |p| p.luma(alice_ssrc) == Some(200))
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while let Ok(b) = peer.rx.try_recv() {
+        peer.take(b);
+    }
+    assert_eq!(peer.last.len(), 1, "only Alice crosses the trunk");
+
+    // Nobody here wants Dave any more: nothing is asked of his node.
+    video.unforward("carol");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        video.remote_wants().is_empty(),
+        "{:?}",
+        video.remote_wants()
+    );
+
+    // He leaves the peer: gone here too.
+    video.remove_remote("dave");
+    assert!(video.participant("dave").is_none());
+    feeder.abort();
+}

@@ -1714,6 +1714,21 @@ impl VideoRoom {
         out
     }
 
+    /// Each trunk forwarding from this room ([`forward_trunk`](Self::forward_trunk)),
+    /// by id, with what it is being sent: a trunk is not a participant,
+    /// so [`participants`](Self::participants) does not list it, and a
+    /// node pricing its egress has to ask here.
+    pub fn trunk_viewers(&self) -> Vec<(String, VideoViewerInfo)> {
+        let mut out: Vec<(String, VideoViewerInfo)> = self
+            .viewers
+            .iter()
+            .filter(|v| v.local_only)
+            .map(|v| (v.key().clone(), Self::viewer_info(v.value())))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Stop forwarding to the participant.
     pub fn unforward(&self, id: &str) {
         if self.viewers.remove(id).is_some() {

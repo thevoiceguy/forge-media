@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counting for whoever it shows, or by a composite, at least 180 lines
   while one composes), which is what a node asks the peer to forward.
   `VideoSource::wanted_height` reads what a composite last drew a source at.
+  `trunk_viewers` lists each trunk forwarding from the room with what it is
+  sent, for a node pricing its egress.
 
 ### Changed
 

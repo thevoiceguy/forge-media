@@ -2356,6 +2356,14 @@ async fn a_trunk_is_sent_this_node_s_people_and_a_peer_s_people_are_forwarded_he
     };
     assert_eq!(s[0].participant.as_deref(), Some("alice"));
     assert!(s[1].paused && s[1].participant.is_none(), "{s:?}");
+    let trunks = video.trunk_viewers();
+    assert_eq!(trunks.len(), 1);
+    assert_eq!(trunks[0].0, "__trunk__node-b");
+    assert_eq!(trunks[0].1.streams.len(), 2);
+    assert!(
+        video.participant("__trunk__node-b").is_none(),
+        "a trunk is no participant"
+    );
     let alice_ssrc = s[0].ssrc;
     peer.until("Alice down the trunk", |p| p.luma(alice_ssrc) == Some(200))
         .await;

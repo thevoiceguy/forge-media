@@ -114,10 +114,6 @@ zeroize = "1.7"
 # Benchmarking
 criterion = { version = "0.8", features = ["html_reports"] }
 
-# eBPF/XDP (Linux only)
-aya-ebpf = "0.1"
-aya-build = "0.2"
-
 # Audio processing
 symphonia = { version = "0.6", features = ["all"] }
 

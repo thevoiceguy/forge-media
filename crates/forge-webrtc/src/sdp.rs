@@ -167,6 +167,10 @@ pub struct LocalVideo<'a> {
     pub content: bool,
     /// The simulcast streams to take, by rid (RFC 8853); empty for none.
     pub simulcast: &'a [String],
+    /// One of our own send-only stream sections (`VideoConfig::streams`),
+    /// by index; `None` for the camera's and the screen's. Names the
+    /// section's track (`stream<i>`).
+    pub stream: Option<u8>,
 }
 
 /// Everything local that goes into an offer or answer.
@@ -206,6 +210,10 @@ pub struct LocalParams<'a> {
     /// A shared screen's section (`a=content:slides`), if we offer or
     /// accept one beside the camera's.
     pub content: Option<LocalVideo<'a>>,
+    /// Send-only sections for streams of our own, offered after the
+    /// others (an answer never makes them: a remote's extra sections are
+    /// rejected).
+    pub streams: Vec<LocalVideo<'a>>,
     /// The id the `sdes:mid` header extension is offered (or mirrored)
     /// under; `None` leaves it out.
     pub mid_ext: Option<u8>,
@@ -295,6 +303,9 @@ pub struct RemoteDescription {
     /// A shared screen's section — the first active `a=content:slides`
     /// one — if the remote offered/answered one.
     pub content: Option<RemoteVideo>,
+    /// Every other active video section, in order: in an answer, those
+    /// it kept of our stream sections (matched to them by `a=mid`).
+    pub streams: Vec<RemoteVideo>,
     /// All remote sections, in order (used to mirror rejected ones).
     pub media: Vec<MediaDescription>,
     /// BUNDLE mids, in order.
@@ -417,6 +428,8 @@ pub struct Negotiated {
     pub video: Option<NegotiatedVideo>,
     /// A shared screen's section, when both sides accepted one.
     pub content: Option<NegotiatedVideo>,
+    /// The remote's stream sections we took, in its order (answers only).
+    pub streams: Vec<NegotiatedVideo>,
 }
 
 /// The first local preference the remote listed, with the **remote's**
@@ -666,6 +679,18 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
     };
     let video = video_index.map(remote_video);
     let content = content_index.map(remote_video);
+    let streams = desc
+        .media
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| {
+            m.media_type == MediaType::Video
+                && m.port != 0
+                && Some(*i) != video_index
+                && Some(*i) != content_index
+        })
+        .map(|(i, _)| remote_video(i))
+        .collect();
 
     let bundle = value_attr(&desc.attributes, "group")
         .and_then(|v| v.strip_prefix("BUNDLE"))
@@ -692,6 +717,7 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
         audio,
         video,
         content,
+        streams,
         media: desc.media.clone(),
         bundle,
         mid_ext,
@@ -926,13 +952,12 @@ fn video_section(
             },
         );
     }
-    source_attrs(
-        &mut media,
-        p,
-        direction,
-        lv.ssrc,
-        if lv.content { "content0" } else { "video0" },
-    );
+    let track = match lv.stream {
+        Some(i) => format!("stream{i}"),
+        None if lv.content => "content0".to_string(),
+        None => "video0".to_string(),
+    };
+    source_attrs(&mut media, p, direction, lv.ssrc, &track);
     media
 }
 
@@ -1013,7 +1038,12 @@ pub fn build_offer(p: &LocalParams<'_>) -> String {
     );
     let mut media = vec![audio];
     let mut bundle = vec![p.mid];
-    for lv in p.video.iter().chain(p.content.iter()) {
+    for lv in p
+        .video
+        .iter()
+        .chain(p.content.iter())
+        .chain(p.streams.iter())
+    {
         let formats = offered_video_formats(lv);
         media.push(video_section(
             p,
@@ -1161,6 +1191,14 @@ pub fn build_answer(
         (Some(lv), Some(rv)) => accept(lv, rv, "2"),
         _ => None,
     };
+    // A remote's own streams, one to a section (a forwarding gateway's),
+    // as many as we take, in its order.
+    let accepted_streams: Vec<_> = remote
+        .streams
+        .iter()
+        .zip(&p.streams)
+        .filter_map(|(rv, lv)| accept(lv, rv, lv.mid))
+        .collect();
 
     let mut media = Vec::with_capacity(remote.media.len());
     let mut bundle: Vec<&str> = Vec::with_capacity(3);
@@ -1173,6 +1211,7 @@ pub fn build_answer(
         let accepted = [&accepted_video, &accepted_content]
             .into_iter()
             .flatten()
+            .chain(&accepted_streams)
             .find(|(index, _, _, _)| i == *index);
         if let Some((_, section, mid, _)) = accepted {
             media.push(section.clone());
@@ -1187,6 +1226,7 @@ pub fn build_answer(
         audio: selected,
         video: accepted_video.map(|(_, _, _, v)| v),
         content: accepted_content.map(|(_, _, _, v)| v),
+        streams: accepted_streams.into_iter().map(|(_, _, _, v)| v).collect(),
     };
     Ok((sdp, negotiated))
 }
@@ -1265,6 +1305,7 @@ a=fmtp:97 apt=96\r\n";
             mid: "0",
             video: None,
             content: None,
+            streams: vec![],
             mid_ext: Some(1),
             session_id: 1,
             session_version: 1,
@@ -1281,6 +1322,7 @@ a=fmtp:97 apt=96\r\n";
             max_kbps: Some(1200),
             content: false,
             simulcast: &[],
+            stream: None,
         }
     }
 
@@ -1919,6 +1961,7 @@ a=ssrc:2222 cname:x\r\n";
             max_kbps: None,
             content: false,
             simulcast: &[],
+            stream: None,
         });
         p.content = Some(LocalVideo {
             ssrc: 20,
@@ -1929,6 +1972,7 @@ a=ssrc:2222 cname:x\r\n";
             max_kbps: None,
             content: true,
             simulcast: &[],
+            stream: None,
         });
         let (answer, negotiated) = build_answer(&p, &remote).unwrap();
         let v = negotiated.video.expect("camera pinned");
@@ -1975,6 +2019,7 @@ a=ssrc:2222 cname:x\r\n";
             max_kbps: None,
             content: true,
             simulcast: &[],
+            stream: None,
         });
         p.mid_ext = Some(1);
         let offer = build_offer(&p);

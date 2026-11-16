@@ -73,6 +73,10 @@ pub enum TransportEvent {
     /// camera's by the `sdes:mid` header extension, the section's
     /// signalled SSRC, or what was learned from earlier packets.
     ContentRtp(RtpPacket),
+    /// An authenticated, decrypted inbound video RTP packet from one of
+    /// the remote's own stream sections we took in an answer, by its
+    /// index there (a forwarding gateway's people, one to a section).
+    StreamRtp(u8, RtpPacket),
     /// The sub-packets of an authenticated, decrypted inbound RTCP
     /// compound packet, in order. Sender reports have already updated the
     /// reception statistics; feedback is the owner's to act on.
@@ -105,13 +109,17 @@ pub struct PayloadMapping {
     pub clock_rate: u32,
 }
 
-/// Which of the two video sections a packet or a sender belongs to.
+/// Which video section a packet or a sender belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VideoStream {
     /// The camera's section.
     Camera,
     /// The shared screen's section (`a=content:slides`).
     Content,
+    /// One of the send-only sections offered for streams of our own
+    /// (`VideoConfig::streams`), by index: a forwarding room's people, one
+    /// to a section. Nothing arrives on them.
+    Stream(u8),
 }
 
 /// Everything the transport needs to sort inbound RTP: the payload types
@@ -131,6 +139,9 @@ pub struct DemuxConfig {
     pub video_ssrc: Option<u32>,
     /// The remote's signalled SSRC for the content section, if any.
     pub content_ssrc: Option<u32>,
+    /// The remote's stream sections we receive, by index: each one's
+    /// `a=mid` and signalled SSRC.
+    pub streams: Vec<(Option<String>, Option<u32>)>,
 }
 
 /// Sorts a video packet into its section (RFC 8843 §9.2): by the
@@ -145,6 +156,7 @@ pub struct VideoDemux {
     content_mid: Option<String>,
     video_ssrc: Option<u32>,
     content_ssrc: Option<u32>,
+    streams: Vec<(Option<String>, Option<u32>)>,
     learned: HashMap<u32, VideoStream>,
 }
 
@@ -156,6 +168,7 @@ impl VideoDemux {
             content_mid: cfg.content_mid.clone(),
             video_ssrc: cfg.video_ssrc,
             content_ssrc: cfg.content_ssrc,
+            streams: cfg.streams.clone(),
             learned: HashMap::new(),
         }
     }
@@ -170,7 +183,10 @@ impl VideoDemux {
                 } else if Some(mid) == self.video_mid.as_deref() {
                     Some(VideoStream::Camera)
                 } else {
-                    None
+                    self.streams
+                        .iter()
+                        .position(|(m, _)| m.as_deref() == Some(mid))
+                        .map(|i| VideoStream::Stream(i as u8))
                 };
                 if let Some(stream) = by_mid {
                     if self.learned.len() < MAX_SOURCES {
@@ -185,6 +201,12 @@ impl VideoDemux {
         }
         if Some(ssrc) == self.content_ssrc && Some(ssrc) != self.video_ssrc {
             VideoStream::Content
+        } else if let Some(i) = self
+            .streams
+            .iter()
+            .position(|(_, s)| *s == Some(ssrc) && Some(ssrc) != self.video_ssrc)
+        {
+            VideoStream::Stream(i as u8)
         } else {
             VideoStream::Camera
         }
@@ -372,6 +394,8 @@ struct Inner {
     video_ssrc: u32,
     /// Our SSRC for the shared screen's section.
     content_ssrc: u32,
+    /// Our SSRC for each send-only stream section, by index.
+    stream_ssrcs: Vec<u32>,
     /// Audio sequence number (video packets arrive with their own).
     seq: u16,
     cname: String,
@@ -381,8 +405,9 @@ struct Inner {
     demux: VideoDemux,
     /// Reception statistics per remote SSRC.
     sources: HashMap<u32, SourceStats>,
-    /// Transmission statistics: `[audio, video, content]`.
-    senders: [SenderStats; 3],
+    /// Transmission statistics: audio, video, content, then each stream
+    /// section's.
+    senders: Vec<SenderStats>,
     last_rtcp: Option<Instant>,
 
     state: Arc<Mutex<ConnectionState>>,
@@ -398,6 +423,7 @@ impl Inner {
             TransportEvent::Rtp(_)
                 | TransportEvent::VideoRtp(_)
                 | TransportEvent::ContentRtp(_)
+                | TransportEvent::StreamRtp(..)
                 | TransportEvent::Rtcp(_)
         );
         if self.events.try_send(ev).is_err() && is_media {
@@ -1194,6 +1220,7 @@ impl Inner {
             MediaKind::Video => match self.demux.stream_of(&pkt) {
                 VideoStream::Camera => TransportEvent::VideoRtp(pkt),
                 VideoStream::Content => TransportEvent::ContentRtp(pkt),
+                VideoStream::Stream(i) => TransportEvent::StreamRtp(i, pkt),
             },
         };
         self.emit(ev);
@@ -1295,6 +1322,14 @@ impl Inner {
         let (ssrc, sender) = match stream {
             VideoStream::Camera => (self.video_ssrc, 1),
             VideoStream::Content => (self.content_ssrc, 2),
+            VideoStream::Stream(i) => {
+                let ssrc = self
+                    .stream_ssrcs
+                    .get(usize::from(i))
+                    .copied()
+                    .ok_or_else(|| WebRtcError::InvalidState(format!("no stream section {i}")))?;
+                (ssrc, 3 + usize::from(i))
+            }
         };
         let mut buf = BytesMut::from(packet.as_ref());
         buf[8..12].copy_from_slice(&ssrc.to_be_bytes());
@@ -1372,6 +1407,7 @@ impl Transport {
         ssrc: u32,
         video_ssrc: u32,
         content_ssrc: u32,
+        stream_ssrcs: Vec<u32>,
         cname: String,
         state: Arc<Mutex<ConnectionState>>,
     ) -> Result<(Transport, mpsc::Receiver<TransportEvent>)> {
@@ -1451,11 +1487,13 @@ impl Transport {
             payload_map: HashMap::new(),
             demux: VideoDemux::default(),
             sources: HashMap::new(),
-            senders: [
-                SenderStats::new(ssrc, 8_000),
-                SenderStats::new(video_ssrc, 90_000),
-                SenderStats::new(content_ssrc, 90_000),
-            ],
+            senders: [ssrc, video_ssrc, content_ssrc]
+                .into_iter()
+                .chain(stream_ssrcs.iter().copied())
+                .enumerate()
+                .map(|(i, s)| SenderStats::new(s, if i == 0 { 8_000 } else { 90_000 }))
+                .collect(),
+            stream_ssrcs,
             last_rtcp: None,
             state,
             events,
@@ -1767,8 +1805,9 @@ impl Transport {
             g.senders[0].set_clock_rate(m.clock_rate);
         }
         if let Some(m) = cfg.payload_map.iter().find(|m| m.kind == MediaKind::Video) {
-            g.senders[1].set_clock_rate(m.clock_rate);
-            g.senders[2].set_clock_rate(m.clock_rate);
+            for sender in g.senders.iter_mut().skip(1) {
+                sender.set_clock_rate(m.clock_rate);
+            }
         }
         g.demux = VideoDemux::new(cfg);
     }
@@ -1786,6 +1825,11 @@ impl Transport {
     /// Our SSRC for the shared screen's section.
     pub fn content_ssrc(&self) -> u32 {
         self.inner.lock().content_ssrc
+    }
+
+    /// Our SSRC for each send-only stream section, by index.
+    pub fn stream_ssrcs(&self) -> Vec<u32> {
+        self.inner.lock().stream_ssrcs.clone()
     }
 
     /// Our sending SSRC.
@@ -2086,6 +2130,26 @@ mod demux_tests {
             p.extension = Some(RtpExtension::one_byte(&[(4, m.as_bytes())]));
         }
         p
+    }
+
+    #[test]
+    fn a_stream_section_s_packets_are_sorted_to_it_by_mid_or_ssrc() {
+        let mut demux = VideoDemux::new(&DemuxConfig {
+            mid_ext: Some(4),
+            video_mid: Some("1".into()),
+            video_ssrc: Some(0xCA),
+            streams: vec![(Some("3".into()), Some(0x30)), (Some("4".into()), None)],
+            ..DemuxConfig::default()
+        });
+        assert_eq!(demux.stream_of(&packet(0x30, None)), VideoStream::Stream(0));
+        // By mid, and the SSRC remembered for the next packets.
+        assert_eq!(
+            demux.stream_of(&packet(0x40, Some("4"))),
+            VideoStream::Stream(1)
+        );
+        assert_eq!(demux.stream_of(&packet(0x40, None)), VideoStream::Stream(1));
+        assert_eq!(demux.stream_of(&packet(0xCA, None)), VideoStream::Camera);
+        assert_eq!(demux.stream_of(&packet(0x99, None)), VideoStream::Camera);
     }
 
     #[test]

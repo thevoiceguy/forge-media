@@ -93,6 +93,10 @@ pub enum SignalingState {
 /// Events from a peer connection (re-exported transport events).
 pub type PeerEvent = TransportEvent;
 
+/// The most send-only stream sections one peer connection offers
+/// ([`VideoConfig::streams`]).
+pub const MAX_STREAMS: u8 = 25;
+
 /// The video section a peer connection offers or is willing to answer.
 #[derive(Debug, Clone)]
 pub struct VideoConfig {
@@ -121,6 +125,13 @@ pub struct VideoConfig {
     /// remote offers. Empty asks for none. What was agreed is
     /// [`NegotiatedVideo::simulcast`](crate::sdp::NegotiatedVideo::simulcast).
     pub simulcast: Vec<String>,
+    /// Send-only video sections to offer after the others, each a stream
+    /// of our own with its own SSRC (`a=mid:3`, `a=mid:4`, …): a
+    /// forwarding room's people, one to a section, so the remote shows
+    /// each on a track of its own without renegotiating as they come and
+    /// go. Their packets leave through [`PeerConnection::stream_sender`].
+    /// Offers only: an answer rejects a remote's extra sections.
+    pub streams: u8,
 }
 
 impl Default for VideoConfig {
@@ -139,6 +150,7 @@ impl Default for VideoConfig {
             h264_profile_level_id: "42e01f".to_string(),
             max_kbps: None,
             content: false,
+            streams: 0,
             simulcast: Vec::new(),
         }
     }
@@ -205,6 +217,11 @@ pub struct PeerConnection {
     ssrc: u32,
     video_ssrc: u32,
     content_ssrc: u32,
+    /// Our SSRC and `a=mid` for each send-only stream section, made when
+    /// the peer connection is (`VideoConfig::streams` then, at most
+    /// [`MAX_STREAMS`]).
+    stream_ssrcs: Vec<u32>,
+    stream_mids: Vec<String>,
     cname: String,
     msid: String,
     /// The codec pinned by offer/answer (with the payload type the remote
@@ -215,6 +232,9 @@ pub struct PeerConnection {
     negotiated_video: Option<NegotiatedVideo>,
     /// The shared screen's section, pinned the same way.
     negotiated_content: Option<NegotiatedVideo>,
+    /// Each stream section, pinned the same way (`None`: the answer
+    /// rejected it, or none was negotiated yet).
+    negotiated_streams: Vec<Option<NegotiatedVideo>>,
     audio_ts: Arc<AtomicU32>,
     audio_started: Arc<AtomicBool>,
 }
@@ -249,6 +269,18 @@ impl PeerConnection {
             content_ssrc
         };
         let session_id = ((rnd >> 64) as u64) & 0x7fff_ffff_ffff_ffff;
+        // Even, like the other video SSRCs, and each its own.
+        let wanted = cfg.video.as_ref().map_or(0, |v| v.streams.min(MAX_STREAMS));
+        let mut stream_ssrcs: Vec<u32> = Vec::with_capacity(usize::from(wanted));
+        while stream_ssrcs.len() < usize::from(wanted) {
+            let s = (uuid::Uuid::new_v4().as_u128() as u32 & !1).max(2);
+            if s != video_ssrc && s != content_ssrc && !stream_ssrcs.contains(&s) {
+                stream_ssrcs.push(s);
+            }
+        }
+        let stream_mids = (0..wanted)
+            .map(|i| (3 + u32::from(i)).to_string())
+            .collect();
         Ok(Self {
             cname: format!("forge-{}", &connection_id[7..15]),
             msid: format!("forge-{}", &connection_id[7..15]),
@@ -268,9 +300,12 @@ impl PeerConnection {
             ssrc,
             video_ssrc,
             content_ssrc,
+            stream_ssrcs,
+            stream_mids,
             negotiated: None,
             negotiated_video: None,
             negotiated_content: None,
+            negotiated_streams: Vec::new(),
             audio_ts: Arc::new(AtomicU32::new((rnd >> 32) as u32)),
             audio_started: Arc::new(AtomicBool::new(false)),
         })
@@ -288,6 +323,7 @@ impl PeerConnection {
             self.ssrc,
             self.video_ssrc,
             self.content_ssrc,
+            self.stream_ssrcs.clone(),
             self.cname.clone(),
             self.state.clone(),
         )
@@ -304,6 +340,7 @@ impl PeerConnection {
         candidates: &'a [IceCandidate],
         setup: DtlsSetup,
         mid_ext: Option<u8>,
+        answering: bool,
     ) -> LocalParams<'a> {
         LocalParams {
             ufrag: &creds.0,
@@ -328,6 +365,7 @@ impl PeerConnection {
                 max_kbps: v.max_kbps,
                 content: false,
                 simulcast: &v.simulcast,
+                stream: None,
             }),
             content: self
                 .cfg
@@ -343,7 +381,40 @@ impl PeerConnection {
                     max_kbps: v.max_kbps,
                     content: true,
                     simulcast: &[],
+                    stream: None,
                 }),
+            streams: self
+                .cfg
+                .video
+                .as_ref()
+                .map(|v| {
+                    // Offered, ours to send; answered, the remote's to
+                    // send us. Held, nothing.
+                    let direction = match (answering, v.direction) {
+                        (_, Direction::Inactive) => Direction::Inactive,
+                        (true, _) => Direction::RecvOnly,
+                        (false, d) if d.sends() => Direction::SendOnly,
+                        (false, _) => Direction::Inactive,
+                    };
+                    self.stream_ssrcs
+                        .iter()
+                        .zip(&self.stream_mids)
+                        .take(usize::from(v.streams))
+                        .enumerate()
+                        .map(|(i, (&ssrc, mid))| LocalVideo {
+                            ssrc,
+                            codecs: &v.codecs,
+                            direction,
+                            mid,
+                            h264_profile_level_id: &v.h264_profile_level_id,
+                            max_kbps: v.max_kbps,
+                            content: false,
+                            simulcast: &[],
+                            stream: Some(i as u8),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             mid_ext,
             session_id: self.session_id,
             session_version: self.session_version,
@@ -377,6 +448,7 @@ impl PeerConnection {
             &candidates,
             DtlsSetup::Actpass,
             Some(MID_EXTENSION_ID),
+            false,
         ));
         self.pending_local_sdp = Some(sdp.clone());
         self.signaling = SignalingState::HaveLocalOffer;
@@ -457,13 +529,14 @@ impl PeerConnection {
         self.session_version += 1;
         // The extension id is the offer's to choose; an answer mirrors it.
         let (answer, negotiated) = sdp::build_answer(
-            &self.local_params(&t, &creds, &candidates, setup, remote.mid_ext),
+            &self.local_params(&t, &creds, &candidates, setup, remote.mid_ext, true),
             &remote,
         )?;
         let selected = negotiated.audio;
         self.negotiated = Some(selected);
         self.negotiated_video = negotiated.video;
         self.negotiated_content = negotiated.content;
+        self.negotiated_streams = negotiated.streams.into_iter().map(Some).collect();
         self.install_demux(&t, remote.mid_ext);
         self.local_sdp = Some(answer.clone());
         self.signaling = SignalingState::Stable;
@@ -525,6 +598,22 @@ impl PeerConnection {
             }
             _ => None,
         };
+        // Each stream section the answer kept, by its mid.
+        let streams = match &self.cfg.video {
+            Some(cfg) => self
+                .stream_mids
+                .iter()
+                .take(usize::from(cfg.streams))
+                .map(|mid| {
+                    remote
+                        .streams
+                        .iter()
+                        .find(|rv| rv.mid.as_deref() == Some(mid.as_str()))
+                        .and_then(|rv| video_from_answer(&cfg.codecs, Direction::SendOnly, &[], rv))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         // The extension is on only if the answer kept it.
         let mid_ext = remote.mid_ext.filter(|id| *id == MID_EXTENSION_ID);
         t.set_remote(
@@ -539,6 +628,7 @@ impl PeerConnection {
         self.negotiated = Some(selected);
         self.negotiated_video = video;
         self.negotiated_content = content;
+        self.negotiated_streams = streams;
         self.install_demux(&t, mid_ext);
         self.local_sdp = self.pending_local_sdp.take();
         self.signaling = SignalingState::Stable;
@@ -568,7 +658,12 @@ impl PeerConnection {
                 });
             }
         }
-        for v in self.negotiated_video.iter().chain(&self.negotiated_content) {
+        for v in self
+            .negotiated_video
+            .iter()
+            .chain(&self.negotiated_content)
+            .chain(self.negotiated_streams.iter().flatten())
+        {
             if !map.iter().any(|m| m.payload_type == v.payload_type) {
                 map.push(PayloadMapping {
                     payload_type: v.payload_type,
@@ -584,6 +679,15 @@ impl PeerConnection {
             content_mid: self.negotiated_content.as_ref().and_then(|v| v.mid.clone()),
             video_ssrc: self.negotiated_video.as_ref().and_then(|v| v.remote_ssrc),
             content_ssrc: self.negotiated_content.as_ref().and_then(|v| v.remote_ssrc),
+            // Only sections the remote sends us on: ours carry nothing in.
+            streams: self
+                .negotiated_streams
+                .iter()
+                .map(|v| match v {
+                    Some(v) if v.direction.receives() => (v.mid.clone(), v.remote_ssrc),
+                    _ => (None, None),
+                })
+                .collect(),
         });
     }
 
@@ -718,6 +822,47 @@ impl PeerConnection {
             codec: v.codec,
             payload_type: v.payload_type,
         })
+    }
+
+    /// A cloneable handle for sending one of our own streams on stream
+    /// section `index` (`VideoConfig::streams`). Fails until that section
+    /// is negotiated, or when the answer rejected it.
+    pub fn stream_sender(&self, index: u8) -> Result<VideoSender> {
+        let t = self
+            .transport
+            .clone()
+            .ok_or_else(|| WebRtcError::InvalidState("no transport yet".into()))?;
+        let v = self
+            .negotiated_streams
+            .get(usize::from(index))
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                WebRtcError::InvalidState(format!("stream section {index} not negotiated"))
+            })?;
+        Ok(VideoSender {
+            transport: t,
+            stream: VideoStream::Stream(index),
+            ssrc: self.stream_ssrcs[usize::from(index)],
+            codec: v.codec,
+            payload_type: v.payload_type,
+        })
+    }
+
+    /// Every stream section, as offer/answer pinned it, by index: `None`
+    /// where the answer rejected one.
+    pub fn negotiated_streams(&self) -> &[Option<NegotiatedVideo>] {
+        &self.negotiated_streams
+    }
+
+    /// Our SSRC for each stream section, by index.
+    pub fn stream_ssrcs(&self) -> &[u32] {
+        &self.stream_ssrcs
+    }
+
+    /// The `a=mid` of each stream section, by index: what the remote's
+    /// transceivers are found by.
+    pub fn stream_mids(&self) -> &[String] {
+        &self.stream_mids
     }
 
     /// Send RTCP feedback (PLI, FIR, NACK, REMB, …) or a BYE. The transport

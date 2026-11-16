@@ -280,6 +280,10 @@ pub(crate) struct Viewer {
     pub reported: Mutex<Vec<(u32, Option<String>, bool)>>,
     pub remb_kbps: AtomicU32,
     pub stats: ViewerStats,
+    /// A trunk to a peer node (FCP `docs/FORWARDING_ROOMS.md` §2.8): it is
+    /// sent this node's own people only, never a peer's, so a room on
+    /// three nodes never sends anyone back where they came from.
+    pub local_only: bool,
     cache_packets: usize,
     tx: mpsc::Sender<Bytes>,
 }
@@ -290,6 +294,7 @@ impl Viewer {
         req: &ForwardRequest,
         cache_packets: usize,
         channel_packets: usize,
+        local_only: bool,
     ) -> (std::sync::Arc<Self>, mpsc::Receiver<Bytes>) {
         let (tx, rx) = mpsc::channel(channel_packets.max(8));
         let v = std::sync::Arc::new(Self {
@@ -302,6 +307,7 @@ impl Viewer {
             reported: Mutex::new(Vec::new()),
             remb_kbps: AtomicU32::new(0),
             stats: ViewerStats::default(),
+            local_only,
             cache_packets,
             tx,
         });
@@ -636,6 +642,7 @@ mod tests {
             },
             64,
             64,
+            false,
         );
         v.new_stream(StreamTarget::Speaker, &[])
     }

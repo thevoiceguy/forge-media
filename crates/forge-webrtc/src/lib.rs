@@ -57,7 +57,7 @@ pub use forge_ice::{IceCandidate, TurnServer};
 pub use forge_rtp::{RtcpPacket, SourceStats};
 pub use peer::{
     AudioSender, ConnectionState, PeerConfig, PeerConnection, PeerEvent, SignalingState,
-    VideoConfig, VideoSender,
+    VideoConfig, VideoSender, MAX_STREAMS,
 };
 pub use sdp::{Direction, NegotiatedVideo, MID_EXTENSION_URI};
 pub use transport::{

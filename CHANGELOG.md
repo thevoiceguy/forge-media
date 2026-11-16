@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-11-16] — workspace release
+
+**Crate versions:** **forge-webrtc 0.10.0**. Every other crate is unchanged
+from 2026-11-14. Embeds siphon-rs **v2026.10.22.2** (unchanged).
+
+For phase R4a of FCP's `docs/FORWARDING_ROOMS.md`: a browser shown each
+person of a forwarding room on a track of its own, with no renegotiation as
+people come and go.
+
+### Added
+
+- **forge-webrtc:** `VideoConfig::streams` — send-only video sections
+  offered after the camera's and the screen's (`a=mid:3`, `a=mid:4`, …, up
+  to `MAX_STREAMS`, 25), each a stream of our own with its own SSRC, track
+  (`stream<i>`) and sender report. `PeerConnection::stream_sender(i)`
+  sends on one; `negotiated_streams`, `stream_ssrcs` and `stream_mids` say
+  what the answer kept (a rejected section is `None`). Feedback about a
+  stream arrives with the rest, by its SSRC.
+- **forge-webrtc:** an answerer configured with `streams` takes up to that
+  many of a remote's extra video sections, receive-only, and their packets
+  arrive as `TransportEvent::StreamRtp(index, packet)`, sorted by `sdes:mid`
+  or the section's signalled SSRC (`DemuxConfig::streams`).
+
+### Changed (breaking)
+
+- **forge-webrtc:** `VideoStream::Stream(u8)`, `TransportEvent::StreamRtp`,
+  `Negotiated::streams`, `RemoteDescription::streams`,
+  `LocalParams::streams`, `LocalVideo::stream` and `DemuxConfig::streams`
+  are new; `Transport::new` takes the stream SSRCs. Exhaustive matches and
+  struct literals need them.
+
 ## [2026-11-14] — workspace release
 
 **Crate versions:** **forge-conference 0.16.1**. Every other crate is

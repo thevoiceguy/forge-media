@@ -407,3 +407,140 @@ async fn a_peer_without_content_rejects_the_second_section() {
     let got = expect_video(&mut callee_ev, 1).await;
     assert_eq!({ got[0].header.ssrc }, caller.video_ssrc());
 }
+
+/// Stream packets the callee receives, by section index.
+async fn expect_streams(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<PeerEvent>,
+    n: usize,
+) -> Vec<(u8, RtpPacket)> {
+    let mut out = Vec::new();
+    while out.len() < n {
+        let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("stream packets in time")
+            .expect("events closed");
+        if let PeerEvent::StreamRtp(i, pkt) = ev {
+            out.push((i, pkt));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn streams_of_our_own_ride_send_only_sections_the_answer_takes_or_rejects() {
+    init_tracing();
+    let vp8 = [(VideoCodec::VP8, 96)];
+    let with_streams = |streams| PeerConfig {
+        video: Some(VideoConfig {
+            codecs: vp8.to_vec(),
+            streams,
+            ..VideoConfig::default()
+        }),
+        ..PeerConfig::default()
+    };
+    // We offer three; the far end takes two.
+    let (caller, callee, mut caller_ev, mut callee_ev) =
+        connect_pair_with(with_streams(3), with_streams(2)).await;
+    let offer = callee.remote_sdp().unwrap();
+    assert!(offer.contains("a=group:BUNDLE 0 1 3 4 5\r\n"), "{offer}");
+    for (i, ssrc) in caller.stream_ssrcs().iter().enumerate() {
+        let mid = format!("a=mid:{}\r\n", 3 + i);
+        let section = &offer[offer.find(&mid).unwrap()..];
+        let section = &section[..section.find("m=").unwrap_or(section.len())];
+        assert!(section.contains("a=sendonly\r\n"), "{section}");
+        assert!(
+            section.contains(&format!("a=ssrc:{ssrc} cname:")),
+            "{section}"
+        );
+        assert!(section.contains(&format!(" stream{i}")), "{section}");
+    }
+    let mut ours: Vec<u32> = caller.stream_ssrcs().to_vec();
+    ours.extend([caller.video_ssrc(), caller.content_ssrc(), caller.ssrc()]);
+    ours.sort_unstable();
+    ours.dedup();
+    assert_eq!(ours.len(), 6, "every SSRC its own");
+
+    // The offerer pins the two taken, send-only; the third is rejected.
+    let pinned = caller.negotiated_streams();
+    assert_eq!(pinned.len(), 3);
+    for v in &pinned[..2] {
+        let v = v.as_ref().expect("taken");
+        assert_eq!(v.direction, Direction::SendOnly);
+        assert_eq!((v.codec, v.payload_type), (VideoCodec::VP8, 96));
+    }
+    assert!(pinned[2].is_none(), "{pinned:?}");
+    assert!(caller.stream_sender(2).is_err());
+    // The answerer pins them receive-only, from our SSRCs.
+    let theirs = callee.negotiated_streams();
+    assert_eq!(theirs.len(), 2);
+    for (i, v) in theirs.iter().enumerate() {
+        let v = v.as_ref().unwrap();
+        assert_eq!(v.direction, Direction::RecvOnly);
+        assert_eq!(v.remote_ssrc, Some(caller.stream_ssrcs()[i]));
+        assert_eq!(v.mid.as_deref(), Some(caller.stream_mids()[i].as_str()));
+    }
+
+    // Each stream on its own section, under its own SSRC, sorted into
+    // its own event; the camera's packets stay the camera's.
+    let first = caller.stream_sender(0).unwrap();
+    let second = caller.stream_sender(1).unwrap();
+    assert_eq!(first.stream(), VideoStream::Stream(0));
+    assert_eq!(second.ssrc(), caller.stream_ssrcs()[1]);
+    first.send_packet(video_packet(10, 0, true)).await.unwrap();
+    second.send_packet(video_packet(20, 0, true)).await.unwrap();
+    second
+        .send_packet(video_packet(21, 3000, true))
+        .await
+        .unwrap();
+    caller
+        .video_sender()
+        .unwrap()
+        .send_packet(video_packet(1, 0, true))
+        .await
+        .unwrap();
+    let got = expect_streams(&mut callee_ev, 3).await;
+    let of = |i: u8| -> Vec<(u32, u16)> {
+        got.iter()
+            .filter(|(s, _)| *s == i)
+            .map(|(_, p)| (p.header.ssrc, p.header.sequence_number))
+            .collect()
+    };
+    assert_eq!(of(0), [(caller.stream_ssrcs()[0], 10)]);
+    assert_eq!(
+        of(1),
+        [
+            (caller.stream_ssrcs()[1], 20),
+            (caller.stream_ssrcs()[1], 21)
+        ]
+    );
+    let cam = expect_video(&mut callee_ev, 1).await;
+    assert_eq!({ cam[0].header.ssrc }, caller.video_ssrc());
+
+    // Feedback about a stream reaches its sender by SSRC, and every
+    // stream that sent has its sender report.
+    callee
+        .send_rtcp(&[RtcpPacket::PayloadFeedback(PsFeedback::pli(
+            callee.video_ssrc(),
+            caller.stream_ssrcs()[1],
+        ))])
+        .await
+        .unwrap();
+    expect_rtcp(
+        &mut caller_ev,
+        Duration::from_secs(5),
+        |p| matches!(p, RtcpPacket::PayloadFeedback(f) if f.media_ssrc == caller.stream_ssrcs()[1]),
+    )
+    .await;
+    let reports = expect_rtcp(
+        &mut callee_ev,
+        Duration::from_secs(10),
+        |p| matches!(p, RtcpPacket::SenderReport(sr) if sr.ssrc == caller.stream_ssrcs()[1]),
+    )
+    .await;
+    assert!(
+        reports.iter().any(
+            |p| matches!(p, RtcpPacket::SenderReport(sr) if sr.ssrc == caller.stream_ssrcs()[0])
+        ),
+        "{reports:?}"
+    );
+}

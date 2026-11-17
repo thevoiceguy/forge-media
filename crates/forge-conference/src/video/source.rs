@@ -307,6 +307,11 @@ pub struct VideoSource {
     local_ssrc: u32,
     last_packet: Mutex<Option<Instant>>,
     pub stats: Arc<SourceStats>,
+    /// Transport-cc feedback for what the sender sends, when its section
+    /// negotiated it: the extension's id and the writer (TRANSPORT_CC.md
+    /// §3.2, the uplink). One writer for the section: every simulcast
+    /// layer shares the transport's numbering.
+    feedback: Mutex<Option<(u8, forge_bwe::FeedbackWriter)>>,
 }
 
 impl VideoSource {
@@ -383,6 +388,7 @@ impl VideoSource {
             }),
             accepted_this_second: Mutex::new((now, 0)),
             local_ssrc,
+            feedback: Mutex::new(None),
             last_packet: Mutex::new(None),
             limits,
             stats: Arc::new(SourceStats::default()),
@@ -590,7 +596,34 @@ impl VideoSource {
 
     /// Feed one RTP packet (already SRTP-unprotected and parsed). Returns
     /// the RTCP feedback to send back to the sender, if any.
+    /// Write transport-cc feedback for this sender's packets numbered
+    /// under extension `ext_id` (`None`: stop).
+    pub fn set_transport_cc(&self, ext_id: Option<u8>) {
+        *self.feedback.lock() = ext_id.map(|id| (id, forge_bwe::FeedbackWriter::new()));
+    }
+
     pub fn push(&self, packet: RtpPacket, pool: &CodecPool, now: Instant) -> Vec<RtcpPacket> {
+        let ssrc = packet.header.ssrc;
+        let numbered = {
+            let mut fb = self.feedback.lock();
+            fb.as_mut().and_then(|(id, writer)| {
+                let seq = forge_rtp::transport_cc::transport_sequence(&packet, *id)?;
+                writer.on_packet(seq, now);
+                writer.poll(now)
+            })
+        };
+        let mut out = self.push_packet(packet, pool, now);
+        if let Some(fb) = numbered {
+            out.push(RtcpPacket::TransportFeedback(RtpFeedback {
+                sender_ssrc: self.local_ssrc,
+                media_ssrc: ssrc,
+                kind: forge_rtp::rtcp::TransportFeedback::TransportCc(fb),
+            }));
+        }
+        out
+    }
+
+    fn push_packet(&self, packet: RtpPacket, pool: &CodecPool, now: Instant) -> Vec<RtcpPacket> {
         let Some(index) = self.layer_of(&packet) else {
             // A simulcast packet naming no layer we know: until its rid
             // binds its SSRC there is nowhere to put it.

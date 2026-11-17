@@ -1,6 +1,6 @@
 [package]
 name = "forge-conference"
-version = "0.16.2"
+version = "0.17.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -12,6 +12,7 @@ forge-core = { path = "../forge-core" }
 forge-engine = { path = "../forge-engine" }
 forge-mixer = { path = "../forge-mixer" }
 forge-recorder = { path = "../forge-recorder" }
+forge-bwe = { path = "../forge-bwe" }
 forge-rtp = { path = "../forge-rtp" }
 # For `H264Fmtp::forwardable_to`: whether one leg's H.264 stream can be
 # sent to another leg untouched (§5.6).

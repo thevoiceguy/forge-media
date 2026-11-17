@@ -28,6 +28,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use super::congestion::Congestion;
 use super::content::{SourceKey, StreamKind, View};
 
 /// Whose tiles a composite is drawn from.
@@ -166,6 +167,10 @@ pub struct Subscriber {
     /// The same, for a content channel, which moves in frame rate
     /// rather than resolution: `true` is down.
     fps_ladder: Mutex<Option<(bool, Instant)>>,
+    /// Transport-cc, when the section negotiated it (TRANSPORT_CC.md
+    /// §3.2): what is sent is numbered, and the send-side estimate is the
+    /// budget while its feedback is fresh.
+    cc: Mutex<Option<Arc<Congestion>>>,
 }
 
 impl Subscriber {
@@ -201,6 +206,7 @@ impl Subscriber {
             forwarding: Mutex::new(None),
             ladder: Mutex::new(None),
             fps_ladder: Mutex::new(None),
+            cc: Mutex::new(None),
         });
         (sub, rx)
     }
@@ -255,7 +261,7 @@ impl Subscriber {
         now: Instant,
     ) -> Option<Rung> {
         let rung = ladder.rung_for(self.watching.lock().flavor.resolution);
-        let wanted = ladder.wants(rung, self.remb_kbps(), policy);
+        let wanted = ladder.wants(rung, self.budget_kbps(), policy);
         let mut state = self.ladder.lock();
         match wanted {
             Move::Stay => {
@@ -301,7 +307,7 @@ impl Subscriber {
         now: Instant,
     ) -> Option<u32> {
         let flavor = self.watching.lock().flavor.clone();
-        let remb = self.remb_kbps();
+        let remb = self.budget_kbps();
         let rate = flavor.max_kbps as f32;
         let wanted = if remb == 0 {
             None
@@ -502,7 +508,29 @@ impl Subscriber {
         self.stats.remb_kbps.load(Ordering::Relaxed)
     }
 
+    /// Number what is sent under `ext_id` for transport-cc (`None`: no
+    /// longer).
+    pub fn set_transport_cc(&self, ext_id: Option<u8>) {
+        *self.cc.lock() = ext_id.map(|id| Arc::new(Congestion::new(id)));
+    }
+
+    pub fn congestion(&self) -> Option<Arc<Congestion>> {
+        self.cc.lock().clone()
+    }
+
+    /// What the ladder and the encoder go by: the send-side estimate while
+    /// its feedback is fresh, else the REMB (0: neither).
+    pub fn budget_kbps(&self) -> u32 {
+        self.congestion()
+            .and_then(|cc| cc.budget_kbps(Instant::now()))
+            .unwrap_or_else(|| self.remb_kbps())
+    }
+
     fn deliver(&self, bytes: Bytes) {
+        let bytes = match self.congestion() {
+            Some(cc) => cc.stamp(bytes, None),
+            None => bytes,
+        };
         let len = bytes.len() as u64;
         match self.tx.try_send(bytes) {
             Ok(()) => {

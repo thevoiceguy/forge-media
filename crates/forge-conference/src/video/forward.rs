@@ -25,6 +25,7 @@ use forge_video::frame::Resolution;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
+use super::congestion::Congestion;
 use super::content::SourceKey;
 use super::egress::default_kbps;
 
@@ -52,6 +53,10 @@ pub struct ForwardRequest {
     /// be forwardable to.
     pub profile: String,
     pub payload_type: u8,
+    /// The transport-wide sequence extension's id, when the section
+    /// negotiated transport-cc (FCP `docs/TRANSPORT_CC.md`): the room
+    /// numbers what it sends, reads the feedback, and probes.
+    pub transport_cc: Option<u8>,
 }
 
 /// Whose a stream is.
@@ -148,9 +153,14 @@ impl ForwardedStreamInfo {
 pub struct VideoViewerInfo {
     pub codec: VideoCodec,
     pub streams: Vec<ForwardedStreamInfo>,
-    /// The budget the allocator spends: the latest REMB (0 = none yet,
-    /// which is no limit).
+    /// The latest REMB (0 = none yet).
     pub remb_kbps: u32,
+    /// The send-side estimate from transport-cc feedback, while that
+    /// feedback is fresh.
+    pub transport_cc_kbps: Option<u32>,
+    /// The budget the allocator spends: the send-side estimate while
+    /// fresh, else the REMB (0 = neither, which is no limit).
+    pub budget_kbps: u32,
     pub packets_sent: u64,
     pub packets_dropped: u64,
     pub nacks_received: u64,
@@ -212,6 +222,29 @@ pub struct Ask<'a> {
     pub priority: Option<u8>,
     pub max_height: u32,
     pub layers: &'a [LayerOption],
+}
+
+/// What the cheapest single upgrade from `chosen` would cost in all: one
+/// paused stream given its smallest layer, or one stream moved a layer up
+/// within its height limit. `None` when nothing is held back.
+pub fn next_upgrade_kbps(asks: &[Ask<'_>], chosen: &[Option<usize>]) -> Option<u32> {
+    let spent: u64 = asks
+        .iter()
+        .zip(chosen)
+        .filter_map(|(a, c)| c.map(|j| u64::from(a.layers[j].kbps)))
+        .sum();
+    asks.iter()
+        .zip(chosen)
+        .filter_map(|(a, c)| match c {
+            None => a.layers.first().map(|l| spent + u64::from(l.kbps)),
+            Some(j) => a
+                .layers
+                .get(j + 1)
+                .filter(|l| l.height <= a.max_height)
+                .map(|l| spent - u64::from(a.layers[*j].kbps) + u64::from(l.kbps)),
+        })
+        .min()
+        .map(|k| k.min(u64::from(u32::MAX)) as u32)
 }
 
 /// Spend `budget_kbps` (`None` is no limit) across the asks: the index
@@ -284,6 +317,8 @@ pub(crate) struct Viewer {
     /// sent this node's own people only, never a peer's, so a room on
     /// three nodes never sends anyone back where they came from.
     pub local_only: bool,
+    /// Transport-cc, when the section negotiated it.
+    pub cc: Option<Congestion>,
     cache_packets: usize,
     tx: mpsc::Sender<Bytes>,
 }
@@ -308,6 +343,7 @@ impl Viewer {
             remb_kbps: AtomicU32::new(0),
             stats: ViewerStats::default(),
             local_only,
+            cc: req.transport_cc.map(Congestion::new),
             cache_packets,
             tx,
         });
@@ -344,8 +380,22 @@ impl Viewer {
         self.streams.lock().iter().find(|s| s.ssrc == ssrc).cloned()
     }
 
-    /// Hand a packet to the transport.
+    /// Hand a packet to the transport, numbered for transport-cc when the
+    /// section has it: as it leaves, so a retransmission is numbered anew.
     pub fn deliver(&self, bytes: Bytes) -> bool {
+        self.send(bytes, None)
+    }
+
+    /// A probe packet of cluster `probe` (padding on one of the streams).
+    pub fn deliver_probe(&self, bytes: Bytes, probe: u32) -> bool {
+        self.send(bytes, Some(probe))
+    }
+
+    fn send(&self, bytes: Bytes, probe: Option<u32>) -> bool {
+        let bytes = match &self.cc {
+            Some(cc) => cc.stamp(bytes, probe),
+            None => bytes,
+        };
         match self.tx.try_send(bytes) {
             Ok(()) => {
                 self.stats.packets_sent.fetch_add(1, Ordering::Relaxed);
@@ -358,8 +408,45 @@ impl Viewer {
         }
     }
 
+    /// What the allocator spends: the send-side estimate while its
+    /// feedback is fresh, else the REMB — never the smaller of the two,
+    /// since a client sending both may let one go stale (TRANSPORT_CC.md
+    /// §3.2).
     pub fn budget_kbps(&self) -> Option<u32> {
-        Some(self.remb_kbps.load(Ordering::Relaxed)).filter(|k| *k > 0)
+        let now = Instant::now();
+        self.cc
+            .as_ref()
+            .and_then(|cc| cc.budget_kbps(now))
+            .or_else(|| Some(self.remb_kbps.load(Ordering::Relaxed)).filter(|k| *k > 0))
+    }
+
+    /// How long a move up waits to see the budget hold: halved while a
+    /// probe has just proved the path.
+    pub fn up_after(&self, now: Instant) -> Duration {
+        match &self.cc {
+            Some(cc) if cc.proved(now) => STREAM_UP_AFTER / 2,
+            _ => STREAM_UP_AFTER,
+        }
+    }
+
+    /// A padding packet for a probe, on the tallest stream carrying
+    /// something (so it costs no new SSRC).
+    pub fn probe_padding(&self) -> Option<Bytes> {
+        let tallest = {
+            let streams = self.streams.lock();
+            streams
+                .iter()
+                .filter_map(|s| {
+                    let st = s.state.lock();
+                    (!st.paused).then(|| (st.layer.as_ref().map_or(0, |l| l.height), s.clone()))
+                })
+                .max_by_key(|(h, _)| *h)
+                .map(|(_, s)| s)?
+        };
+        let mut st = tallest.state.lock();
+        st.rewriter
+            .padding(self.payload_type, forge_bwe::PROBE_PADDING as u8)
+            .map(|p| p.to_bytes().freeze())
     }
 }
 
@@ -418,7 +505,18 @@ impl Stream {
 
     /// Decide this tick's move: `want` is the source and layer the
     /// allocator gave the stream, or `None` for a pause.
+    #[cfg(test)]
     pub fn step(&self, want: Option<(SourceKey, LayerOption)>, now: Instant) -> Step {
+        self.step_within(want, now, STREAM_UP_AFTER)
+    }
+
+    /// [`step`](Self::step), a move up waiting `up_after` to hold.
+    pub fn step_within(
+        &self,
+        want: Option<(SourceKey, LayerOption)>,
+        now: Instant,
+        up_after: Duration,
+    ) -> Step {
         let mut s = self.state.lock();
         let Some((source, layer)) = want else {
             s.up = None;
@@ -450,7 +548,7 @@ impl Stream {
         if up {
             match s.up {
                 Some((ssrc, since)) if ssrc == layer.ssrc => {
-                    if now.saturating_duration_since(since) < STREAM_UP_AFTER {
+                    if now.saturating_duration_since(since) < up_after {
                         return Step::Stay;
                     }
                 }
@@ -557,6 +655,30 @@ mod tests {
     }
 
     #[test]
+    fn the_next_upgrade_is_the_cheapest_single_step_up() {
+        let l = three();
+        let asks = [
+            Ask {
+                priority: Some(1),
+                max_height: u32::MAX,
+                layers: &l,
+            },
+            Ask {
+                priority: None,
+                max_height: 360,
+                layers: &l,
+            },
+        ];
+        // Both at 180p (300 in all): the cheapest step is either to 360p
+        // (+350).
+        assert_eq!(next_upgrade_kbps(&asks, &[Some(0), Some(0)]), Some(650));
+        // The second paused: giving it its smallest layer costs least.
+        assert_eq!(next_upgrade_kbps(&asks, &[Some(1), None]), Some(650));
+        // The first at 720p, the second at its height limit: nothing left.
+        assert_eq!(next_upgrade_kbps(&asks, &[Some(2), Some(1)]), None);
+    }
+
+    #[test]
     fn a_short_budget_goes_to_the_first_priority_and_pauses_the_rest() {
         let l = three();
         let ask = |priority, max_height| Ask {
@@ -639,6 +761,7 @@ mod tests {
                 codec,
                 profile: String::new(),
                 payload_type: 96,
+                transport_cc: None,
             },
             64,
             64,

@@ -481,6 +481,33 @@ impl StreamRewriter {
         self.pending = None;
     }
 
+    /// A padding-only packet (RFC 3550 §5.1) on the outgoing stream, `len`
+    /// bytes of padding, for a bandwidth probe: the next sequence number,
+    /// the last timestamp, no payload. The current source's packets that
+    /// follow are numbered on after it, so the stream stays continuous.
+    /// `None` while nothing is forwarded (a paused stream sends nothing,
+    /// not even padding).
+    pub fn padding(&mut self, payload_type: u8, len: u8) -> Option<RtpPacket> {
+        let source = self.current.as_mut()?;
+        if len == 0 {
+            return None;
+        }
+        let seq = self.last_seq.wrapping_add(1);
+        source.seq_offset = source.seq_offset.wrapping_add(1);
+        self.last_seq = seq;
+        let mut p = RtpPacket::build(
+            payload_type,
+            seq,
+            self.last_ts,
+            self.out_ssrc,
+            bytes::Bytes::new(),
+            false,
+        );
+        p.header.version_flags |= 0x20;
+        p.padding_len = len;
+        Some(p)
+    }
+
     /// Offer a packet from one of the sources. Returns the packet to send
     /// on the outgoing stream, rewritten, or `None` when it is dropped.
     pub fn feed(&mut self, packet: &RtpPacket) -> Option<RtpPacket> {
@@ -714,6 +741,27 @@ mod tests {
         assert_eq!(seq(&out), 1002);
         assert_eq!(ts(&out), 8000);
         assert_eq!(rw.switches(), 1);
+    }
+
+    #[test]
+    fn padding_takes_the_next_number_and_the_stream_carries_on_after_it() {
+        let mut rw = StreamRewriter::new(VideoCodec::H264, 0xFEED, 1000, 5000);
+        assert!(rw.padding(96, 255).is_none(), "nothing forwarded yet");
+        rw.select(0xA);
+        rw.feed(&pkt(0xA, 11, 3600, IDR)).unwrap();
+        let pad = rw.padding(97, 255).unwrap();
+        assert_eq!((seq(&pad), ts(&pad), ssrc(&pad)), (1001, 5000, 0xFEED));
+        assert_eq!(pad.header.payload_type(), 97);
+        assert!(pad.payload.is_empty());
+        let bytes = pad.to_bytes().freeze();
+        assert_eq!(bytes.len(), 12 + 255);
+        let back = RtpPacket::parse(bytes).unwrap();
+        assert!(back.header.padding() && back.payload.is_empty());
+        // The source's next packet follows the padding.
+        let out = rw.feed(&pkt(0xA, 12, 6600, P_SLICE)).unwrap();
+        assert_eq!(seq(&out), 1002);
+        rw.clear();
+        assert!(rw.padding(96, 255).is_none(), "paused");
     }
 
     #[test]

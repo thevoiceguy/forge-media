@@ -1603,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "forge-bwe"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "forge-rtp",
 ]
@@ -1622,10 +1622,11 @@ dependencies = [
 
 [[package]]
 name = "forge-conference"
-version = "0.16.2"
+version = "0.17.0"
 dependencies = [
  "bytes",
  "dashmap",
+ "forge-bwe",
  "forge-core",
  "forge-engine",
  "forge-mixer",
@@ -1861,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2055,7 +2056,7 @@ dependencies = [
 
 [[package]]
 name = "forge-webrtc"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bytes",
  "dashmap",

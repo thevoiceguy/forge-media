@@ -68,6 +68,15 @@ pub struct ParticipantCommands {
 
     /// Leave conference
     pub leave: String, // default: "*9"
+
+    /// Raise or lower one's hand (FCP's `docs/WEBINARS.md` §2.5): a
+    /// webinar's attendee asking to speak.
+    #[serde(default = "default_raise_hand")]
+    pub raise_hand: String, // default: "*4"
+}
+
+fn default_raise_hand() -> String {
+    "*4".to_string()
 }
 
 impl Default for ParticipantCommands {
@@ -78,6 +87,7 @@ impl Default for ParticipantCommands {
             volume_down: "*8".to_string(),
             info: "*0".to_string(),
             leave: "*9".to_string(),
+            raise_hand: default_raise_hand(),
         }
     }
 }
@@ -132,6 +142,8 @@ pub enum DtmfCommand {
     VolumeDown,
     Info,
     Leave,
+    /// Raise the hand if it is down, lower it if it is up.
+    RaiseHand,
 
     // Host commands
     KickParticipant(usize), // participant number
@@ -408,6 +420,8 @@ impl DtmfCommandHandler {
             participant_command = Some(DtmfCommand::Info);
         } else if digits == self.config.participant_commands.leave {
             participant_command = Some(DtmfCommand::Leave);
+        } else if digits == self.config.participant_commands.raise_hand {
+            participant_command = Some(DtmfCommand::RaiseHand);
         }
 
         // If we found a participant command, check if digits could also be a host command prefix
@@ -524,6 +538,7 @@ impl DtmfCommandHandler {
             || part_cmds.volume_down.starts_with(digits)
             || part_cmds.info.starts_with(digits)
             || part_cmds.leave.starts_with(digits)
+            || part_cmds.raise_hand.starts_with(digits)
         {
             return true;
         }
@@ -591,6 +606,34 @@ mod tests {
             result,
             Some((DtmfCommand::VolumeUp, ParticipantRole::Participant))
         );
+    }
+
+    #[test]
+    fn star_four_raises_a_hand_and_the_room_passes_it_on() {
+        let handler = DtmfCommandHandler::new("test-room", ConferenceDtmfConfig::default());
+        assert_eq!(handler.process_digit("alice", '*'), None);
+        assert_eq!(
+            handler.process_digit("alice", '4'),
+            Some((DtmfCommand::RaiseHand, ParticipantRole::Participant))
+        );
+        // A configuration written before the key existed still has it.
+        let old: ParticipantCommands = toml::from_str(
+            "mute_toggle = \"*6\"\nvolume_up = \"*7\"\nvolume_down = \"*8\"\ninfo = \"*0\"\nleave = \"*9\"\n",
+        )
+        .unwrap();
+        assert_eq!(old.raise_hand, "*4");
+
+        let room = crate::ConferenceRoom::new(
+            "hands",
+            forge_core::AudioFormat::pcm_mono(),
+            160,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
+        room.request_hand_toggle("alice");
+        room.request_hand_toggle("bob");
+        assert_eq!(room.drain_hand_requests(), vec!["alice", "bob"]);
+        assert!(room.drain_hand_requests().is_empty());
     }
 
     #[test]

@@ -470,6 +470,79 @@ async fn subscribers_with_the_same_needs_share_an_encoder_and_exclude_self_split
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_audience_watches_one_shared_composite_and_is_never_drawn() {
+    // A webinar (FCP docs/WEBINARS.md §2.3): the stage sends video, the
+    // audience listens and watches.
+    let audio = audio_room("webinar");
+    audio.add_participant("alice", true).unwrap();
+    audio.add_participant("bob", false).unwrap();
+    // One attendee before the video starts, adopted; one after, joined.
+    audio.add_listener("x").unwrap();
+    let video = audio.enable_video(
+        VideoRoomSettings {
+            exclude_self: true,
+            ..settings(256, 72, 30)
+        },
+        &VideoBackend::raw(),
+    );
+    audio.add_listener("y").unwrap();
+    assert!(video.is_audience("x") && video.is_audience("y"));
+    assert!(!video.is_audience("alice"));
+    assert_eq!(video.audience_count(), 2);
+
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
+    video.add_source("bob", VideoCodec::VP8, "").unwrap();
+    let _alice = video
+        .subscribe("alice", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    let mut x = video
+        .subscribe("x", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    let _y = video
+        .subscribe("y", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    // Alice's composite leaves her out; the audience shares one of the
+    // whole room, whatever `exclude_self` says.
+    let status = video.status();
+    assert_eq!(status.encoders, 2, "{:?}", status.outputs);
+    assert!(status.outputs.iter().any(|o| o.scope == OutputScope::All));
+
+    let mut cam_a = Camera::new(1, 128, 72);
+    let mut cam_b = Camera::new(2, 128, 72);
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            for _ in 0..40 {
+                for p in cam_a.frame(200) {
+                    video.push_rtp("alice", p);
+                }
+                for p in cam_b.frame(60) {
+                    video.push_rtp("bob", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+    // Two tiles side by side: the stage. Drawn, the audience would make
+    // it a two-by-two grid.
+    let mut screen = Screen::new();
+    wait_for_composite(&mut x.packets, &mut screen, |f| {
+        f.luma(64, 36) == 200 && f.luma(192, 36) == 60
+    })
+    .await;
+    let info = video.participant("x").unwrap();
+    assert!(info.audience);
+    assert!(info.subscription.is_some() && info.source.is_none());
+
+    // Brought to the stage, an attendee is the audience no longer.
+    audio.set_listener("y", false).unwrap();
+    assert!(!video.is_audience("y"));
+    assert_eq!(video.audience_count(), 1);
+    feeder.await.unwrap();
+    audio.disable_video();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn loss_raises_a_nack_then_a_pli_and_subscriber_feedback_is_answered() {
     let audio = audio_room("loss");
     audio.add_participant("a", false).unwrap();

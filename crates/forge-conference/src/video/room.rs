@@ -456,6 +456,12 @@ struct Participant {
     /// drawn as a person is, camera or not. A peer's tile with no camera
     /// (a trunk carrying only a shared screen) is not drawn.
     member: bool,
+    /// A webinar's attendee, a listener in the audio room (FCP
+    /// `docs/WEBINARS.md` §2.3): watches and is never watched. No tile in
+    /// any composite, never a forwarded stream, and always sent a
+    /// composite of the whole room, so a thousand of them share one
+    /// encode per flavor rather than each having their own.
+    audience: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -626,6 +632,8 @@ pub struct VideoParticipantInfo {
     /// A peer node's tile, standing for the callers on that node,
     /// rather than a caller on this one.
     pub remote: bool,
+    /// A webinar's attendee: watches, never drawn or forwarded.
+    pub audience: bool,
     /// The camera's ingress side, when the participant sends video.
     pub source: Option<VideoSourceInfo>,
     /// The shared screen's ingress side, when the participant has a
@@ -914,6 +922,11 @@ impl VideoRoom {
     /// A participant is in the audio room; called by the audio room and
     /// at start. Idempotent.
     pub fn participant_joined(&self, id: &str) {
+        // A listener in the audio room is the audience here.
+        let audience = self
+            .audio
+            .upgrade()
+            .is_some_and(|audio| audio.is_listener(id));
         self.participants
             .entry(id.to_string())
             .or_insert_with(|| Participant {
@@ -925,7 +938,9 @@ impl VideoRoom {
                 joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
                 remote: false,
                 member: false,
-            });
+                audience,
+            })
+            .audience = audience;
     }
 
     /// The participant left: sources, subscriptions, tile and the floor
@@ -962,6 +977,28 @@ impl VideoRoom {
             drop(c);
             let _ = self.events.send(ev);
         }
+    }
+
+    /// The participant joins the audience (`true`) or leaves it for the
+    /// stage (`false`), as the audio room's
+    /// [`set_listener`](crate::ConferenceRoom::set_listener) moves them.
+    /// From the next tick they are drawn, or no longer drawn; a
+    /// composite they already take keeps its scope until they subscribe
+    /// again.
+    pub fn set_audience(&self, id: &str, audience: bool) {
+        if let Some(mut p) = self.participants.get_mut(id) {
+            p.audience = audience;
+        }
+    }
+
+    /// Whether the participant is in the audience.
+    pub fn is_audience(&self, id: &str) -> bool {
+        self.participants.get(id).is_some_and(|p| p.audience)
+    }
+
+    /// How many of the room's participants are the audience.
+    pub fn audience_count(&self) -> usize {
+        self.participants.iter().filter(|p| p.audience).count()
     }
 
     pub fn set_display_name(&self, id: &str, name: &str) {
@@ -1037,6 +1074,7 @@ impl VideoRoom {
                 joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
                 remote: true,
                 member: false,
+                audience: false,
             })
             .remote = true;
         let out = self.add_source_kind(id, kind, codec, profile);
@@ -1091,6 +1129,7 @@ impl VideoRoom {
                 joined: self.join_seq.fetch_add(1, Ordering::Relaxed),
                 remote: true,
                 member: true,
+                audience: false,
             });
         p.remote = true;
         p.member = true;
@@ -1587,10 +1626,13 @@ impl VideoRoom {
             .clamp(1, settings.fps.max(1));
         let kbps = req.max_kbps.unwrap_or_else(|| default_kbps(res)).max(1);
         let flavor = Flavor::new(req.codec, &req.profile, res, fps, kbps);
+        // The audience has no tile of its own to leave out, so it shares
+        // the room's composite: one encode per flavor for all of it.
+        let audience = self.is_audience(id);
         let scope = req.scope.clone().unwrap_or_else(|| {
             // `exclude_self` is about the participant's own tile; a
             // content channel has none in it.
-            if settings.exclude_self && view != View::Content {
+            if settings.exclude_self && view != View::Content && !audience {
                 OutputScope::Excluding(id.to_string())
             } else {
                 OutputScope::All
@@ -1899,7 +1941,12 @@ impl VideoRoom {
                 .iter()
                 .filter(|id| **id != viewer.id && self.sources.contains_key(&SourceKey::camera(id)))
                 .filter(|id| {
-                    !viewer.local_only || !self.participants.get(*id).is_some_and(|p| p.remote)
+                    // The audience is never forwarded, a peer's tile
+                    // never to a trunk.
+                    match self.participants.get(*id) {
+                        Some(p) => !p.audience && (!viewer.local_only || !p.remote),
+                        None => true,
+                    }
                 })
                 .cloned()
                 .collect();
@@ -2595,6 +2642,7 @@ impl VideoRoom {
             speaking: self.speaker.lock().current() == Some(id),
             presenting: self.holder_is(id),
             remote: p.remote,
+            audience: p.audience,
             source,
             content,
             subscription,
@@ -2791,9 +2839,12 @@ impl VideoRoom {
         // Participant states and the frames to draw.
         self.sample_fps(now);
         self.expire_content(now, &settings);
+        // The audience is never drawn or forwarded: left out here, a
+        // webinar's thousands cost the tick nothing past this filter.
         let mut ordered: Vec<(u64, String)> = self
             .participants
             .iter()
+            .filter(|e| !e.value().audience)
             .map(|e| (e.value().joined, e.key().clone()))
             .collect();
         ordered.sort();
@@ -2814,6 +2865,10 @@ impl VideoRoom {
             let Some(p) = self.participants.get(id) else {
                 continue;
             };
+            // Brought into the audience since the order was taken.
+            if p.audience {
+                continue;
+            }
             let camera = SourceKey::camera(id);
             let (frame, state) = match self.sources.get(&camera) {
                 Some(_) if !p.enabled => (None, VideoState::Disabled),

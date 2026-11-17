@@ -695,8 +695,13 @@ impl ConferenceRoom {
 
     /// Bring a listener to the stage (`false`) or send them back (`true`):
     /// a promoted attendee is heard and hears N−1 from the next frame.
+    /// On the video room they leave the audience for a tile, or go back.
     pub fn set_listener(&self, participant_id: &str, listener: bool) -> Result<()> {
-        Ok(self.mixer.set_listener(participant_id, listener)?)
+        self.mixer.set_listener(participant_id, listener)?;
+        if let Some(v) = self.video.read().as_ref() {
+            v.set_audience(participant_id, listener);
+        }
+        Ok(())
     }
 
     /// Whether a participant is a listener (`false` for one not here).

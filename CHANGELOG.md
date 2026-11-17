@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Crate versions:** **forge-conference 0.19.0**.
+
+### Added
+
+- **forge-conference:** the audience on video (FCP `docs/WEBINARS.md`
+  §2.3, W2). A listener in the audio room is the *audience* in the video
+  room: never drawn in any composite, never forwarded to a viewer, and
+  always given a composite of the whole room (`OutputScope::All`)
+  whatever `exclude_self` says, so the whole audience shares one encode
+  per flavor rather than each having one of their own. The audience is
+  left out of the tick's join order, so a thousand attendees cost the
+  tick nothing past one filter. `ConferenceRoom::set_listener` moves a
+  participant into or out of it; `VideoRoom::set_audience`, `is_audience`
+  and `audience_count` ask and tell. `VideoParticipantInfo` gains
+  `audience`.
+
+### Changed
+
+- **forge-conference (breaking, 0.19.0):** `VideoParticipantInfo` has
+  `audience`.
+
+## [2026-11-17]
+
 **Crate versions:** **forge-conference 0.18.0**, **forge-mixer 0.6.0**.
 
 ### Added

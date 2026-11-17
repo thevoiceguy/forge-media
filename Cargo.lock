@@ -1602,6 +1602,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "forge-bwe"
+version = "0.1.0"
+dependencies = [
+ "forge-rtp",
+]
+
+[[package]]
 name = "forge-codecs"
 version = "0.2.0"
 dependencies = [
@@ -1783,6 +1790,7 @@ dependencies = [
  "criterion",
  "forge-ai-stream",
  "forge-api",
+ "forge-bwe",
  "forge-codecs",
  "forge-core",
  "forge-dtmf",
@@ -1853,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "forge-rtp"
-version = "0.7.4"
+version = "0.8.0"
 dependencies = [
  "aes",
  "aes-gcm",

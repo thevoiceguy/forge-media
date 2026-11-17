@@ -7,10 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-**Crate versions:** **forge-conference 0.16.2**.
+**Crate versions:** **forge-conference 0.16.2**, **forge-rtp 0.8.0**, **forge-bwe 0.1.0**
+(new).
 
 ### Added
 
+- **forge-bwe** (new): bandwidth estimation over one Google Congestion
+  Control core (FCP `docs/TRANSPORT_CC.md`, R5a). `gcc` holds the trendline
+  delay detector, the AIMD rate and the loss cap. `RembEstimator` is the
+  receive side Anvil has run, moved here; `FeedbackWriter` reports arrivals
+  as transport-cc feedback; `SendSideEstimator` estimates from that
+  feedback, and `Prober` paces padding probes past what is being sent, with
+  a backoff for a target that fell short. `testing::Bottleneck` is a
+  simulated link on a virtual clock, and `tests/simulation.rs` runs REMB
+  against transport-cc through it: after a dip, a REMB viewer never sees
+  past the 180p it receives, while transport-cc's probes find the raised
+  capacity; transport-cc gets under a falling capacity in about half the
+  time.
+- **forge-rtp:** transport-cc (`transport_cc`): `TransportCcFeedback`
+  parses and writes RTPFB FMT 15 (run-length and status-vector chunks,
+  small and large deltas), arriving as `TransportFeedback::TransportCc`;
+  `stamp` and `transport_sequence` write and read the transport-wide
+  sequence number header extension (`TRANSPORT_CC_URI`). A feedback FCI
+  that does not end on a word is padded as RFC 3550 says, with P set.
 - **forge-conference:** forwarding across nodes (FCP
   `docs/FORWARDING_ROOMS.md` §2.8, R7). `VideoRoom::forward_trunk` makes a
   trunk to a peer node a forwarding viewer that is sent this node's own
@@ -28,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **forge-rtp (breaking, 0.8.0):** `TransportFeedback` gains `TransportCc`;
+  an FMT 15 that does not read as transport-cc stays `Other`. A `match` on
+  `TransportFeedback` needs the new arm.
+- **GCC core:** while overuse lasts, the rate comes down again every
+  300 ms instead of once per episode, so a falling capacity is followed by
+  delay rather than waited out until loss. Anvil's REMB gets this when it
+  takes the crate.
 - **forge-conference:** a peer's own tile with no camera (a trunk carrying
   only a shared screen) is no longer drawn as an empty tile.
 

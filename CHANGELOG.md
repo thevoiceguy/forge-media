@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Crate versions:** **forge-conference 0.20.0**.
+
+### Added
+
+- **forge-conference:** a raised hand by DTMF (FCP `docs/WEBINARS.md`
+  §2.5, W3). `*4` is the participant command `raise_hand`
+  (`DtmfCommand::RaiseHand`), bindable per room and globally like the
+  others and defaulted when a configuration written before it leaves it
+  out. The room does not keep whose hand is up: a press is queued with
+  `ConferenceRoom::request_hand_toggle` and taken, oldest first, by
+  `drain_hand_requests`, as dial-out requests are.
+
+### Changed
+
+- **forge-conference (breaking, 0.20.0):** `DtmfCommand` has `RaiseHand`,
+  and `ParticipantCommands`, `ParticipantCommandsConfig` and
+  `DtmfCommandBindings` have `raise_hand`.
+
+## [2026-11-17.1]
+
 **Crate versions:** **forge-conference 0.19.0**.
 
 ### Added

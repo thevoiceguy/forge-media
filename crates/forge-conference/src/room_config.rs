@@ -226,6 +226,10 @@ impl RoomConfig {
                     .leave
                     .clone()
                     .unwrap_or_else(|| global_dtmf.participant_commands.leave.clone()),
+                raise_hand: bindings
+                    .raise_hand
+                    .clone()
+                    .unwrap_or_else(|| global_dtmf.participant_commands.raise_hand.clone()),
             }
         } else {
             crate::dtmf_commands::ParticipantCommands {
@@ -234,6 +238,7 @@ impl RoomConfig {
                 volume_down: global_dtmf.participant_commands.volume_down.clone(),
                 info: global_dtmf.participant_commands.info.clone(),
                 leave: global_dtmf.participant_commands.leave.clone(),
+                raise_hand: global_dtmf.participant_commands.raise_hand.clone(),
             }
         };
 
@@ -334,6 +339,8 @@ pub struct DtmfCommandBindings {
     pub volume_down: Option<String>,
     pub info: Option<String>,
     pub leave: Option<String>,
+    #[serde(default)]
+    pub raise_hand: Option<String>,
 
     // Host commands
     pub kick_prefix: Option<String>,

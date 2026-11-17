@@ -289,6 +289,7 @@ impl DtmfConfig {
             &self.participant_commands.volume_down,
             &self.participant_commands.info,
             &self.participant_commands.leave,
+            &self.participant_commands.raise_hand,
         ];
 
         for cmd in cmds {
@@ -317,6 +318,13 @@ pub struct ParticipantCommandsConfig {
     pub info: String,
     /// Leave conference
     pub leave: String,
+    /// Raise or lower one's hand
+    #[serde(default = "default_raise_hand")]
+    pub raise_hand: String,
+}
+
+fn default_raise_hand() -> String {
+    "*4".to_string()
 }
 
 impl Default for ParticipantCommandsConfig {
@@ -327,6 +335,7 @@ impl Default for ParticipantCommandsConfig {
             volume_down: "*8".to_string(),
             info: "*0".to_string(),
             leave: "*9".to_string(),
+            raise_hand: default_raise_hand(),
         }
     }
 }

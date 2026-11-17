@@ -85,6 +85,8 @@ pub struct ConferenceRoom {
     conference_sounds: Arc<RwLock<Option<crate::audio_feedback::ConferenceSounds>>>,
     /// Pending dial-out requests from DTMF (destination strings)
     dial_out_requests: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// Participants who pressed the raise-hand key, oldest first.
+    hand_requests: Arc<parking_lot::Mutex<Vec<String>>>,
     /// Flag: host requested end-conference (announcement already played)
     end_conference_requested: AtomicBool,
     /// Audio format
@@ -138,6 +140,7 @@ impl ConferenceRoom {
             audio_feedback_player: Arc::new(RwLock::new(None)),
             conference_sounds: Arc::new(RwLock::new(None)),
             dial_out_requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            hand_requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
             end_conference_requested: AtomicBool::new(false),
             format,
             frame_size,
@@ -366,6 +369,19 @@ impl ConferenceRoom {
     /// Drain pending dial-out requests (called by the conference handler)
     pub fn drain_dial_out_requests(&self) -> Vec<String> {
         std::mem::take(&mut *self.dial_out_requests.lock())
+    }
+
+    /// Queue a participant's press of the raise-hand key (called from the
+    /// DTMF handler in the audio bridge). Whose hand is up is the
+    /// caller's to keep: the room only passes the press on.
+    pub fn request_hand_toggle(&self, participant_id: &str) {
+        self.hand_requests.lock().push(participant_id.to_string());
+    }
+
+    /// Drain pending raise-hand presses, oldest first (called by the
+    /// conference handler).
+    pub fn drain_hand_requests(&self) -> Vec<String> {
+        std::mem::take(&mut *self.hand_requests.lock())
     }
 
     /// Get the number of participants waiting for moderator
@@ -1637,6 +1653,8 @@ impl ConferenceRoom {
                 info!("Participant {} leaving room {}", participant_id, self.id);
                 self.remove_participant(participant_id)?;
             }
+
+            DtmfCommand::RaiseHand => self.request_hand_toggle(participant_id),
 
             // Host commands (require host role)
             DtmfCommand::MuteAll => {

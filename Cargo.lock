@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "forge-conference"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mixer"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "dashmap",

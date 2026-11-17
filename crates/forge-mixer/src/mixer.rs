@@ -115,6 +115,9 @@ pub struct ParticipantMetadata {
     /// loudest right now without flapping on a single frame; the video
     /// mixer's active-speaker selection reads it.
     pub energy: f32,
+    /// A listener: heard by nobody, in no mix (see
+    /// [`AudioMixer::add_listener`]).
+    pub listener: bool,
 }
 
 /// Weight of the newest packet's RMS in `ParticipantBuffer::energy`.
@@ -150,6 +153,9 @@ struct ParticipantBuffer {
     /// buffer, read by every mix until the next advance. `None` when the
     /// participant had less than a frame available at that tick.
     frame: Option<Vec<i16>>,
+    /// A listener (see [`AudioMixer::add_listener`]): what it writes is
+    /// dropped, it has no frame and no mix reads it.
+    listener: bool,
 }
 
 impl ParticipantBuffer {
@@ -168,6 +174,7 @@ impl ParticipantBuffer {
             energy: 0.0,
             max_buffer_samples,
             frame: None,
+            listener: false,
         }
     }
 
@@ -398,6 +405,53 @@ impl AudioMixer {
         Ok(())
     }
 
+    /// Add a listener: someone who hears but is not heard, as a webinar's
+    /// audience is. A listener is in no mix, what it writes is dropped
+    /// before voice activity or recording see it, and the clock takes no
+    /// frame from it, so a thousand listeners cost the mixer nothing
+    /// per frame but skipping them. What they hear is a mix of the
+    /// others, the same for all of them ([`mix_frame`](Self::mix_frame)).
+    pub fn add_listener<S: Into<String>>(&self, id: S) -> Result<()> {
+        let id = id.into();
+        info!("Adding listener {}", id);
+        let mut buffer = ParticipantBuffer::new(1.0, self.max_buffer_samples);
+        buffer.listener = true;
+        self.participants.insert(id, buffer);
+        Ok(())
+    }
+
+    /// Make a participant a listener, or a listener a contributor (a
+    /// webinar attendee brought to the stage and sent back). Whatever
+    /// was buffered is dropped either way, so a contributor starts from
+    /// the frame it is promoted on.
+    pub fn set_listener(&self, id: &str, listener: bool) -> Result<()> {
+        let mut participant = self
+            .participants
+            .get_mut(id)
+            .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
+        if participant.listener != listener {
+            participant.listener = listener;
+            participant.samples.clear();
+            participant.frame = None;
+            participant.is_speaking = false;
+            participant.speech_frames = 0;
+            participant.silence_frames = 0;
+            participant.energy = 0.0;
+            info!("Participant {} listener: {}", id, listener);
+        }
+        Ok(())
+    }
+
+    /// Whether `id` is a listener. `None` when it is not in the mixer.
+    pub fn is_listener(&self, id: &str) -> Option<bool> {
+        self.participants.get(id).map(|p| p.listener)
+    }
+
+    /// How many participants are listeners.
+    pub fn listener_count(&self) -> usize {
+        self.participants.iter().filter(|p| p.listener).count()
+    }
+
     /// Write audio samples for a specific participant
     ///
     /// # Arguments
@@ -409,10 +463,10 @@ impl AudioMixer {
             .get_mut(id)
             .ok_or_else(|| MixerError::Internal(format!("Participant {} not found", id)))?;
 
-        if participant.state != ParticipantState::Active {
+        if participant.state != ParticipantState::Active || participant.listener {
             debug!(
-                "Ignoring samples for participant {} due to state {:?}",
-                id, participant.state
+                "Ignoring samples for participant {} (state {:?}, listener {})",
+                id, participant.state, participant.listener
             );
             return Ok(());
         }
@@ -467,7 +521,7 @@ impl AudioMixer {
         // Collect only active participants that can contribute a full frame
         let mut ready_participants = Vec::new();
         for participant in self.participants.iter_mut() {
-            if participant.state != ParticipantState::Active {
+            if participant.state != ParticipantState::Active || participant.listener {
                 continue;
             }
             if participant.available_samples() >= self.frame_size {
@@ -534,7 +588,10 @@ impl AudioMixer {
         // Collect only active, non-excluded participants that can contribute a full frame
         let mut ready_participants = Vec::new();
         for participant in self.participants.iter_mut() {
-            if participant.key() == exclude_id || participant.state != ParticipantState::Active {
+            if participant.key() == exclude_id
+                || participant.state != ParticipantState::Active
+                || participant.listener
+            {
                 continue;
             }
             if participant.available_samples() >= self.frame_size {
@@ -810,6 +867,7 @@ impl AudioMixer {
             is_speaking: participant.is_speaking,
             last_speech_detected: participant.last_speech_detected,
             energy: participant.energy,
+            listener: participant.listener,
         })
     }
 
@@ -846,6 +904,7 @@ impl AudioMixer {
                 is_speaking: entry.value().is_speaking,
                 last_speech_detected: entry.value().last_speech_detected,
                 energy: entry.value().energy,
+                listener: entry.value().listener,
             })
             .collect()
     }
@@ -1010,7 +1069,7 @@ impl AudioMixer {
     pub fn advance_frame(&self) -> u64 {
         let frame_size = self.frame_size;
         for mut participant in self.participants.iter_mut() {
-            if participant.state != ParticipantState::Active {
+            if participant.state != ParticipantState::Active || participant.listener {
                 participant.frame = None;
                 continue;
             }
@@ -1043,7 +1102,10 @@ impl AudioMixer {
         let mut mixed = vec![0i32; self.frame_size];
         let mut contributors = 0usize;
         for participant in self.participants.iter() {
-            if participant.state != ParticipantState::Active || !include(participant.key()) {
+            if participant.state != ParticipantState::Active
+                || participant.listener
+                || !include(participant.key())
+            {
                 continue;
             }
             let Some(frame) = participant.frame.as_ref() else {
@@ -1245,6 +1307,49 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_listener_is_in_no_mix_and_hears_everyone() {
+        let mixer = frame_clock_mixer(4);
+        mixer.add_participant("speaker", None).unwrap();
+        mixer.add_listener("audience").unwrap();
+        mixer.write_samples("speaker", &[300; 4]).unwrap();
+        // What a listener sends is dropped before anything sees it.
+        mixer.write_samples("audience", &[9000; 4]).unwrap();
+        assert_eq!(mixer.is_listener("audience"), Some(true));
+        assert_eq!(mixer.listener_count(), 1);
+        mixer.advance_frame();
+        // Everyone's mix is the speaker alone: no auto-gain over two.
+        assert_eq!(mixer.mix_frame(), Some(vec![300; 4]));
+        assert_eq!(mixer.mix_frame_excluding("audience"), Some(vec![300; 4]));
+        assert_eq!(mixer.mix_frame_excluding("speaker"), None);
+        let meta = mixer.get_participant_metadata("audience").unwrap();
+        assert!(meta.listener && !meta.is_speaking && meta.packets_received == 0);
+
+        // Promoted, the listener is heard from its next frame.
+        mixer.set_listener("audience", false).unwrap();
+        mixer.write_samples("audience", &[100; 4]).unwrap();
+        mixer.write_samples("speaker", &[300; 4]).unwrap();
+        mixer.advance_frame();
+        assert_eq!(mixer.mix_frame_excluding("speaker"), Some(vec![100; 4]));
+        // And sent back, it is quiet again, its buffer dropped.
+        mixer.write_samples("audience", &[100; 8]).unwrap();
+        mixer.set_listener("audience", true).unwrap();
+        mixer.advance_frame();
+        assert_eq!(mixer.mix_frame_excluding("speaker"), None);
+    }
+
+    #[test]
+    fn a_listener_is_in_no_drained_mix_either() {
+        let mixer = AudioMixer::new(AudioFormat::pcm_mono(), 4).unwrap();
+        mixer.add_participant("speaker", None).unwrap();
+        mixer.add_listener("audience").unwrap();
+        mixer.write_samples("speaker", &[300; 4]).unwrap();
+        mixer.write_samples("audience", &[9000; 4]).unwrap();
+        assert_eq!(mixer.mix().unwrap(), Some(vec![300; 4]));
+        mixer.write_samples("speaker", &[300; 4]).unwrap();
+        assert_eq!(mixer.mix_excluding("speaker").unwrap(), None);
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub const M_PARTICIPANTS_LEFT: &str = "forge_conference_participants_left_total"
 pub const M_PARTICIPANTS_ACTIVE: &str = "forge_conference_participants_active";
 pub const M_MIX_OPERATIONS: &str = "forge_conference_mix_operations_total";
 pub const M_MIXING_DURATION: &str = "forge_conference_mixing_duration_seconds";
+pub const M_AUDIENCE_SUBSCRIBERS: &str = "forge_conference_audience_subscribers";
+pub const M_AUDIENCE_FRAME: &str = "forge_conference_audience_frame_seconds";
 pub const M_RECORDINGS_STARTED: &str = "forge_conference_recordings_started_total";
 pub const M_RECORDINGS_STOPPED: &str = "forge_conference_recordings_stopped_total";
 pub const M_RECORDINGS_ACTIVE: &str = "forge_conference_recordings_active";
@@ -107,10 +109,15 @@ pub const ALL_GAUGES: &[&str] = &[
     M_VIDEO_FPS,
     M_VIDEO_RECORDINGS,
     M_VIDEO_CONTENT_ROOMS,
+    M_AUDIENCE_SUBSCRIBERS,
 ];
 
 /// Every histogram family forge-conference emits.
-pub const ALL_HISTOGRAMS: &[&str] = &[M_MIXING_DURATION, M_VIDEO_COMPOSE_DURATION];
+pub const ALL_HISTOGRAMS: &[&str] = &[
+    M_MIXING_DURATION,
+    M_VIDEO_COMPOSE_DURATION,
+    M_AUDIENCE_FRAME,
+];
 
 /// Suggested buckets for `forge_conference_video_compose_duration_seconds`.
 ///
@@ -156,6 +163,14 @@ pub fn describe_metrics() {
     describe_histogram!(
         M_MIXING_DURATION,
         "Wall time of one mixer pass, by room_id."
+    );
+    describe_gauge!(
+        M_AUDIENCE_SUBSCRIBERS,
+        "Listeners on a room's shared audience mix, by room_id."
+    );
+    describe_histogram!(
+        M_AUDIENCE_FRAME,
+        "Wall time of mixing and encoding one audience frame for every flavor, by room_id."
     );
     describe_counter!(
         M_RECORDINGS_STARTED,

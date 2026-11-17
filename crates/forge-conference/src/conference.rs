@@ -77,8 +77,8 @@ pub struct ConferenceRoom {
     hosts: Arc<DashMap<String, ()>>,
     /// Wait-for-moderator flag (set independently of room_config for robustness)
     wait_for_moderator: AtomicBool,
-    /// Set of participants waiting for moderator (participant_id)
-    waiting_participants: Arc<DashMap<String, ()>>,
+    /// Participants waiting for a moderator: whether each is a listener.
+    waiting_participants: Arc<DashMap<String, bool>>,
     /// Audio feedback player for playing sounds
     audio_feedback_player: Arc<RwLock<Option<crate::audio_feedback::AudioFeedbackPlayer>>>,
     /// Pre-loaded conference sounds
@@ -97,6 +97,8 @@ pub struct ConferenceRoom {
     frame_tx: tokio::sync::watch::Sender<u64>,
     /// The video room, when the meeting has video enabled
     video: RwLock<Option<Arc<VideoRoom>>>,
+    /// The listeners' feeds (see [`ConferenceRoom::listen_audience`]).
+    audience: crate::audience::AudienceMix,
 }
 
 impl ConferenceRoom {
@@ -116,6 +118,7 @@ impl ConferenceRoom {
         info!("Creating conference room: {}", id);
 
         let mixer = AudioMixer::with_options(format, frame_size, mixer_options.clone())?;
+        let id_for_audience = id.clone();
 
         Ok(Self {
             id,
@@ -141,6 +144,7 @@ impl ConferenceRoom {
             frame_clock_task: parking_lot::Mutex::new(None),
             frame_tx: tokio::sync::watch::channel(0).0,
             video: RwLock::new(None),
+            audience: crate::audience::AudienceMix::new(id_for_audience),
         })
     }
 
@@ -413,14 +417,14 @@ impl ConferenceRoom {
     /// This is an admin operation that bypasses the wait-for-moderator requirement
     /// for the specified participant.
     pub fn admit_waiting_participant(&self, participant_id: &str) -> Result<()> {
-        if !self.waiting_participants.contains_key(participant_id) {
+        let Some(listener) = self.waiting_participants.get(participant_id).map(|w| *w) else {
             return Err(ConferenceError::Internal(format!(
                 "Participant {} is not in the waiting list for room {}",
                 participant_id, self.id
             )));
-        }
+        };
 
-        if let Err(e) = self.mixer.add_participant(participant_id, None) {
+        if let Err(e) = self.mixer_add(participant_id, listener) {
             return Err(ConferenceError::Internal(format!(
                 "Failed to add waiting participant {} to mixer: {}",
                 participant_id, e
@@ -442,15 +446,15 @@ impl ConferenceRoom {
 
     /// Admit all waiting participants into the mixer without requiring a host.
     pub fn admit_all_waiting(&self) -> usize {
-        let waiting: Vec<String> = self
+        let waiting: Vec<(String, bool)> = self
             .waiting_participants
             .iter()
-            .map(|entry| entry.key().clone())
+            .map(|entry| (entry.key().clone(), *entry.value()))
             .collect();
 
         let mut admitted = 0;
-        for participant_id in waiting {
-            if let Err(e) = self.mixer.add_participant(&participant_id, None) {
+        for (participant_id, listener) in waiting {
+            if let Err(e) = self.mixer_add(&participant_id, listener) {
                 warn!(
                     "Failed to admit waiting participant {} to room {}: {}",
                     participant_id, self.id, e
@@ -509,6 +513,7 @@ impl ConferenceRoom {
     /// * `is_host` - Whether this participant is joining as a host/moderator
     pub fn add_participant<S: Into<String>>(&self, participant_id: S, is_host: bool) -> Result<()> {
         let participant_id = participant_id.into();
+        let listener = false;
 
         // Check if conference is locked
         if *self.is_locked.read() {
@@ -531,7 +536,8 @@ impl ConferenceRoom {
                 is_host,
                 self.hosts.len()
             );
-            self.waiting_participants.insert(participant_id.clone(), ());
+            self.waiting_participants
+                .insert(participant_id.clone(), listener);
             return Err(ConferenceError::WaitingForModerator);
         }
 
@@ -559,7 +565,8 @@ impl ConferenceRoom {
                     "Participant {} waiting for moderator in room {} (config check)",
                     participant_id, self.id
                 );
-                self.waiting_participants.insert(participant_id.clone(), ());
+                self.waiting_participants
+                    .insert(participant_id.clone(), listener);
                 return Err(ConferenceError::WaitingForModerator);
             }
         }
@@ -573,7 +580,7 @@ impl ConferenceRoom {
             self.release_waiting_participants();
         }
 
-        self.add_participant_inner(&participant_id, true)
+        self.add_participant_inner(&participant_id, true, false)
     }
 
     /// Add a participant without playing the join sound.
@@ -584,8 +591,20 @@ impl ConferenceRoom {
         participant_id: S,
         is_host: bool,
     ) -> Result<()> {
-        let participant_id = participant_id.into();
+        self.admit_quiet(participant_id.into(), is_host, false)
+    }
 
+    /// Add a listener (FCP's `docs/WEBINARS.md` §2.2): a webinar's
+    /// attendee, who hears the room and is heard by nobody. The same
+    /// admission as [`add_participant_quiet`](Self::add_participant_quiet)
+    /// — the lock, wait-for-moderator and capacity — and no join sound,
+    /// ever: an audience coming and going is not announced. A listener
+    /// hears [`listen_audience`](Self::listen_audience), not an N−1 mix.
+    pub fn add_listener<S: Into<String>>(&self, participant_id: S) -> Result<()> {
+        self.admit_quiet(participant_id.into(), false, true)
+    }
+
+    fn admit_quiet(&self, participant_id: String, is_host: bool, listener: bool) -> Result<()> {
         // Same checks as add_participant
         if *self.is_locked.read() {
             return Err(ConferenceError::ConferenceLocked);
@@ -593,7 +612,8 @@ impl ConferenceRoom {
 
         let wfm = self.wait_for_moderator.load(Ordering::Acquire);
         if wfm && !is_host && self.hosts.is_empty() {
-            self.waiting_participants.insert(participant_id.clone(), ());
+            self.waiting_participants
+                .insert(participant_id.clone(), listener);
             return Err(ConferenceError::WaitingForModerator);
         }
 
@@ -616,7 +636,7 @@ impl ConferenceRoom {
             self.release_waiting_participants();
         }
 
-        self.add_participant_inner(&participant_id, false)
+        self.add_participant_inner(&participant_id, false, listener)
     }
 
     /// Add a participant who was already admitted to this room on another
@@ -651,7 +671,62 @@ impl ConferenceRoom {
             self.hosts.insert(participant_id.clone(), ());
             self.release_waiting_participants();
         }
-        self.add_participant_inner(&participant_id, false)
+        self.add_participant_inner(&participant_id, false, false)
+    }
+
+    /// [`add_participant_admitted`](Self::add_participant_admitted) for a
+    /// listener moving here from a draining node.
+    pub fn add_listener_admitted<S: Into<String>>(&self, participant_id: S) -> Result<()> {
+        let participant_id = participant_id.into();
+        {
+            let config = self.room_config.read();
+            if let Some(cfg) = config.as_ref() {
+                if cfg.max_channels > 0 {
+                    let current_count =
+                        self.mixer.participant_count() + self.waiting_participants.len();
+                    if current_count >= cfg.max_channels {
+                        return Err(ConferenceError::ConferenceFull(cfg.max_channels));
+                    }
+                }
+            }
+        }
+        self.add_participant_inner(&participant_id, false, true)
+    }
+
+    /// Bring a listener to the stage (`false`) or send them back (`true`):
+    /// a promoted attendee is heard and hears N−1 from the next frame.
+    pub fn set_listener(&self, participant_id: &str, listener: bool) -> Result<()> {
+        Ok(self.mixer.set_listener(participant_id, listener)?)
+    }
+
+    /// Whether a participant is a listener (`false` for one not here).
+    pub fn is_listener(&self, participant_id: &str) -> bool {
+        self.mixer.is_listener(participant_id).unwrap_or(false)
+    }
+
+    /// How many listeners the room has.
+    pub fn listener_count(&self) -> usize {
+        self.mixer.listener_count()
+    }
+
+    /// Listen to the audience's audio in `flavor` — a name the caller
+    /// gives a codec at a rate and packet time, the same name for the
+    /// same encoding. The first subscriber's `make` is the flavor's
+    /// encoder; later ones share it. Each frame of the clock brings an
+    /// [`AudienceFrame`](crate::AudienceFrame): the mix of everyone heard,
+    /// encoded once for all of them. The flavor ends with its last
+    /// receiver. Requires the frame clock.
+    pub fn listen_audience(
+        &self,
+        flavor: &str,
+        make: impl FnOnce() -> Box<dyn crate::AudienceEncoder>,
+    ) -> tokio::sync::broadcast::Receiver<crate::AudienceFrame> {
+        self.audience.subscribe(flavor, make)
+    }
+
+    /// The audience's flavors as they are now.
+    pub fn audience_flavors(&self) -> Vec<crate::AudienceFlavorInfo> {
+        self.audience.info()
     }
 
     /// Add a participant that represents something other than a caller —
@@ -674,15 +749,25 @@ impl ConferenceRoom {
     }
 
     /// Internal: add to mixer, optionally play join sound, update metrics
-    fn add_participant_inner(&self, participant_id: &str, play_sound: bool) -> Result<()> {
-        info!("Adding participant {} to room {}", participant_id, self.id);
-        self.mixer.add_participant(participant_id, None)?;
+    fn add_participant_inner(
+        &self,
+        participant_id: &str,
+        play_sound: bool,
+        listener: bool,
+    ) -> Result<()> {
+        info!(
+            "Adding {} {} to room {}",
+            if listener { "listener" } else { "participant" },
+            participant_id,
+            self.id
+        );
+        self.mixer_add(participant_id, listener)?;
         if let Some(v) = self.video.read().as_ref() {
             v.participant_joined(participant_id);
         }
 
-        // Play join sound only if requested
-        if play_sound {
+        // Play join sound only if requested, and never for a listener
+        if play_sound && !listener {
             self.play_join_sound();
         }
 
@@ -698,26 +783,35 @@ impl ConferenceRoom {
         Ok(())
     }
 
+    /// Into the mixer as a contributor or a listener.
+    fn mixer_add(&self, participant_id: &str, listener: bool) -> forge_mixer::Result<()> {
+        if listener {
+            self.mixer.add_listener(participant_id)
+        } else {
+            self.mixer.add_participant(participant_id, None)
+        }
+    }
+
     /// Release all waiting participants (called when host joins)
     fn release_waiting_participants(&self) {
         if self.waiting_participants.is_empty() {
             return;
         }
 
-        let waiting: Vec<String> = self
+        let waiting: Vec<(String, bool)> = self
             .waiting_participants
             .iter()
-            .map(|entry| entry.key().clone())
+            .map(|entry| (entry.key().clone(), *entry.value()))
             .collect();
 
-        for participant_id in waiting {
+        for (participant_id, listener) in waiting {
             info!(
                 "Releasing participant {} from waiting in room {}",
                 participant_id, self.id
             );
 
             // Add to mixer
-            if let Err(e) = self.mixer.add_participant(&participant_id, None) {
+            if let Err(e) = self.mixer_add(&participant_id, listener) {
                 warn!(
                     "Failed to add waiting participant {} to room {}: {}",
                     participant_id, self.id, e
@@ -767,18 +861,21 @@ impl ConferenceRoom {
         self.waiting_participants.remove(participant_id);
 
         // Remove from mixer
+        let listener = self.is_listener(participant_id);
         self.mixer.remove_participant(participant_id)?;
         if let Some(v) = self.video.read().as_ref() {
             v.participant_left(participant_id);
         }
 
-        // Play exit sound
-        self.play_exit_sound();
+        // Play exit sound — not for a listener, whose leaving nobody hears
+        if !listener {
+            self.play_exit_sound();
+        }
 
         // Check if only one participant is left (alone sound)
         // Count actual participants (excluding audio feedback participant)
         let remaining_count = self.mixer.participant_count();
-        if remaining_count == 2 {
+        if remaining_count == 2 && !listener {
             // 1 real participant + 1 audio feedback participant = 2 total
             self.play_alone_sound();
         }
@@ -826,6 +923,7 @@ impl ConferenceRoom {
             );
 
             // Remove from mixer
+            let listener = self.is_listener(&participant_id);
             if let Err(e) = self.mixer.remove_participant(&participant_id) {
                 warn!(
                     "Failed to remove participant {} from mixer: {}",
@@ -835,7 +933,7 @@ impl ConferenceRoom {
             }
 
             // Add to waiting
-            self.waiting_participants.insert(participant_id, ());
+            self.waiting_participants.insert(participant_id, listener);
         }
     }
 
@@ -934,6 +1032,11 @@ impl ConferenceRoom {
             if let Err(e) = self.mix() {
                 warn!("Room {} recorder feed failed: {}", self.id, e);
             }
+        }
+        // The audience's frame, mixed and encoded once for every listener
+        // (listeners are in no mix, so this is everyone heard).
+        if !self.audience.is_empty() {
+            self.audience.feed(seq, || self.mixer.mix_frame());
         }
         self.frame_tx.send_replace(seq);
         seq
@@ -2162,6 +2265,130 @@ mod tests {
         // Mix excluding alice
         let mixed = room.mix_for_participant("alice").unwrap();
         assert!(mixed.is_some());
+    }
+
+    /// Counts its calls and "encodes" a frame as its first sample's bytes.
+    struct CountingEncoder(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::AudienceEncoder for CountingEncoder {
+        fn encode(&mut self, pcm: &[i16]) -> Option<Bytes> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Some(Bytes::copy_from_slice(&pcm[0].to_be_bytes()))
+        }
+    }
+
+    fn clocked_room(id: &str) -> Arc<ConferenceRoom> {
+        Arc::new(
+            ConferenceRoom::new(
+                id,
+                AudioFormat::new(8000, 1, forge_core::AudioCodec::PCM),
+                160,
+                forge_mixer::MixerOptions {
+                    frame_clock: true,
+                    ..forge_mixer::MixerOptions::default()
+                },
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn the_audience_hears_one_mix_encoded_once_per_flavor() {
+        let room = clocked_room("webinar");
+        room.add_participant("host", true).unwrap();
+        for i in 0..100 {
+            room.add_listener(format!("attendee-{i}")).unwrap();
+        }
+        assert_eq!(room.listener_count(), 100);
+        assert!(room.is_listener("attendee-7") && !room.is_listener("host"));
+
+        let opus = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pcmu = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut makes = 0;
+        let mut receivers = Vec::new();
+        for i in 0..100 {
+            let (flavor, count) = if i % 4 == 0 {
+                ("pcmu/8000/20", &pcmu)
+            } else {
+                ("opus/48000/20", &opus)
+            };
+            let count = Arc::clone(count);
+            receivers.push(room.listen_audience(flavor, || {
+                makes += 1;
+                Box::new(CountingEncoder(count))
+            }));
+        }
+        assert_eq!(makes, 2, "one encoder per flavor");
+
+        // The host speaks; the attendees' own audio goes nowhere.
+        room.write_audio("host", &[300; 160]).unwrap();
+        room.write_audio("attendee-1", &[9000; 160]).unwrap();
+        let seq = room.advance_frame();
+        assert_eq!(
+            opus.load(Ordering::SeqCst),
+            1,
+            "encoded once for 75 listeners"
+        );
+        assert_eq!(pcmu.load(Ordering::SeqCst), 1);
+        for rx in receivers.iter_mut() {
+            let frame = rx.try_recv().expect("every listener gets the frame");
+            assert_eq!(frame.seq, seq);
+            assert_eq!(frame.payload.as_deref(), Some(&300i16.to_be_bytes()[..]));
+        }
+        // The host hears nobody: the audience is not heard.
+        assert_eq!(room.mix_for_participant("host").unwrap(), None);
+
+        // A frame with nobody heard is still a frame, with nothing in it.
+        room.advance_frame();
+        let frame = receivers[0].try_recv().unwrap();
+        assert!(frame.payload.is_none());
+        assert_eq!(pcmu.load(Ordering::SeqCst), 1);
+
+        // Promoted, an attendee is heard by the audience and the host.
+        room.set_listener("attendee-1", false).unwrap();
+        room.write_audio("attendee-1", &[200; 160]).unwrap();
+        room.advance_frame();
+        assert_eq!(
+            room.mix_for_participant("host").unwrap(),
+            Some(vec![200; 160])
+        );
+        let mut heard = None;
+        while let Ok(frame) = receivers[2].try_recv() {
+            heard = frame.payload;
+        }
+        let heard = heard.expect("the promoted attendee is heard");
+        assert_ne!(heard.as_ref(), &0i16.to_be_bytes()[..]);
+
+        // A flavor goes with its last receiver.
+        let info = room.audience_flavors();
+        assert_eq!(info.len(), 2);
+        assert_eq!(info[1].flavor, "pcmu/8000/20");
+        assert_eq!(info[1].subscribers, 25);
+        receivers.retain(|_| false);
+        room.advance_frame();
+        assert!(room.audience_flavors().is_empty());
+        assert!(room.audience.is_empty());
+    }
+
+    #[test]
+    fn a_waiting_listener_is_let_in_as_a_listener_and_leaves_quietly() {
+        let room = create_configured_room(true);
+        assert!(matches!(
+            room.add_listener("attendee"),
+            Err(ConferenceError::WaitingForModerator)
+        ));
+        room.add_participant("host", true).unwrap();
+        assert!(room.is_listener("attendee"), "released as a listener");
+        room.remove_participant("host").unwrap();
+        assert!(
+            room.waiting_participants()
+                .contains(&"attendee".to_string()),
+            "back to waiting with the host gone"
+        );
+        room.admit_all_waiting();
+        assert!(room.is_listener("attendee"));
+        room.remove_participant("attendee").unwrap();
+        assert_eq!(room.participant_count(), 0);
     }
 
     #[tokio::test]

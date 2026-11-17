@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Crate versions:** **forge-conference 0.18.0**, **forge-mixer 0.6.0**.
+
+### Added
+
+- **forge-mixer:** listeners (FCP `docs/WEBINARS.md` §2.2, W1).
+  `AudioMixer::add_listener` adds someone who hears but is not heard: what
+  a listener writes is dropped before voice activity or recording see it,
+  the frame clock takes no frame from it, and no mix — drained or
+  clocked — reads it. `set_listener` moves a participant either way (an
+  attendee brought to the stage and sent back), dropping what was
+  buffered; `is_listener` and `listener_count` ask. `ParticipantMetadata`
+  gains `listener`.
+- **forge-conference:** the audience's audio, mixed once and encoded once
+  (W1). `ConferenceRoom::add_listener` admits a listener as
+  `add_participant_quiet` admits a participant (lock, wait-for-moderator,
+  capacity), and a listener is let in from the waiting room as a
+  listener; no join, exit or alone sound plays for one. `listen_audience`
+  subscribes to a *flavor* — a name the caller gives a codec at a rate and
+  packet time — whose `AudienceEncoder` the first subscriber supplies:
+  each frame of the clock the room mixes everyone heard once and encodes
+  it once per flavor, and every subscriber gets the same
+  `AudienceFrame` (`payload: None` when nobody was heard). A flavor ends
+  with its last receiver. `set_listener`, `is_listener`,
+  `listener_count`, `add_listener_admitted` and `audience_flavors`;
+  metrics `forge_conference_audience_subscribers` and
+  `forge_conference_audience_frame_seconds`.
+
+### Changed
+
+- **forge-mixer (breaking, 0.6.0):** `ParticipantMetadata` has `listener`.
+- **forge-conference (0.18.0):** follows forge-mixer 0.6.0.
+
+## [2026-11-16.4] — workspace release
+
 **Crate versions:** **forge-conference 0.17.0**, **forge-webrtc 0.11.0**,
 **forge-rtp 0.8.1**, **forge-bwe 0.1.1**.
 

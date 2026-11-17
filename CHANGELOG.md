@@ -7,8 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Crate versions:** **forge-conference 0.17.0**, **forge-webrtc 0.11.0**,
+**forge-rtp 0.8.1**, **forge-bwe 0.1.1**.
+
+### Added
+
+- **forge-conference:** transport-cc in the room (FCP `docs/TRANSPORT_CC.md`
+  §3.2, R5b). A forwarding viewer whose section negotiated it
+  (`ForwardRequest::transport_cc`, the extension's id) has its packets
+  numbered as they leave — after the NACK cache, so a retransmission is
+  numbered anew — and its feedback read; the allocator spends the
+  send-side estimate while feedback is fresh, else the REMB, never the
+  smaller. When something is held back that the budget nearly covers
+  (`next_upgrade_kbps`, at least half), the room probes at 1.25× what that
+  upgrade needs with padding on the viewer's tallest stream, paced on the
+  clock's runtime; a probe that proves the path halves the wait before a
+  move up. Composite subscribers get the numbering and the estimate
+  (`set_subscriber_transport_cc`), which the bitrate ladder and the
+  encoder's target go by. A sender whose section negotiated it gets
+  feedback for its own packets (`set_source_transport_cc`), returned
+  beside the NACKs and PLIs from `push_rtp_kind`. `VideoViewerInfo` gains
+  `transport_cc_kbps` and `budget_kbps`.
+- **forge-webrtc:** transport-cc offered on the video sections when
+  `VideoConfig::transport_cc` is set (the extension at
+  `TRANSPORT_CC_EXTENSION_ID`, 3, and `a=rtcp-fb:<pt> transport-cc`), and
+  kept in an answer to an offer that has it; the agreed id is
+  `PeerConnection::transport_cc_extension`. Without the switch, as before,
+  neither is offered or kept.
+- **forge-rtp:** `StreamRewriter::padding`, a padding-only packet on the
+  outgoing stream that the source's following packets are numbered after.
+- **forge-bwe:** `Prober::cancel`, for a probe that could not be sent.
+
+### Changed
+
+- **forge-conference (breaking, 0.17.0):** `ForwardRequest` has
+  `transport_cc`; `VideoViewerInfo` has `transport_cc_kbps` and
+  `budget_kbps`.
+- **forge-webrtc (breaking, 0.11.0):** `LocalParams` and
+  `RemoteDescription` have `tcc_ext`; `video_from_answer_with` takes
+  whether transport-cc was agreed.
+
+## [2026-11-16.3] — workspace release
+
 **Crate versions:** **forge-conference 0.16.2**, **forge-rtp 0.8.0**, **forge-bwe 0.1.0**
-(new).
+(new). It also carries what 2026-11-16.2 was tagged with.
 
 ### Added
 

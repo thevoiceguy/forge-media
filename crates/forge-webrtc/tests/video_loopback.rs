@@ -544,3 +544,34 @@ async fn streams_of_our_own_ride_send_only_sections_the_answer_takes_or_rejects(
         "{reports:?}"
     );
 }
+
+#[tokio::test]
+async fn transport_cc_is_on_only_when_both_ends_carry_it() {
+    init_tracing();
+    let vp8 = [(VideoCodec::VP8, 96)];
+    let with = |on: bool| PeerConfig {
+        video: Some(VideoConfig {
+            codecs: vp8.to_vec(),
+            transport_cc: on,
+            ..VideoConfig::default()
+        }),
+        ..PeerConfig::default()
+    };
+    let (caller, callee, _a, _b) = connect_pair_with(with(true), with(true)).await;
+    assert_eq!(caller.transport_cc_extension(), Some(3));
+    assert_eq!(callee.transport_cc_extension(), Some(3));
+    assert!(caller.local_sdp().unwrap().contains("transport-cc"));
+
+    let (caller, callee, _a, _b) = connect_pair_with(with(true), with(false)).await;
+    assert_eq!(
+        callee.transport_cc_extension(),
+        None,
+        "the answerer does not carry it"
+    );
+    assert_eq!(
+        caller.transport_cc_extension(),
+        None,
+        "the answer dropped it"
+    );
+    assert!(!callee.local_sdp().unwrap().contains("transport-cc"));
+}

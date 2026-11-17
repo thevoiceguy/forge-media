@@ -101,6 +101,12 @@ impl Prober {
         });
     }
 
+    /// Stop the cluster running (it could not be sent). The interval
+    /// still counts from when it began.
+    pub fn cancel(&mut self) {
+        self.active = None;
+    }
+
     /// Whether a cluster is running.
     pub fn probing(&self) -> bool {
         self.active.is_some()

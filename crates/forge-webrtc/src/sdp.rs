@@ -118,23 +118,32 @@ pub const MID_EXTENSION_URI: &str = "urn:ietf:params:rtp-hdrext:sdes:mid";
 /// with BUNDLE every section shares one id space.
 pub const RID_EXTENSION_ID: u8 = 2;
 
+/// The id the transport-wide sequence extension (transport-cc,
+/// [`TRANSPORT_CC_URI`]) is offered under on the video sections, beside
+/// `sdes:mid` (1) and the rid (2).
+pub const TRANSPORT_CC_EXTENSION_ID: u8 = 3;
+
+pub use forge_rtp::transport_cc::TRANSPORT_CC_URI;
+
 /// The most simulcast streams read from a remote's section.
 const MAX_SIMULCAST_STREAMS: usize = 4;
 
 /// The feedback messages this endpoint sends and acts on (RFC 4585 NACK
-/// and PLI, RFC 5104 FIR, REMB). Anything else a peer offers — notably
-/// `transport-cc`, which needs a header extension this endpoint does not
-/// write — is left out of the answer.
-const SUPPORTED_FEEDBACK: [(&str, Option<&str>); 4] = [
+/// and PLI, RFC 5104 FIR, REMB), and `transport-cc` when the video
+/// sections carry its extension ([`LocalParams::tcc_ext`]). Anything else
+/// a peer offers is left out of the answer.
+const SUPPORTED_FEEDBACK: [(&str, Option<&str>); 5] = [
     ("nack", None),
     ("nack", Some("pli")),
     ("ccm", Some("fir")),
     ("goog-remb", None),
+    ("transport-cc", None),
 ];
 
-fn feedback_supported(fb: &RtcpFeedbackAttr) -> bool {
+fn feedback_supported(fb: &RtcpFeedbackAttr, transport_cc: bool) -> bool {
     SUPPORTED_FEEDBACK
         .iter()
+        .filter(|(k, _)| transport_cc || *k != "transport-cc")
         .any(|(k, p)| fb.kind == *k && fb.param.as_deref() == *p)
 }
 
@@ -217,6 +226,10 @@ pub struct LocalParams<'a> {
     /// The id the `sdes:mid` header extension is offered (or mirrored)
     /// under; `None` leaves it out.
     pub mid_ext: Option<u8>,
+    /// The id the transport-cc extension is offered (or mirrored) under on
+    /// the video sections, with `a=rtcp-fb:<pt> transport-cc`; `None`
+    /// leaves both out.
+    pub tcc_ext: Option<u8>,
     /// `o=` session id.
     pub session_id: u64,
     /// `o=` session version (incremented per description).
@@ -313,6 +326,9 @@ pub struct RemoteDescription {
     /// The id the remote uses for the `sdes:mid` header extension, when
     /// it listed one (`a=extmap`) at session level or on a video section.
     pub mid_ext: Option<u8>,
+    /// The id the remote uses for the transport-cc extension, when it
+    /// listed one.
+    pub tcc_ext: Option<u8>,
 }
 
 impl RemoteAudio {
@@ -461,11 +477,23 @@ pub fn video_from_answer(
     simulcast: &[String],
     answer: &RemoteVideo,
 ) -> Option<NegotiatedVideo> {
+    video_from_answer_with(prefs, want, simulcast, false, answer)
+}
+
+/// [`video_from_answer`], keeping `transport-cc` feedback when we offered
+/// its extension and the answer kept it.
+pub fn video_from_answer_with(
+    prefs: &[(VideoCodec, u8)],
+    want: Direction,
+    simulcast: &[String],
+    transport_cc: bool,
+    answer: &RemoteVideo,
+) -> Option<NegotiatedVideo> {
     let &(codec, pt) = prefs.iter().find(|(c, pt)| answer.pt_of(*c) == Some(*pt))?;
     let feedback: Vec<RtcpFeedbackAttr> = answer
         .feedback_for(pt)
         .into_iter()
-        .filter(feedback_supported)
+        .filter(|f| feedback_supported(f, transport_cc))
         .collect();
     // The answer's direction is from the remote's point of view; ours is
     // what we offered, narrowed by what the answer allows.
@@ -703,6 +731,9 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
     let mid_ext = std::iter::once(&desc.attributes)
         .chain(desc.media.iter().map(|m| &m.attributes))
         .find_map(|attrs| extmap_id(attrs, MID_EXTENSION_URI));
+    let tcc_ext = std::iter::once(&desc.attributes)
+        .chain(desc.media.iter().map(|m| &m.attributes))
+        .find_map(|attrs| extmap_id(attrs, TRANSPORT_CC_URI));
 
     Ok(RemoteDescription {
         ufrag,
@@ -721,6 +752,7 @@ pub fn parse_remote(sdp: &str) -> Result<RemoteDescription> {
         media: desc.media.clone(),
         bundle,
         mid_ext,
+        tcc_ext,
     })
 }
 
@@ -908,6 +940,9 @@ fn video_section(
 
     let a = &mut media.attributes;
     transport_attrs(a, p, port);
+    if let Some(id) = p.tcc_ext {
+        push_value(a, "extmap", format!("{id} {TRANSPORT_CC_URI}"));
+    }
     push_value(a, "mid", mid.into());
     if lv.content {
         push_value(a, "content", "slides".into());
@@ -964,7 +999,7 @@ fn video_section(
 /// The formats we offer for video: every configured codec at its payload
 /// type, H.264 with our profile and packetization mode, and the full
 /// supported feedback set on each.
-fn offered_video_formats(lv: &LocalVideo<'_>) -> Vec<VideoFormat> {
+fn offered_video_formats(lv: &LocalVideo<'_>, transport_cc: bool) -> Vec<VideoFormat> {
     lv.codecs
         .iter()
         .map(|&(codec, pt)| VideoFormat {
@@ -978,6 +1013,7 @@ fn offered_video_formats(lv: &LocalVideo<'_>) -> Vec<VideoFormat> {
             }),
             feedback: SUPPORTED_FEEDBACK
                 .iter()
+                .filter(|(k, _)| transport_cc || *k != "transport-cc")
                 .map(|(k, param)| feedback_attr(pt, k, *param))
                 .collect(),
         })
@@ -1044,7 +1080,7 @@ pub fn build_offer(p: &LocalParams<'_>) -> String {
         .chain(p.content.iter())
         .chain(p.streams.iter())
     {
-        let formats = offered_video_formats(lv);
+        let formats = offered_video_formats(lv, p.tcc_ext.is_some());
         media.push(video_section(
             p,
             lv,
@@ -1132,7 +1168,7 @@ pub fn build_answer(
         let feedback: Vec<RtcpFeedbackAttr> = rv
             .feedback_for(pt)
             .into_iter()
-            .filter(feedback_supported)
+            .filter(|f| feedback_supported(f, p.tcc_ext.is_some()))
             .map(|fb| RtcpFeedbackAttr {
                 payload_type: Some(pt),
                 ..fb
@@ -1307,6 +1343,7 @@ a=fmtp:97 apt=96\r\n";
             content: None,
             streams: vec![],
             mid_ext: Some(1),
+            tcc_ext: None,
             session_id: 1,
             session_version: 1,
         }
@@ -1649,6 +1686,49 @@ a=ssrc:2222 cname:user@example.com\r\n";
         assert_eq!(answer.matches("a=fingerprint:sha-256 ").count(), 2);
         assert_eq!(answer.matches("a=setup:active").count(), 2);
         assert_eq!(answer.matches("a=candidate:").count(), 2);
+    }
+
+    #[test]
+    fn transport_cc_is_offered_on_video_and_kept_in_an_answer_only_when_carried() {
+        let cands = one_cand();
+        let prefs = [(VideoCodec::H264, 96), (VideoCodec::VP8, 97)];
+        let mut p = local(&cands);
+        p.video = Some(local_video(&prefs));
+        p.tcc_ext = Some(TRANSPORT_CC_EXTENSION_ID);
+        let offer = build_offer(&p);
+        let ext = format!("a=extmap:3 {TRANSPORT_CC_URI}\r\n");
+        assert_eq!(
+            offer.matches(ext.as_str()).count(),
+            1,
+            "video only: {offer}"
+        );
+        assert!(offer.contains("a=rtcp-fb:96 transport-cc\r\n"), "{offer}");
+        assert_eq!(parse_remote(&offer).unwrap().tcc_ext, Some(3));
+
+        // A browser's offer with the extension under its own id.
+        let with_ext = CHROME_VIDEO_OFFER.replacen(
+            "a=mid:1\r\n",
+            &format!("a=extmap:5 {TRANSPORT_CC_URI}\r\na=mid:1\r\n"),
+            1,
+        );
+        let r = parse_remote(&with_ext).unwrap();
+        assert_eq!(r.tcc_ext, Some(5));
+        let mut p = local(&cands);
+        p.video = Some(local_video(&prefs));
+        p.tcc_ext = r.tcc_ext;
+        let (answer, _) = build_answer(&p, &r).unwrap();
+        assert!(
+            answer.contains(&format!("a=extmap:5 {TRANSPORT_CC_URI}\r\n")),
+            "{answer}"
+        );
+        assert!(answer.contains("a=rtcp-fb:99 transport-cc\r\n"), "{answer}");
+        // Not carried: left out, extension and feedback both.
+        p.tcc_ext = None;
+        let (answer, _) = build_answer(&p, &r).unwrap();
+        assert!(
+            !answer.contains("transport-cc") && !answer.contains("transport-wide"),
+            "{answer}"
+        );
     }
 
     #[test]

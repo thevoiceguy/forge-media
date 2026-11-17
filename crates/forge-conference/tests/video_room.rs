@@ -1982,6 +1982,7 @@ async fn a_viewer_is_forwarded_each_camera_at_the_layer_its_budget_reaches() {
                 codec: VideoCodec::VP8,
                 profile: String::new(),
                 payload_type: 96,
+                transport_cc: None,
             },
         )
         .unwrap();
@@ -2161,6 +2162,7 @@ async fn the_default_view_follows_the_speaker_and_a_hidden_camera_is_paused() {
                 codec: VideoCodec::VP8,
                 profile: String::new(),
                 payload_type: 96,
+                transport_cc: None,
             },
         )
         .unwrap();
@@ -2274,6 +2276,7 @@ async fn a_trunk_is_sent_this_node_s_people_and_a_peer_s_people_are_forwarded_he
         codec: VideoCodec::VP8,
         profile: String::new(),
         payload_type: 96,
+        transport_cc: None,
     };
     let trunk = video.forward_trunk("__trunk__node-b", req.clone()).unwrap();
     let carol_sub = video.forward("carol", req).unwrap();
@@ -2386,4 +2389,218 @@ async fn a_trunk_is_sent_this_node_s_people_and_a_peer_s_people_are_forwarded_he
     video.remove_remote("dave");
     assert!(video.participant("dave").is_none());
     feeder.abort();
+}
+
+/// The transport-cc extension's id in the test's SDP.
+const TCC_EXT: u8 = 5;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_viewer_s_budget_follows_transport_cc_feedback_alone_and_probes_find_room() {
+    use forge_bwe::testing::Bottleneck;
+    use forge_bwe::FeedbackWriter;
+    use forge_rtp::rtcp::TransportFeedback;
+    use forge_rtp::transport_cc::transport_sequence;
+    use std::time::Instant;
+
+    let audio = audio_room("transport-cc");
+    for id in ["alice", "carol", "bob"] {
+        audio.add_participant(id, false).unwrap();
+    }
+    let video = audio.enable_video(settings(256, 144, 30), &VideoBackend::raw());
+    video
+        .add_source_layered(
+            "alice",
+            StreamKind::Camera,
+            VideoCodec::VP8,
+            "",
+            Some(&Simulcast {
+                rids: vec!["h".into(), "l".into()],
+                rid_extension: Some(RID_EXT),
+            }),
+        )
+        .unwrap();
+    video.add_source("carol", VideoCodec::VP8, "").unwrap();
+    let sub = video
+        .forward(
+            "bob",
+            ForwardRequest {
+                codec: VideoCodec::VP8,
+                profile: String::new(),
+                payload_type: 96,
+                transport_cc: Some(TCC_EXT),
+            },
+        )
+        .unwrap();
+    let want = |id: &str, priority| StreamWant {
+        target: StreamTarget::Participant(id.into()),
+        max_height: None,
+        priority,
+    };
+    video
+        .set_view(
+            "bob",
+            ViewRequest {
+                streams: Some(vec![want("carol", None), want("alice", Some(1))]),
+                max_streams: None,
+            },
+        )
+        .unwrap();
+
+    let mut high = Camera::new(0x1111, 128, 72);
+    let mut low = Camera::new(0x2222, 64, 36);
+    let mut carol = Camera::new(0x3333, 64, 36);
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            for i in 0..1500 {
+                for p in high.frame(200) {
+                    video.push_rtp("alice", if i < 3 { with_rid(p, "h") } else { p });
+                }
+                for p in low.frame(60) {
+                    video.push_rtp("alice", if i < 3 { with_rid(p, "l") } else { p });
+                }
+                for p in carol.frame(120) {
+                    video.push_rtp("carol", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+
+    // Bob is behind a simulated link; he says what arrived, and nothing
+    // else: no REMB at all.
+    let link = Arc::new(parking_lot::Mutex::new(Bottleneck::new(
+        50_000_000,
+        64 * 1024,
+        Duration::from_millis(20),
+    )));
+    let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let unnumbered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let receiver = {
+        let (video, link, probes, unnumbered) = (
+            Arc::clone(&video),
+            Arc::clone(&link),
+            Arc::clone(&probes),
+            Arc::clone(&unnumbered),
+        );
+        let mut packets = sub.packets;
+        tokio::spawn(async move {
+            let mut writer = FeedbackWriter::new();
+            while let Some(bytes) = packets.recv().await {
+                let now = Instant::now();
+                let size = bytes.len() + 28;
+                let Ok(p) = RtpPacket::parse(bytes) else {
+                    continue;
+                };
+                if p.payload.is_empty() && p.header.padding() {
+                    probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let Some(seq) = transport_sequence(&p, TCC_EXT) else {
+                    unnumbered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                };
+                if let Some(at) = link.lock().send(size, now) {
+                    writer.on_packet(seq, at);
+                }
+                if let Some(fb) = writer.poll(now) {
+                    video.handle_feedback(
+                        "bob",
+                        &RtcpPacket::TransportFeedback(RtpFeedback {
+                            sender_ssrc: 9,
+                            media_ssrc: 0,
+                            kind: TransportFeedback::TransportCc(fb),
+                        }),
+                    );
+                }
+            }
+        })
+    };
+
+    let until = |what: &'static str, secs: u64, f: Box<dyn Fn() -> bool + Send>| async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+        while !f() {
+            assert!(tokio::time::Instant::now() < deadline, "never: {what}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    let streams = {
+        let video = Arc::clone(&video);
+        move || video.forwarded_streams("bob")
+    };
+
+    // A wide link: the estimate comes from the feedback, and both are
+    // forwarded, Alice at her large layer.
+    {
+        let (v, s) = (Arc::clone(&video), streams.clone());
+        until(
+            "both forwarded on a fed-back estimate",
+            30,
+            Box::new(move || {
+                let info = v.participant("bob").unwrap().viewer.unwrap();
+                let st = s();
+                info.transport_cc_kbps.is_some()
+                    && st.len() == 2
+                    && st.iter().all(|x| !x.paused)
+                    && st[1].rid.as_deref() == Some("h")
+            }),
+        )
+        .await;
+    }
+    assert_eq!(
+        unnumbered.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "every packet numbered"
+    );
+    let info = video.participant("bob").unwrap().viewer.unwrap();
+    assert_eq!(info.remb_kbps, 0, "no REMB was ever sent");
+    assert_eq!(Some(info.budget_kbps), info.transport_cc_kbps);
+
+    // The link narrows to under both small layers together: the delay
+    // and loss it causes bring the estimate down until Carol, the lower
+    // priority, is paused.
+    let kbps = |id: &str| {
+        video
+            .participant(id)
+            .unwrap()
+            .source
+            .unwrap()
+            .layers
+            .last()
+            .map(|l| l.bitrate_kbps)
+            .unwrap()
+    };
+    let small = u64::from(kbps("alice")) + u64::from(kbps("carol"));
+    link.lock().set_rate(small * 1000 * 3 / 4);
+    {
+        let s = streams.clone();
+        until(
+            "Carol paused by the feedback",
+            30,
+            Box::new(move || {
+                let st = s();
+                st[0].paused && !st[1].paused
+            }),
+        )
+        .await;
+    }
+
+    // Wide again: the probes find the room and Carol comes back.
+    let before = probes.load(std::sync::atomic::Ordering::Relaxed);
+    link.lock().set_rate(50_000_000);
+    {
+        let s = streams.clone();
+        until(
+            "Carol back once the path is proved",
+            40,
+            Box::new(move || s().iter().all(|x| !x.paused)),
+        )
+        .await;
+    }
+    assert!(
+        probes.load(std::sync::atomic::Ordering::Relaxed) > before,
+        "the way back was probed"
+    );
+
+    feeder.abort();
+    receiver.abort();
 }

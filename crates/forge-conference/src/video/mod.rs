@@ -6,6 +6,7 @@
 //! subscriber's packets from its [`VideoSubscription`] — and codec work
 //! runs on the shared [`CodecPool`], never on tokio workers.
 
+pub mod congestion;
 pub mod content;
 pub mod egress;
 pub mod forward;

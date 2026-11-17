@@ -49,7 +49,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::sdp::{
-    self, rtp_clock, video_from_answer, Direction, LocalParams, LocalVideo, NegotiatedVideo,
+    self, rtp_clock, video_from_answer_with, Direction, LocalParams, LocalVideo, NegotiatedVideo,
     RemoteDescription,
 };
 use crate::transport::{
@@ -132,6 +132,11 @@ pub struct VideoConfig {
     /// go. Their packets leave through [`PeerConnection::stream_sender`].
     /// Offers only: an answer rejects a remote's extra sections.
     pub streams: u8,
+    /// Offer transport-cc on the video sections (the extension at
+    /// [`TRANSPORT_CC_EXTENSION_ID`](crate::sdp::TRANSPORT_CC_EXTENSION_ID)
+    /// and its feedback), or keep it in an answer to an offer that has
+    /// it. What was agreed is [`PeerConnection::transport_cc_extension`].
+    pub transport_cc: bool,
 }
 
 impl Default for VideoConfig {
@@ -152,6 +157,7 @@ impl Default for VideoConfig {
             content: false,
             streams: 0,
             simulcast: Vec::new(),
+            transport_cc: false,
         }
     }
 }
@@ -235,6 +241,8 @@ pub struct PeerConnection {
     /// Each stream section, pinned the same way (`None`: the answer
     /// rejected it, or none was negotiated yet).
     negotiated_streams: Vec<Option<NegotiatedVideo>>,
+    /// The transport-cc extension's id, when it was agreed.
+    transport_cc_ext: Option<u8>,
     audio_ts: Arc<AtomicU32>,
     audio_started: Arc<AtomicBool>,
 }
@@ -306,6 +314,7 @@ impl PeerConnection {
             negotiated_video: None,
             negotiated_content: None,
             negotiated_streams: Vec::new(),
+            transport_cc_ext: None,
             audio_ts: Arc::new(AtomicU32::new((rnd >> 32) as u32)),
             audio_started: Arc::new(AtomicBool::new(false)),
         })
@@ -340,6 +349,7 @@ impl PeerConnection {
         candidates: &'a [IceCandidate],
         setup: DtlsSetup,
         mid_ext: Option<u8>,
+        tcc_ext: Option<u8>,
         answering: bool,
     ) -> LocalParams<'a> {
         LocalParams {
@@ -416,6 +426,7 @@ impl PeerConnection {
                 })
                 .unwrap_or_default(),
             mid_ext,
+            tcc_ext,
             session_id: self.session_id,
             session_version: self.session_version,
         }
@@ -442,14 +453,21 @@ impl PeerConnection {
         let creds = t.local_credentials();
         let candidates = t.local_candidates();
         self.session_version += 1;
-        let sdp = sdp::build_offer(&self.local_params(
-            &t,
-            &creds,
-            &candidates,
-            DtlsSetup::Actpass,
-            Some(MID_EXTENSION_ID),
-            false,
-        ));
+        let sdp = sdp::build_offer(
+            &self.local_params(
+                &t,
+                &creds,
+                &candidates,
+                DtlsSetup::Actpass,
+                Some(MID_EXTENSION_ID),
+                self.cfg
+                    .video
+                    .as_ref()
+                    .filter(|v| v.transport_cc)
+                    .map(|_| crate::sdp::TRANSPORT_CC_EXTENSION_ID),
+                false,
+            ),
+        );
         self.pending_local_sdp = Some(sdp.clone());
         self.signaling = SignalingState::HaveLocalOffer;
         if *self.state.lock() == ConnectionState::New {
@@ -527,11 +545,24 @@ impl PeerConnection {
         let creds = t.local_credentials();
         let candidates = t.local_candidates();
         self.session_version += 1;
-        // The extension id is the offer's to choose; an answer mirrors it.
+        // The extension ids are the offer's to choose; an answer mirrors
+        // them, transport-cc only when we carry it.
+        let tcc_ext = remote
+            .tcc_ext
+            .filter(|_| self.cfg.video.as_ref().is_some_and(|v| v.transport_cc));
         let (answer, negotiated) = sdp::build_answer(
-            &self.local_params(&t, &creds, &candidates, setup, remote.mid_ext, true),
+            &self.local_params(
+                &t,
+                &creds,
+                &candidates,
+                setup,
+                remote.mid_ext,
+                tcc_ext,
+                true,
+            ),
             &remote,
         )?;
+        self.transport_cc_ext = tcc_ext;
         let selected = negotiated.audio;
         self.negotiated = Some(selected);
         self.negotiated_video = negotiated.video;
@@ -586,15 +617,22 @@ impl PeerConnection {
         // Video is pinned only when we offered it and the answer kept one
         // of our codecs; a rejected section (or one we never offered)
         // leaves it unset.
+        // Transport-cc is on only if we offered it and the answer kept
+        // the extension under our id.
+        let tcc_ext = remote
+            .tcc_ext
+            .filter(|id| *id == crate::sdp::TRANSPORT_CC_EXTENSION_ID)
+            .filter(|_| self.cfg.video.as_ref().is_some_and(|v| v.transport_cc));
+        let tcc = tcc_ext.is_some();
         let video = match (&self.cfg.video, remote.video.as_ref()) {
             (Some(cfg), Some(rv)) => {
-                video_from_answer(&cfg.codecs, cfg.direction, &cfg.simulcast, rv)
+                video_from_answer_with(&cfg.codecs, cfg.direction, &cfg.simulcast, tcc, rv)
             }
             _ => None,
         };
         let content = match (&self.cfg.video, remote.content.as_ref()) {
             (Some(cfg), Some(rv)) if cfg.content => {
-                video_from_answer(&cfg.codecs, cfg.direction, &[], rv)
+                video_from_answer_with(&cfg.codecs, cfg.direction, &[], tcc, rv)
             }
             _ => None,
         };
@@ -609,13 +647,16 @@ impl PeerConnection {
                         .streams
                         .iter()
                         .find(|rv| rv.mid.as_deref() == Some(mid.as_str()))
-                        .and_then(|rv| video_from_answer(&cfg.codecs, Direction::SendOnly, &[], rv))
+                        .and_then(|rv| {
+                            video_from_answer_with(&cfg.codecs, Direction::SendOnly, &[], tcc, rv)
+                        })
                 })
                 .collect(),
             None => Vec::new(),
         };
         // The extension is on only if the answer kept it.
         let mid_ext = remote.mid_ext.filter(|id| *id == MID_EXTENSION_ID);
+        self.transport_cc_ext = tcc_ext;
         t.set_remote(
             &remote.ufrag,
             &remote.pwd,
@@ -874,6 +915,13 @@ impl PeerConnection {
             .as_ref()
             .ok_or_else(|| WebRtcError::InvalidState("no transport yet".into()))?;
         t.send_rtcp(packets).await
+    }
+
+    /// The transport-cc extension's id on the video sections, when offer
+    /// and answer agreed it: number what is sent there under it, and read
+    /// the remote's numbers from what arrives.
+    pub fn transport_cc_extension(&self) -> Option<u8> {
+        self.transport_cc_ext
     }
 
     /// The video section pinned by offer/answer, once both sides accepted

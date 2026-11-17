@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use forge_core::VideoCodec;
-use forge_rtp::rtcp::{PayloadFeedback, RtcpPacket, TransportFeedback};
+use forge_rtp::rtcp::{PayloadFeedback, RtcpPacket, RtpFeedback, TransportFeedback};
 use forge_rtp::{CodedFrame, RtpPacket};
 use forge_video::codec::{CodecRegistry, EncoderSettings};
 use forge_video::compose::{Compositor, HostCompositor, TileKind, TileSource};
@@ -50,8 +50,8 @@ use super::egress::{
     default_kbps, FlavorEncoder, OutputKey, OutputScope, Subscriber, VideoSubscription,
 };
 use super::forward::{
-    allocate, Ask, ForwardRequest, ForwardSubscription, ForwardedStreamInfo, LayerOption, Step,
-    Stream, StreamTarget, VideoViewerInfo, ViewRequest, Viewer,
+    allocate, next_upgrade_kbps, Ask, ForwardRequest, ForwardSubscription, ForwardedStreamInfo,
+    LayerOption, Step, Stream, StreamTarget, VideoViewerInfo, ViewRequest, Viewer,
 };
 use super::pool::CodecPool;
 use super::source::{LayerInfo, Simulcast, SourceLimits, VideoSource};
@@ -793,6 +793,10 @@ pub struct VideoRoom {
     target_fps: AtomicU32,
     events: broadcast::Sender<VideoRoomEvent>,
     clock_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The runtime the clock runs on, taken when it starts: the compose
+    /// tick runs on the codec pool's threads, which have none, and a
+    /// probe is paced on it (TRANSPORT_CC.md §3.2).
+    runtime: Mutex<Option<tokio::runtime::Handle>>,
     started: Instant,
     ticks: AtomicU64,
     overruns: AtomicU64,
@@ -845,6 +849,7 @@ impl VideoRoom {
             target_fps: AtomicU32::new(fps),
             events,
             clock_task: Mutex::new(None),
+            runtime: Mutex::new(None),
             started: Instant::now(),
             ticks: AtomicU64::new(0),
             overruns: AtomicU64::new(0),
@@ -1224,6 +1229,26 @@ impl VideoRoom {
                 self.refused_told.lock().remove(id);
             }
             self.set_state_kind(id, kind, VideoState::Off);
+        }
+    }
+
+    /// The sender of `id`'s `kind` stream numbers its packets for
+    /// transport-cc under `ext_id` (`None`: no longer): the room writes
+    /// the feedback, returned beside the NACKs and PLIs from
+    /// [`push_rtp_kind`](Self::push_rtp_kind), so the sender can estimate
+    /// its own uplink (TRANSPORT_CC.md §3.2).
+    pub fn set_source_transport_cc(&self, id: &str, kind: StreamKind, ext_id: Option<u8>) {
+        if let Some(s) = self.sources.get(&SourceKey::new(id, kind)) {
+            s.set_transport_cc(ext_id);
+        }
+    }
+
+    /// A composite subscriber's section negotiated transport-cc under
+    /// `ext_id` (`None`: no longer): what it is sent is numbered, and its
+    /// feedback is its budget while it arrives.
+    pub fn set_subscriber_transport_cc(&self, id: &str, kind: StreamKind, ext_id: Option<u8>) {
+        if let Some(sub) = self.subscribers.get(&SourceKey::new(id, kind)) {
+            sub.set_transport_cc(ext_id);
         }
     }
 
@@ -1767,6 +1792,8 @@ impl VideoRoom {
             codec: v.codec,
             streams: v.streams.lock().iter().map(|s| s.info()).collect(),
             remb_kbps: v.remb_kbps.load(Ordering::Relaxed),
+            transport_cc_kbps: v.cc.as_ref().and_then(|cc| cc.budget_kbps(Instant::now())),
+            budget_kbps: v.budget_kbps().unwrap_or(0),
             packets_sent: v.stats.packets_sent.load(Ordering::Relaxed),
             packets_dropped: v.stats.packets_dropped.load(Ordering::Relaxed),
             nacks_received: v.stats.nacks_received.load(Ordering::Relaxed),
@@ -1934,13 +1961,24 @@ impl VideoRoom {
                     layers: r.as_ref().map(|(_, l)| l.as_slice()).unwrap_or(&[]),
                 })
                 .collect();
-            let chosen = allocate(viewer.budget_kbps(), &asks);
+            let budget = viewer.budget_kbps();
+            let chosen = allocate(budget, &asks);
+            // Something held back that the budget nearly covers: probe
+            // whether the path carries it (TRANSPORT_CC.md §3.2).
+            if let (Some(cc), Some(budget)) = (&viewer.cc, budget) {
+                if let Some(need) = next_upgrade_kbps(&asks, &chosen) {
+                    if cc.maybe_probe(need, budget, now).is_some() {
+                        self.send_probe(Arc::clone(&viewer));
+                    }
+                }
+            }
+            let up_after = viewer.up_after(now);
             for ((stream, r), pick) in streams.iter().zip(&resolved).zip(chosen) {
                 let want = r
                     .as_ref()
                     .zip(pick)
                     .map(|((key, layers), j)| (key.clone(), layers[j].clone()));
-                if let Step::Select(key, layer, true) = stream.step(want, now) {
+                if let Step::Select(key, layer, true) = stream.step_within(want, now, up_after) {
                     if let Some(s) = self.sources.get(&key) {
                         s.request_layer_keyframe(layer.index);
                     }
@@ -1979,9 +2017,46 @@ impl VideoRoom {
         }
     }
 
+    /// Pace a probe cluster's padding onto `viewer`'s tallest stream, on
+    /// the clock's runtime. A room without one (its clock never started)
+    /// does not probe.
+    fn send_probe(&self, viewer: Arc<Viewer>) {
+        let Some(runtime) = self.runtime.lock().clone() else {
+            if let Some(cc) = viewer.cc.as_ref() {
+                cc.cancel_probe();
+            }
+            return;
+        };
+        runtime.spawn(async move {
+            let Some(cc) = viewer.cc.as_ref() else {
+                return;
+            };
+            while let Some(due) = cc.next_probe_due() {
+                let wait = due.saturating_duration_since(Instant::now());
+                if !wait.is_zero() {
+                    tokio::time::sleep(wait).await;
+                }
+                while let Some(id) = cc.poll_probe(Instant::now()) {
+                    match viewer.probe_padding() {
+                        Some(bytes) => {
+                            viewer.deliver_probe(bytes, id);
+                        }
+                        // Nothing carried to pad: the probe ends here,
+                        // and the next may start when something is.
+                        None => {
+                            cc.cancel_probe();
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// RTCP from a forwarding viewer: a PLI or FIR asks the layer its
     /// stream carries for a keyframe, a NACK is answered from that
-    /// stream's cache, and REMB is the budget.
+    /// stream's cache, and REMB is the budget unless transport-cc
+    /// feedback is arriving, which is.
     fn viewer_feedback(&self, viewer: &Viewer, packet: &RtcpPacket) {
         let keyframe = |ssrc: u32| {
             if let Some((key, index)) = viewer.stream(ssrc).and_then(|s| s.keyframe_target()) {
@@ -2009,6 +2084,9 @@ impl VideoRoom {
                 PayloadFeedback::Other { .. } => {}
             },
             RtcpPacket::TransportFeedback(fb) => {
+                if let (TransportFeedback::TransportCc(cc_fb), Some(cc)) = (&fb.kind, &viewer.cc) {
+                    cc.on_feedback(cc_fb, Instant::now());
+                }
                 if let TransportFeedback::Nack(entries) = &fb.kind {
                     viewer.stats.nacks_received.fetch_add(1, Ordering::Relaxed);
                     let Some(stream) = viewer.stream(fb.media_ssrc) else {
@@ -2309,6 +2387,14 @@ impl VideoRoom {
                 PayloadFeedback::Remb { bitrate_bps, .. } => sub.set_remb(*bitrate_bps),
                 PayloadFeedback::Other { .. } => {}
             },
+            RtcpPacket::TransportFeedback(RtpFeedback {
+                kind: TransportFeedback::TransportCc(fb),
+                ..
+            }) => {
+                if let Some(cc) = sub.congestion() {
+                    cc.on_feedback(fb, Instant::now());
+                }
+            }
             RtcpPacket::TransportFeedback(fb) => {
                 if let TransportFeedback::Nack(entries) = &fb.kind {
                     counter!("forge_conference_video_nacks_received_total", "room_id" => self.id.clone())
@@ -2579,6 +2665,7 @@ impl VideoRoom {
     // ---- the clock and the tick ----------------------------------------------
 
     fn spawn_clock(self: &Arc<Self>) {
+        *self.runtime.lock() = tokio::runtime::Handle::try_current().ok();
         let weak = Arc::downgrade(self);
         let fps = self.fps();
         let task = tokio::spawn(async move {
@@ -2996,7 +3083,7 @@ impl VideoRoom {
                 // The encoder targets the slowest receiver (§7).
                 let floor = subs
                     .iter()
-                    .map(|s| s.remb_kbps())
+                    .map(|s| s.budget_kbps())
                     .filter(|k| *k > 0)
                     .min()
                     .unwrap_or(enc.flavor.max_kbps);
@@ -3330,7 +3417,7 @@ impl VideoRoom {
             subscriber = %sub.key(),
             from = %was,
             to = %flavor,
-            remb_kbps = sub.remb_kbps(),
+            budget_kbps = sub.budget_kbps(),
             "video subscriber moved between {what}"
         );
     }

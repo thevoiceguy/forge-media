@@ -18,7 +18,7 @@ pub mod video;
 pub use ai_manager::{
     AudioMode, ConferenceAIConfig, ConferenceAIManager, ConferenceAIState, AI_PARTICIPANT_ID,
 };
-pub use audience::{AudienceEncoder, AudienceFlavorInfo, AudienceFrame};
+pub use audience::{AudienceEncoder, AudienceFlavorInfo, AudienceFrame, AudienceFrameStats};
 pub use audio_feedback::{AudioFeedbackPlayer, ConferenceSounds};
 pub use conference::{
     ConferenceBridge, ConferenceRoom, MixedFrame, RoomId, AUDIO_FEEDBACK_PARTICIPANT_ID,

@@ -30,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it once per flavor, and every subscriber gets the same
   `AudienceFrame` (`payload: None` when nobody was heard). A flavor ends
   with its last receiver. `set_listener`, `is_listener`,
-  `listener_count`, `add_listener_admitted` and `audience_flavors`;
+  `listener_count`, `add_listener_admitted`, `audience_flavors` and
+  `audience_frame_stats` (frames fed, mean and slowest frame time);
   metrics `forge_conference_audience_subscribers` and
   `forge_conference_audience_frame_seconds`.
 

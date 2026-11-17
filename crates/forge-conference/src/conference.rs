@@ -729,6 +729,11 @@ impl ConferenceRoom {
         self.audience.info()
     }
 
+    /// What feeding the audience has cost so far, per frame.
+    pub fn audience_frame_stats(&self) -> crate::AudienceFrameStats {
+        self.audience.frame_stats()
+    }
+
     /// Add a participant that represents something other than a caller —
     /// an inter-node trunk, a media injector — and so answers to none of
     /// the caller-facing admission rules: no lock, wait-for-moderator or
@@ -2364,6 +2369,9 @@ mod tests {
         assert_eq!(info.len(), 2);
         assert_eq!(info[1].flavor, "pcmu/8000/20");
         assert_eq!(info[1].subscribers, 25);
+        let stats = room.audience_frame_stats();
+        assert_eq!(stats.frames, 3, "every frame fed while anyone listened");
+        assert!(stats.max_us >= stats.mean_us && stats.mean_us > 0.0);
         receivers.retain(|_| false);
         room.advance_frame();
         assert!(room.audience_flavors().is_empty());

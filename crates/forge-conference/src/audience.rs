@@ -52,6 +52,25 @@ pub struct AudienceFlavorInfo {
     pub frames_encoded: u64,
 }
 
+/// What feeding the audience has cost, frame by frame: mixing once and
+/// encoding once per flavor.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AudienceFrameStats {
+    /// Frames fed (with at least one subscriber).
+    pub frames: u64,
+    /// Mean wall time of one frame, in microseconds.
+    pub mean_us: f64,
+    /// The slowest frame, in microseconds.
+    pub max_us: f64,
+}
+
+#[derive(Default)]
+struct Timing {
+    frames: u64,
+    total_ns: u128,
+    max_ns: u128,
+}
+
 struct Flavor {
     encoder: Box<dyn AudienceEncoder>,
     tx: broadcast::Sender<AudienceFrame>,
@@ -62,6 +81,7 @@ struct Flavor {
 pub(crate) struct AudienceMix {
     room_id: String,
     flavors: Mutex<HashMap<String, Flavor>>,
+    timing: Mutex<Timing>,
 }
 
 impl AudienceMix {
@@ -69,6 +89,7 @@ impl AudienceMix {
         Self {
             room_id,
             flavors: Mutex::new(HashMap::new()),
+            timing: Mutex::new(Timing::default()),
         }
     }
 
@@ -123,8 +144,26 @@ impl AudienceMix {
             // A send fails only with no receivers, and those go next frame.
             let _ = f.tx.send(AudienceFrame { seq, payload });
         }
+        let elapsed = started.elapsed();
         histogram!("forge_conference_audience_frame_seconds", "room_id" => self.room_id.clone())
-            .record(started.elapsed().as_secs_f64());
+            .record(elapsed.as_secs_f64());
+        let mut t = self.timing.lock();
+        t.frames += 1;
+        t.total_ns += elapsed.as_nanos();
+        t.max_ns = t.max_ns.max(elapsed.as_nanos());
+    }
+
+    pub(crate) fn frame_stats(&self) -> AudienceFrameStats {
+        let t = self.timing.lock();
+        AudienceFrameStats {
+            frames: t.frames,
+            mean_us: if t.frames == 0 {
+                0.0
+            } else {
+                t.total_ns as f64 / t.frames as f64 / 1_000.0
+            },
+            max_us: t.max_ns as f64 / 1_000.0,
+        }
     }
 
     pub(crate) fn info(&self) -> Vec<AudienceFlavorInfo> {

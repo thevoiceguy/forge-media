@@ -12,6 +12,7 @@ pub mod rtt;
 pub mod socket;
 pub mod srtp;
 pub mod stats;
+pub mod transport_cc;
 pub mod video;
 
 #[cfg(feature = "dtls")]

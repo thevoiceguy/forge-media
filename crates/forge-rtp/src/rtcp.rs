@@ -794,7 +794,9 @@ impl NackEntry {
 pub enum TransportFeedback {
     /// Generic NACK (FMT 1).
     Nack(Vec<NackEntry>),
-    /// Any other FMT (e.g. 15 = transport-cc), FCI kept verbatim.
+    /// Transport-wide congestion control feedback (FMT 15).
+    TransportCc(crate::transport_cc::TransportCcFeedback),
+    /// Any other FMT, or an FMT 15 that does not read, FCI kept verbatim.
     Other { fmt: u8, fci: Vec<u8> },
 }
 
@@ -878,6 +880,15 @@ impl RtpFeedback {
                         .collect(),
                 )
             }
+            crate::transport_cc::TRANSPORT_CC_FMT => {
+                match crate::transport_cc::TransportCcFeedback::parse(fci) {
+                    Ok(fb) => TransportFeedback::TransportCc(fb),
+                    Err(_) => TransportFeedback::Other {
+                        fmt,
+                        fci: fci.to_vec(),
+                    },
+                }
+            }
             fmt => TransportFeedback::Other {
                 fmt,
                 fci: fci.to_vec(),
@@ -893,6 +904,7 @@ impl RtpFeedback {
     fn fmt(&self) -> u8 {
         match &self.kind {
             TransportFeedback::Nack(_) => 1,
+            TransportFeedback::TransportCc(_) => crate::transport_cc::TRANSPORT_CC_FMT,
             TransportFeedback::Other { fmt, .. } => *fmt,
         }
     }
@@ -907,6 +919,7 @@ impl RtpFeedback {
                 }
                 buf.to_vec()
             }
+            TransportFeedback::TransportCc(fb) => fb.to_fci(),
             TransportFeedback::Other { fci, .. } => fci.clone(),
         }
     }
@@ -1054,17 +1067,24 @@ fn feedback_bytes(
     media: u32,
     fci: &[u8],
 ) -> Vec<u8> {
+    // An FCI that does not end on a word (transport-cc's) is padded as
+    // RFC 3550 §6.4.1 says: P set, the last byte the padding's length.
+    let pad = (4 - fci.len() % 4) % 4;
     let header = RtcpHeader {
         version: 2,
-        padding: false,
+        padding: pad > 0,
         count: fmt & 0x1F,
         packet_type,
-        length: ((8 + fci.len()) / 4) as u16, // (12 + fci) / 4 - 1
+        length: ((8 + fci.len() + pad) / 4) as u16, // (12 + fci) / 4 - 1
     };
     let mut buf = header.to_bytes();
     buf.extend_from_slice(&sender.to_be_bytes());
     buf.extend_from_slice(&media.to_be_bytes());
     buf.extend_from_slice(fci);
+    if pad > 0 {
+        buf.extend(std::iter::repeat(0u8).take(pad - 1));
+        buf.push(pad as u8);
+    }
     buf
 }
 
@@ -1634,7 +1654,7 @@ mod tests {
 
     #[test]
     fn unknown_feedback_formats_keep_their_fci() {
-        // transport-cc (RTPFB FMT 15) with an opaque body.
+        // An FMT 15 too short to be transport-cc keeps its body.
         let bytes = feedback_bytes(RtcpPacketType::RTPFB, 15, 1, 2, &[1, 2, 3, 4]);
         match RtcpPacket::parse(&bytes).unwrap() {
             RtcpPacket::TransportFeedback(FeedbackMessage {
@@ -1688,5 +1708,42 @@ mod tests {
         // Truncated tail: what parsed so far is returned.
         let cut = &bytes[..bytes.len() - 3];
         assert_eq!(RtcpPacket::parse_compound(cut).len(), 2);
+    }
+
+    #[test]
+    fn transport_cc_feedback_crosses_as_a_padded_rtcp_packet() {
+        use crate::transport_cc::{PacketStatus, TransportCcFeedback};
+        let fb = TransportCcFeedback {
+            base_sequence: 10,
+            reference_time: 5,
+            feedback_count: 1,
+            packets: vec![
+                PacketStatus::Received(3),
+                PacketStatus::NotReceived,
+                PacketStatus::Received(7),
+                PacketStatus::Received(1),
+            ],
+        };
+        let packet = RtcpPacket::TransportFeedback(FeedbackMessage {
+            sender_ssrc: 1,
+            media_ssrc: 2,
+            kind: TransportFeedback::TransportCc(fb.clone()),
+        });
+        let bytes = packet.to_bytes();
+        assert_eq!(bytes.len() % 4, 0);
+        assert_ne!(bytes[0] & 0x20, 0, "padded, and says so");
+        assert_eq!(
+            *bytes.last().unwrap() as usize,
+            bytes.len() - 12 - fb.to_fci().len()
+        );
+        let parsed = RtcpPacket::parse_compound(&bytes);
+        match &parsed[..] {
+            [RtcpPacket::TransportFeedback(FeedbackMessage {
+                kind: TransportFeedback::TransportCc(back),
+                media_ssrc: 2,
+                ..
+            })] => assert_eq!(back, &fb),
+            other => panic!("{other:?}"),
+        }
     }
 }

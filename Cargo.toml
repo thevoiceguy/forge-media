@@ -4,6 +4,7 @@ members = [
     "crates/forge-core",
     "crates/forge-hep",
     "crates/forge-rtp",
+    "crates/forge-bwe",
     "crates/forge-ice",
     "crates/forge-engine",
     "crates/forge-kernel",
@@ -134,6 +135,7 @@ license.workspace = true
 [dependencies]
 forge-core = { path = "crates/forge-core" }
 forge-rtp = { path = "crates/forge-rtp" }
+forge-bwe = { path = "crates/forge-bwe" }
 forge-engine = { path = "crates/forge-engine", features = [] }
 forge-api = { path = "crates/forge-api", optional = false }
 forge-recorder = { path = "crates/forge-recorder", optional = true }

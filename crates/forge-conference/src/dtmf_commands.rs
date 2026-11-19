@@ -117,6 +117,15 @@ pub struct HostCommands {
     /// Dial-out prefix: starts collecting an extension/number.
     /// After entering the prefix the caller types digits then #.
     pub dial_out: String, // default: "*5"
+
+    /// Take a webinar live: let the lobby in (FCP's `docs/WEBINARS.md`
+    /// §2.6). Whether the room is a webinar is the caller's to know.
+    #[serde(default = "default_go_live")]
+    pub go_live: String, // default: "*95"
+}
+
+fn default_go_live() -> String {
+    "*95".to_string()
 }
 
 impl Default for HostCommands {
@@ -129,6 +138,7 @@ impl Default for HostCommands {
             unlock: "*94".to_string(),
             end_conference: "*00".to_string(),
             dial_out: "*5".to_string(),
+            go_live: default_go_live(),
         }
     }
 }
@@ -152,6 +162,8 @@ pub enum DtmfCommand {
     LockConference,
     UnlockConference,
     EndConference,
+    /// Take a webinar live.
+    GoLive,
 
     // Host: dial-out
     DialOut(String), // destination extension/number
@@ -446,8 +458,10 @@ impl DtmfCommandHandler {
         let is_kick = digits.starts_with(&self.config.host_commands.kick_prefix)
             && digits.len() > self.config.host_commands.kick_prefix.len();
         let is_dial_out = digits == self.config.host_commands.dial_out;
+        let is_go_live = digits == self.config.host_commands.go_live;
 
-        let is_host_command = is_mute_all
+        let is_host_command = is_go_live
+            || is_mute_all
             || is_unmute_all
             || is_lock
             || is_unlock
@@ -472,6 +486,9 @@ impl DtmfCommandHandler {
                 }
                 if is_end_conference {
                     return Some(DtmfCommand::EndConference);
+                }
+                if is_go_live {
+                    return Some(DtmfCommand::GoLive);
                 }
                 if is_kick {
                     let number_part = &digits[self.config.host_commands.kick_prefix.len()..];
@@ -508,6 +525,7 @@ impl DtmfCommandHandler {
             || cmds.end_conference.starts_with(digits)
             || cmds.kick_prefix.starts_with(digits)
             || cmds.dial_out.starts_with(digits)
+            || cmds.go_live.starts_with(digits)
     }
 
     /// Get the length of the longest host command
@@ -521,6 +539,7 @@ impl DtmfCommandHandler {
             cmds.end_conference.len(),
             cmds.kick_prefix.len() + 2, // Account for kick prefix + at least 2 digits
             cmds.dial_out.len(),
+            cmds.go_live.len(),
         ]
         .iter()
         .max()
@@ -634,6 +653,45 @@ mod tests {
         room.request_hand_toggle("bob");
         assert_eq!(room.drain_hand_requests(), vec!["alice", "bob"]);
         assert!(room.drain_hand_requests().is_empty());
+    }
+
+    #[test]
+    fn star_nine_five_takes_a_webinar_live_for_a_host_only() {
+        let handler = DtmfCommandHandler::new("test-room", ConferenceDtmfConfig::default());
+        handler.set_host("host", true);
+        for d in ['*', '9'] {
+            assert_eq!(handler.process_digit("host", d), None);
+        }
+        assert_eq!(
+            handler.process_digit("host", '5'),
+            Some((DtmfCommand::GoLive, ParticipantRole::Host))
+        );
+        // Anyone else is not taken live: without a host PIN the
+        // sequence is no command at all.
+        for d in ['*', '9'] {
+            assert_eq!(handler.process_digit("guest", d), None);
+        }
+        assert_ne!(
+            handler.process_digit("guest", '5'),
+            Some((DtmfCommand::GoLive, ParticipantRole::Participant))
+        );
+        // A configuration written before the key existed still has it.
+        let old: HostCommands = toml::from_str(
+            "kick_prefix = \"##\"\nmute_all = \"*91\"\nunmute_all = \"*92\"\nlock = \"*93\"\nunlock = \"*94\"\nend_conference = \"*00\"\ndial_out = \"*5\"\n",
+        )
+        .unwrap();
+        assert_eq!(old.go_live, "*95");
+
+        let room = crate::ConferenceRoom::new(
+            "live",
+            forge_core::AudioFormat::pcm_mono(),
+            160,
+            forge_mixer::MixerOptions::default(),
+        )
+        .unwrap();
+        room.request_go_live("host");
+        assert_eq!(room.drain_go_live_requests(), vec!["host"]);
+        assert!(room.drain_go_live_requests().is_empty());
     }
 
     #[test]

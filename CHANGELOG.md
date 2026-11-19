@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Crate versions:** **forge-conference 0.21.0**.
+
+### Added
+
+- **forge-conference:** taking a webinar live by DTMF (FCP
+  `docs/WEBINARS.md` §2.6, W4). `*95` is the host command `go_live`
+  (`DtmfCommand::GoLive`), bindable per room and globally and defaulted
+  when a configuration written before it leaves it out. A host's press is
+  queued with `ConferenceRoom::request_go_live` and taken by
+  `drain_go_live_requests`; what going live means is the caller's.
+
+### Changed
+
+- **forge-conference (breaking, 0.21.0):** `DtmfCommand` has `GoLive`,
+  and `HostCommands`, `HostCommandsConfig` and `DtmfCommandBindings` have
+  `go_live`.
+
+## [2026-11-17.2]
+
 **Crate versions:** **forge-conference 0.20.0**.
 
 ### Added

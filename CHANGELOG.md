@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Crate versions:** **forge-mp4 0.2.0**, **forge-conference 0.23.0**.
+
+### Added
+
+- **forge-mp4:** `cmaf::CmafSegmenter`, CMAF segments for HLS (FCP
+  `docs/WEBINARS.md` W6).
+  - It drives an `Mp4Writer` into memory and makes the init segment once
+    (`ftyp`+`moov`).
+  - Then each fragment becomes a segment (`styp`+`moof`+`mdat`, handed
+    back with its sequence, start and duration).
+  - A segment is cut only on a video keyframe at or past the target
+    duration, so each one plays on its own. Audio alone is cut at the
+    target.
+- **forge-conference:** `RecordingSink::request_keyframe`. A recording asks
+  its encoder for a keyframe, for an HLS segmenter cutting every two
+  seconds while the room's interval is ten.
+
+## [2026-11-20]
+
 **Crate versions:** **forge-conference 0.22.0**.
 
 ### Added

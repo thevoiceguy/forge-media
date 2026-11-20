@@ -570,6 +570,18 @@ pub struct RecordingSink {
     /// What the frames are: codec, resolution, rate and bitrate cap.
     pub flavor: Flavor,
     pub frames: mpsc::Receiver<RecordedFrame>,
+    /// Its encoder's keyframe request.
+    keyframe: Arc<AtomicBool>,
+}
+
+impl RecordingSink {
+    /// Ask the encoder for a keyframe: an HLS segmenter cutting at a
+    /// target duration (§11). It comes at the encoder's next frame, but
+    /// never sooner after the last than `keyframe_min_interval`. A flavor
+    /// the recording shares with subscribers sends it to them too.
+    pub fn request_keyframe(&self) {
+        self.keyframe.store(true, Ordering::Release);
+    }
 }
 
 /// A recording as the room holds it.
@@ -2329,7 +2341,7 @@ impl VideoRoom {
         };
 
         self.stop_record(id);
-        self.ensure_encoder(&output, &flavor, &settings)?;
+        let keyframe = self.ensure_encoder(&output, &flavor, &settings)?;
 
         let (tx, rx) = mpsc::channel(req.queue.max(8));
         self.recorders.insert(
@@ -2348,6 +2360,7 @@ impl VideoRoom {
             id: id.to_string(),
             flavor,
             frames: rx,
+            keyframe,
         })
     }
 
@@ -3902,6 +3915,45 @@ mod tests {
         v.iter()
             .map(|(k, h)| (k.clone(), at(l, *h), l.above(at(l, *h))))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_recording_sink_asks_its_encoder_for_a_keyframe() {
+        let audio = Arc::new(
+            crate::ConferenceRoom::new(
+                "rec-key",
+                crate::AudioFormat::pcm_mono(),
+                480,
+                forge_mixer::MixerOptions::default(),
+            )
+            .unwrap(),
+        );
+        let video = audio.enable_video(
+            VideoRoomSettings {
+                codecs: vec![VideoCodec::VP8],
+                ..VideoRoomSettings::default()
+            },
+            &VideoBackend::raw(),
+        );
+        let sink = video
+            .record("rec-1", RecordRequest::new(VideoCodec::VP8))
+            .unwrap();
+        let flag = {
+            let outputs = video.outputs.lock();
+            let enc = outputs
+                .values()
+                .flat_map(|o| o.encoders.values())
+                .next()
+                .expect("the recording's encoder");
+            Arc::clone(&enc.wants_keyframe)
+        };
+        flag.store(false, Ordering::Release);
+        sink.request_keyframe();
+        assert!(
+            flag.load(Ordering::Acquire),
+            "the encoder is asked for a keyframe"
+        );
+        video.stop_record("rec-1");
     }
 
     #[test]

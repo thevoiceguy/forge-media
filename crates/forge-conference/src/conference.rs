@@ -85,6 +85,8 @@ pub struct ConferenceRoom {
     conference_sounds: Arc<RwLock<Option<crate::audio_feedback::ConferenceSounds>>>,
     /// Pending dial-out requests from DTMF (destination strings)
     dial_out_requests: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// Hosts who pressed the go-live key, oldest first.
+    go_live_requests: Arc<parking_lot::Mutex<Vec<String>>>,
     /// Participants who pressed the raise-hand key, oldest first.
     hand_requests: Arc<parking_lot::Mutex<Vec<String>>>,
     /// Flag: host requested end-conference (announcement already played)
@@ -140,6 +142,7 @@ impl ConferenceRoom {
             audio_feedback_player: Arc::new(RwLock::new(None)),
             conference_sounds: Arc::new(RwLock::new(None)),
             dial_out_requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            go_live_requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
             hand_requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
             end_conference_requested: AtomicBool::new(false),
             format,
@@ -369,6 +372,21 @@ impl ConferenceRoom {
     /// Drain pending dial-out requests (called by the conference handler)
     pub fn drain_dial_out_requests(&self) -> Vec<String> {
         std::mem::take(&mut *self.dial_out_requests.lock())
+    }
+
+    /// Queue a host's press of the go-live key (called from the DTMF
+    /// handler in the audio bridge). What going live means is the
+    /// caller's: the room only passes the press on.
+    pub fn request_go_live(&self, participant_id: &str) {
+        self.go_live_requests
+            .lock()
+            .push(participant_id.to_string());
+    }
+
+    /// Drain pending go-live presses, oldest first (called by the
+    /// conference handler).
+    pub fn drain_go_live_requests(&self) -> Vec<String> {
+        std::mem::take(&mut *self.go_live_requests.lock())
     }
 
     /// Queue a participant's press of the raise-hand key (called from the
@@ -1767,6 +1785,12 @@ impl ConferenceRoom {
                 let participants = self.participants();
                 for pid in participants {
                     self.remove_participant(&pid)?;
+                }
+            }
+
+            DtmfCommand::GoLive => {
+                if role == ParticipantRole::Host {
+                    self.request_go_live(participant_id);
                 }
             }
 

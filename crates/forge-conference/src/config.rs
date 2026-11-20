@@ -357,6 +357,13 @@ pub struct HostCommandsConfig {
     pub end_conference: String,
     /// Dial-out: invite external participant (prefix, then digits, then #)
     pub dial_out: String,
+    /// Take a webinar live
+    #[serde(default = "default_go_live")]
+    pub go_live: String,
+}
+
+fn default_go_live() -> String {
+    "*95".to_string()
 }
 
 impl Default for HostCommandsConfig {
@@ -369,6 +376,7 @@ impl Default for HostCommandsConfig {
             unlock: "*94".to_string(),
             end_conference: "*00".to_string(),
             dial_out: "*5".to_string(),
+            go_live: default_go_live(),
         }
     }
 }

@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-11-20.2] — workspace release
+
+**Crate versions:** no crate changes its version; all are as tagged
+v2026.11.20.1. bcg729-sys 0.1.0, forge-ai-stream 0.2.0, forge-api 0.5.0,
+forge-bfcp 0.1.1, forge-bwe 0.1.1, forge-codecs 0.2.0, forge-conference
+0.23.0, forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine 0.8.1, forge-ha
+0.3.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection 0.2.0, forge-kernel
+0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.6.0, forge-mp4 0.2.0,
+forge-recorder 0.2.1, forge-resampler 0.2.0, forge-rtp 0.8.1, forge-sdp
+0.2.3, forge-siprec 0.2.2, forge-storage 0.2.0, forge-transcoder 0.2.0,
+forge-transcription 0.2.0, forge-vad 0.2.0, forge-video 0.6.1,
+forge-video-codecs 0.1.4, forge-video-hw 0.3.0, forge-webm 0.1.0,
+forge-webrtc 0.11.0. Embeds siphon-rs **v2026.11.10** (was v2026.10.22.2).
+
+The first release to embed a siphon-rs newer than v2026.10.22.2: every tag
+from v2026.10.24 to v2026.11.20.1 kept that one while siphon-rs cut five
+releases. A consumer pinning both repos (siphon-ai, FCP) can now pin
+siphon-rs v2026.11.10 on its SIP path and get the same revision inside
+forge's.
+
+**Breaking changes:** none in forge-media. siphon-rs has two between the
+embedded tags, for a consumer that moves its own siphon-rs pin with this
+release:
+
+- **sip-transaction 0.8.0** (siphon-rs v2026.10.31): the transaction manager
+  sends TCP with no stream through the application's `TransportDispatcher`
+  rather than its own pool, so a dispatcher must send those itself
+  (siphon-rs #158).
+- **sip-transaction 0.9.0** (siphon-rs v2026.11.06): `TransactionTimer` gains
+  `ReliableProvisional` and `ReliableProvisionalTimeout`; a `match` over it
+  needs the two arms.
+
+Nothing in this workspace uses `sip-transaction` directly.
+
+### Changed
+
+- **siphon-rs v2026.11.10** embedded: the submodule and forge-sdp's `sip-sdp`
+  git tag move together from v2026.10.22.2. `sip-sdp` (0.3.2), `sip-core`
+  and `sip-parse` are identical between the two tags, so forge-sdp is not
+  bumped. `forge-sip-server` builds against sip-uas 0.5.2, whose responses
+  have their Via stamped by `sip_transaction::stamp_via` (no change on the
+  wire). The five siphon-rs releases between the tags (v2026.10.31,
+  v2026.11.05, v2026.11.06, v2026.11.07, v2026.11.10) change
+  sip-transaction (0.9.1), sip-uac (0.9.6), sip-uas and siphond: reliable
+  provisionals (RFC 3262) in the INVITE server transaction, a stateless
+  final, Via stamping on every response, early dialogs and hung-up dialogs
+  leaving the `DialogManager`, and in-dialog requests down an existing flow
+  (RFC 5626).
+
+### Fixed
+
+- **Cargo.lock** names forge-conference 0.23.0 and forge-mp4 0.2.0. The
+  lockfile tagged v2026.11.20.1 still had 0.22.0 and 0.1.1, so a `--locked`
+  build of that tag is refused.
+
+## [2026-11-20.1]
+
 **Crate versions:** **forge-mp4 0.2.0**, **forge-conference 0.23.0**.
 
 ### Added

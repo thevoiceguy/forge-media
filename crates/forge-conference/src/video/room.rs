@@ -2505,6 +2505,14 @@ impl VideoRoom {
         let _ = self.events.send(ev);
     }
 
+    /// Change when the passthrough fast path applies (§5.6), from the next
+    /// tick. A webinar's edge (FCP's `docs/WEBINARS.md` §2.7) turns it on:
+    /// its audience's view is the stage's composite alone, already labelled,
+    /// so it is forwarded rather than drawn and encoded again.
+    pub fn set_passthrough(&self, mode: PassthroughMode) {
+        self.settings.write().passthrough = mode;
+    }
+
     /// Change the target frame rate (applied at the next tick).
     pub fn set_fps(&self, fps: u32) {
         let fps = fps.clamp(1, 60);

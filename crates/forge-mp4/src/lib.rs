@@ -44,6 +44,7 @@
 //! ```
 
 mod boxes;
+pub mod cmaf;
 pub mod codec;
 pub mod read;
 

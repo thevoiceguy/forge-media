@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**Crate versions:** **forge-conference 0.22.0**.
+
+### Added
+
+- **forge-conference:** `VideoRoom::set_passthrough` changes when the
+  passthrough fast path applies from the next tick. A webinar's edge (FCP
+  `docs/WEBINARS.md` §2.7) turns it on once it knows it is one: its
+  audience's view is the stage's composite alone, already labelled, so the
+  edge forwards it rather than drawing and encoding it again.
+
+## [2026-11-19]
+
 **Crate versions:** **forge-conference 0.21.0**.
 
 ### Added

@@ -977,6 +977,69 @@ async fn a_peer_s_claim_decides_who_is_speaking_behind_its_tile() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passthrough_turned_on_forwards_an_audience_its_one_source_and_off_composes_again() {
+    // A webinar's edge: the room starts composing, and once the node
+    // knows it is an edge it turns passthrough on, so its audience is sent
+    // the stage's composite (here Alice's camera) as it arrives.
+    let audio = audio_room("edge-passthrough");
+    audio.add_participant("alice", true).unwrap();
+    audio.add_participant("bob", false).unwrap();
+    let video = audio.enable_video(
+        VideoRoomSettings {
+            passthrough: PassthroughMode::Off,
+            ..settings(320, 180, 30)
+        },
+        &VideoBackend::raw(),
+    );
+    video.add_source("alice", VideoCodec::VP8, "").unwrap();
+    video.set_audience("bob", true);
+    let mut sub = video
+        .subscribe("bob", subscribe(VideoCodec::VP8, None))
+        .unwrap();
+    let mut alice = Camera::new(0xA11CE, 320, 180);
+    let feeder = {
+        let video = Arc::clone(&video);
+        tokio::spawn(async move {
+            loop {
+                for p in alice.frame(200) {
+                    video.push_rtp("alice", p);
+                }
+                tokio::time::sleep(Duration::from_millis(33)).await;
+            }
+        })
+    };
+    let forwarding = |video: &forge_conference::video::VideoRoom| {
+        video
+            .participant("bob")
+            .and_then(|p| p.subscription)
+            .and_then(|s| s.forwarding)
+    };
+    let mut screen = Screen::new();
+    wait_for_composite(&mut sub.packets, &mut screen, |f| f.luma(160, 90) == 200).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        forwarding(&video).is_none(),
+        "off: the audience is composed for"
+    );
+
+    video.set_passthrough(PassthroughMode::On);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while forwarding(&video).is_none() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(forwarding(&video), Some(SourceKey::camera("alice")));
+    assert_eq!(video.settings().passthrough, PassthroughMode::On);
+
+    video.set_passthrough(PassthroughMode::Off);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while forwarding(&video).is_some() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(forwarding(&video).is_none(), "off again: composed again");
+    feeder.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_single_source_is_forwarded_and_a_second_one_brings_the_composite_back() {
     // The passthrough fast path (§5.6): while a subscriber's view is one
     // source it can already decode, it is sent that source's own packets

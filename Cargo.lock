@@ -1896,7 +1896,7 @@ dependencies = [
  "forge-ice",
  "forge-rtp",
  "rand 0.10.2",
- "sip-sdp 0.3.2 (git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.10)",
+ "sip-sdp 0.3.2 (git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21)",
  "smol_str",
  "thiserror 2.0.21",
 ]
@@ -2350,7 +2350,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "hep-rs"
 version = "0.0.1"
-source = "git+https://github.com/thevoiceguy/hep-rs?branch=main#f50337898b2b74ebd32ce85598926d0deb79e5fe"
+source = "git+https://github.com/feryx-io/hep-rs?branch=main#4281b753bbd2efe20ed2b18f3361be4a282486a2"
 dependencies = [
  "bytes",
  "thiserror 2.0.21",
@@ -4640,7 +4640,7 @@ dependencies = [
 [[package]]
 name = "sip-sdp"
 version = "0.3.2"
-source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.10#a1945026e0d7cfde07b28c9f01cb0ce39a53d283"
+source = "git+https://github.com/feryx-io/siphon-rs?tag=v2026.11.21#7ed902c7603b35808def5e855adac4673a2ed775"
 dependencies = [
  "nom 7.1.3",
  "smol_str",

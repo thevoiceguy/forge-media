@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Embeds siphon-rs v2026.11.21 (was v2026.11.10), and every dependency is taken from the `feryx-io` organization.** The submodule and `forge-sdp`'s `sip-sdp` git tag move together. siphon-rs v2026.11.21 changes no crate: it is v2026.11.10 with its manifests naming `github.com/feryx-io/siphon-rs` and `github.com/feryx-io/hep-rs`. `forge-hep` takes `hep-rs` from the same `feryx-io/hep-rs` URL, so the workspace still builds one copy of it; the lock moves `hep-rs` from `f503378` to `4281b75`, which differs only in that repository's `Cargo.toml` metadata. No forge crate changes its version. A consumer pinning both repos should pin siphon-rs v2026.11.21 and name the `feryx-io` URLs for `sip-*` and `hep-rs` in one change: Cargo treats the old and new URLs as different sources.
+
 ## [2026-11-20.2] — workspace release
 
 **Crate versions:** no crate changes its version; all are as tagged

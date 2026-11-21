@@ -13,6 +13,7 @@
 #![allow(clippy::wrong_self_convention)]
 #![allow(clippy::should_implement_trait)]
 
+pub mod aac;
 pub mod g711;
 #[cfg(feature = "g722")]
 pub mod g722;

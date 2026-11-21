@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **forge-rtmp 0.1.0** (new crate): FLV and RTMP for pushing a stream to a
+  live service (YouTube Live, Twitch, any RTMP ingest), for FCP's webinars
+  (`docs/WEBINARS.md` W7.1).
+  - `flv`: the AVC and AAC sequence headers, H.264 pictures as
+    length-prefixed NAL units (`AvcTagger` takes Annex B, waits for a
+    keyframe, and sends the sequence header again when the parameter sets
+    change), AAC access units, `onMetaData`, and FLV files written and read.
+  - `amf0` and `chunk`: AMF0 values, and the chunk stream with every header
+    type, extended timestamps and the peer's chunk size.
+  - `Publisher`: `rtmp://` or `rtmps://` (rustls on ring, the platform's
+    roots unless `Options::tls` says otherwise), the simple handshake,
+    `connect`, `releaseStream`, `FCPublish`, `createStream` and `publish`,
+    with `NetStream.Publish.Start` waited for and a refusal returned as
+    `RtmpError::Refused` naming its code. While publishing it answers
+    pings, acknowledges its window, and a closed connection or an error
+    status fails the next send. `close` unpublishes.
+  - `server::StandInServer`: a stand-in ingest for tests that keeps every
+    tag a publisher sent and can refuse a key, cut its connections and
+    serve RTMPS.
+  - Tested against the stand-in, and against ffmpeg's RTMP server with
+    x264 video and the AAC encoder below (`tests/ffmpeg.rs`, run with
+    `FORGE_RTMP_FFMPEG=1`). ffprobe reads back H.264 and AAC, and every
+    picture decodes.
+- **forge-codecs 0.3.0**: `aac::AacEncoder` behind a new `aac` feature (off
+  by default). It is AAC-LC from the Fraunhofer FDK library, which
+  `fdk-aac-sys` builds from source. It gives raw access units of 1024
+  samples, with afterburner on, and their `AudioSpecificConfig`.
+  `aac::audio_specific_config` gives the same configuration without an
+  encoder.
+  - **Licensing:** the FDK licence permits redistribution but grants no
+    patent rights. AAC's patent licensing is the deployer's matter, as
+    H.264's is with OpenH264 built from source.
+
 ## [2026-11-21] — workspace release
 
 **Crate versions:** forge-api **0.6.0** (was 0.5.0); every other crate is as

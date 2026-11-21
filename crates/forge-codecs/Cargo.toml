@@ -1,6 +1,6 @@
 [package]
 name = "forge-codecs"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -23,6 +23,10 @@ ezk-g722 = { version = "0.1", optional = true }
 # G.729 codec (optional, requires libbcg729)
 bcg729-sys = { path = "../bcg729-sys", optional = true }
 
+# AAC-LC (optional): the FDK library built from source by fdk-aac-sys.
+# Its licence grants no patent rights; see src/aac.rs.
+fdk-aac-sys = { version = "0.5", optional = true }
+
 # Logging
 tracing = { workspace = true }
 
@@ -31,6 +35,9 @@ default = []
 opus = ["audiopus"]
 g722 = ["ezk-g722"]  # Uses ezk-g722 crate (based on SpanDSP/libg722)
 g729 = ["bcg729-sys"]  # FFI bindings to bcg729 library
+aac = ["fdk-aac-sys"]  # AAC-LC encoder, FDK AAC built from source
 all-codecs = ["opus", "g722", "g729"]
 
 [dev-dependencies]
+# The FDK decoder, to hear what the encoder made.
+fdk-aac = "0.8"

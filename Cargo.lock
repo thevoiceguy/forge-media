@@ -482,7 +482,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 2.0.119",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -1454,6 +1454,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "fdk-aac"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7bb67e142688083cb9afb63f2424203fc98c4e7afb494bf912b60b55513b177e"
+dependencies = [
+ "fdk-aac-sys",
+]
+
+[[package]]
+name = "fdk-aac-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24516d2611506d5cb1833555adc75f6baf9fe2706b9c13e6fc33a6b22c51ca83"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "ffmpeg-sys-next"
 version = "9.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1610,11 +1628,13 @@ dependencies = [
 
 [[package]]
 name = "forge-codecs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "audiopus",
  "bcg729-sys",
  "ezk-g722",
+ "fdk-aac",
+ "fdk-aac-sys",
  "lazy_static",
  "thiserror 2.0.21",
  "tracing",
@@ -1857,6 +1877,21 @@ name = "forge-resampler"
 version = "0.2.0"
 dependencies = [
  "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "forge-rtmp"
+version = "0.1.0"
+dependencies = [
+ "forge-codecs",
+ "forge-mp4",
+ "rcgen",
+ "rustls",
+ "rustls-native-certs",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 
@@ -4157,6 +4192,7 @@ dependencies = [
  "aws-lc-rs",
  "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",

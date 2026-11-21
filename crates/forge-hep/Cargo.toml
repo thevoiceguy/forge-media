@@ -14,9 +14,9 @@ once_cell  = { workspace = true }
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
-# hep-rs lives in its own repo (github.com/thevoiceguy/hep-rs).
+# hep-rs lives in its own repo (github.com/feryx-io/hep-rs).
 # Git-pinned for the dev cycle.
-hep-rs = { git = "https://github.com/thevoiceguy/hep-rs", branch = "main" }
+hep-rs = { git = "https://github.com/feryx-io/hep-rs", branch = "main" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }

@@ -7,9 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2026-11-21] — workspace release
+
+**Crate versions:** forge-api **0.6.0** (was 0.5.0); every other crate is as
+tagged v2026.11.20.2. bcg729-sys 0.1.0, forge-ai-stream 0.2.0, forge-api
+0.6.0, forge-bfcp 0.1.1, forge-bwe 0.1.1, forge-codecs 0.2.0,
+forge-conference 0.23.0, forge-core 0.2.2, forge-dtmf 0.2.1, forge-engine
+0.8.1, forge-ha 0.3.0, forge-hep 0.0.1, forge-ice 0.3.0, forge-injection
+0.2.0, forge-kernel 0.2.0, forge-kernel-ebpf 0.2.0, forge-mixer 0.6.0,
+forge-mp4 0.2.0, forge-recorder 0.2.1, forge-resampler 0.2.0, forge-rtp
+0.8.1, forge-sdp 0.2.3, forge-siprec 0.2.2, forge-storage 0.2.0,
+forge-transcoder 0.2.0, forge-transcription 0.2.0, forge-vad 0.2.0,
+forge-video 0.6.1, forge-video-codecs 0.1.4, forge-video-hw 0.3.0,
+forge-webm 0.1.0, forge-webrtc 0.11.0. Embeds siphon-rs **v2026.11.21** (was
+v2026.11.10).
+
+The first release from the repository's new home,
+`github.com/feryx-io/forge-media`. No forge source file changes: the release
+moves URLs and dependencies.
+
+**Breaking changes:**
+
+- **forge-api 0.6.0**: `forge_api::middleware::cors_layer` and
+  `tracing_layer` return tower-http **0.7** types (`CorsLayer`,
+  `TraceLayer`), up from 0.6
+  ([#230](https://github.com/feryx-io/forge-media/pull/230)). A consumer that
+  names those types, or stacks its own tower-http layers beside them, must
+  move to tower-http 0.7 too. One that only hands the layers to an axum
+  `Router` compiles unchanged.
+- **Git URLs**: Cargo treats `github.com/thevoiceguy/...` and
+  `github.com/feryx-io/...` as different sources even though the old URLs
+  redirect. A consumer should switch its `forge-*`, `sip-*` and `hep-rs` git
+  dependencies to the `feryx-io` URLs in the change that takes this tag, or
+  it builds two copies of the shared crates.
+
 ### Changed
 
-- **Embeds siphon-rs v2026.11.21 (was v2026.11.10), and every dependency is taken from the `feryx-io` organization.** The submodule and `forge-sdp`'s `sip-sdp` git tag move together. siphon-rs v2026.11.21 changes no crate: it is v2026.11.10 with its manifests naming `github.com/feryx-io/siphon-rs` and `github.com/feryx-io/hep-rs`. `forge-hep` takes `hep-rs` from the same `feryx-io/hep-rs` URL, so the workspace still builds one copy of it; the lock moves `hep-rs` from `f503378` to `4281b75`, which differs only in that repository's `Cargo.toml` metadata. No forge crate changes its version. A consumer pinning both repos should pin siphon-rs v2026.11.21 and name the `feryx-io` URLs for `sip-*` and `hep-rs` in one change: Cargo treats the old and new URLs as different sources.
+- **The repository moved to the `feryx-io` organization.** Repository
+  metadata, the submodule URL, docs and changelog links follow it
+  ([#226](https://github.com/feryx-io/forge-media/pull/226)).
+- **Embeds siphon-rs v2026.11.21 (was v2026.11.10), and every dependency is taken from the `feryx-io` organization.** The submodule and `forge-sdp`'s `sip-sdp` git tag move together. siphon-rs v2026.11.21 changes no crate: it is v2026.11.10 with its manifests naming `github.com/feryx-io/siphon-rs` and `github.com/feryx-io/hep-rs`. `forge-hep` takes `hep-rs` from the same `feryx-io/hep-rs` URL, so the workspace still builds one copy of it; the lock moves `hep-rs` from `f503378` to `4281b75`, which differs only in that repository's `Cargo.toml` metadata. No forge crate changes its version. A consumer pinning both repos should pin siphon-rs v2026.11.21 and name the `feryx-io` URLs for `sip-*` and `hep-rs` in one change: Cargo treats the old and new URLs as different sources. ([#231](https://github.com/feryx-io/forge-media/pull/231))
+- **Dependencies**: tower-http 0.6.8 → 0.7.1 (forge-api, above); bitflags
+  2.11.1 → 2.13.2, toml 1.1.8 → 1.2.1, uuid 1.29.2 → 1.29.3, bytes 1.12.1 →
+  1.12.2, zeroize 1.9.1 → 1.9.2 and clap 4.6.7 → 4.6.8 in `Cargo.lock`
+  ([#227](https://github.com/feryx-io/forge-media/pull/227) to
+  [#230](https://github.com/feryx-io/forge-media/pull/230)).
 
 ## [2026-11-20.2] — workspace release
 

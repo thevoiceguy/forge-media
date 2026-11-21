@@ -1,3 +1,3 @@
 [submodule "external/siphon-rs"]
 	path = external/siphon-rs
-	url = https://github.com/thevoiceguy/siphon-rs.git
+	url = https://github.com/feryx-io/siphon-rs.git

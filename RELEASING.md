@@ -1,7 +1,7 @@
 # Releasing forge-media
 
 This document records the release conventions for the forge-media workspace,
-adopted from [siphon-rs's model](https://github.com/thevoiceguy/siphon-rs/blob/main/RELEASING.md).
+adopted from [siphon-rs's model](https://github.com/feryx-io/siphon-rs/blob/main/RELEASING.md).
 The first release cut under these rules was `v2026.08.24`.
 
 ## The two-layer versioning model
@@ -149,7 +149,7 @@ Consumers depend on forge-media via git dependencies and should pin tags, not
 revs or branches:
 
 ```toml
-forge-engine = { git = "https://github.com/thevoiceguy/forge-media", tag = "v2026.08.24", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
+forge-engine = { git = "https://github.com/feryx-io/forge-media", tag = "v2026.08.24", default-features = false, features = ["g722", "dtls", "opus", "neural-vad"] }
 ```
 
 - **Pin every `forge-*` crate in a consumer to the same tag.** Different refs
